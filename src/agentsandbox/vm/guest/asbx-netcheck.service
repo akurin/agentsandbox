@@ -1,0 +1,15 @@
+[Unit]
+Description=agentsandbox fail-closed verification
+After=wg-quick@wg0.service nftables.service
+Wants=wg-quick@wg0.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/asbx-netcheck
+# If the guest is ever not fail-closed, it stops being a guest - unless the
+# session was started with --netcheck warn, which keeps it up for debugging.
+ExecStopPost=/bin/sh -c 'test "$EXIT_STATUS" = "0" || ! grep -q halt /etc/asbx/netcheck-mode || systemctl poweroff'
+
+[Install]
+WantedBy=multi-user.target

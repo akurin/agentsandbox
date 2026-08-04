@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "capabilities": [
+    {
+      "provider": "github",
+      "env": "GITHUB_TOKEN",
+      "hosts": ["api.github.com"],
+      "methods": ["GET", "HEAD"],
+      "paths": ["/repos/*", "/user"],
+      "secret": "keychain:asbx-github:me",
+      "label": "read repos"
+    },
+    {
+      "provider": "openai",
+      "env": "OPENAI_API_KEY",
+      "hosts": ["api.openai.com"],
+      "methods": ["POST"],
+      "paths": ["/*"],
+      "secret": "keychain:asbx-openai:default",
+      "max_requests": 50
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=agentsandbox preview forwarder for vsock port %i
+After=network.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/asbx-forward %i
+Restart=on-failure
+RestartSec=2
+# The forwarder only ever touches loopback and the vsock device.
+User=nobody
+Group=nogroup
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_VSOCK AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

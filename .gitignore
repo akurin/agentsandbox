@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Local Claude Code settings (per-machine permissions, not project config)
+.claude/settings.local.json
+
+# Never commit session state: it holds WireGuard private keys, CA private keys
+# and broker tokens. It lives in ~/.agentsandbox by default, but a stray
+# ASBX_HOME or a test run can drop one here.
+.agentsandbox/
+sessions/
+envs/
+disks/
+*.raw
+*.qcow2
