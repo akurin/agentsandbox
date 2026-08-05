@@ -285,6 +285,34 @@ def build_dhcp_reply(request: dict, reply_type: int, guest_ip: str, gateway_ip: 
     return header + options
 
 
+#: Frames to pull off a socket per select() wakeup. The guest's NIC is a
+#: datagram socket, and one recvfrom per poll could not keep up with a
+#: container image pull - our receive buffer filled, vfkit could not write into
+#: it, and the guest's virtio transmit queue timed out for good.
+_DRAIN_BATCH = 256
+
+#: 4 MiB each way. The default for a unix datagram socket on macOS is small
+#: enough that a few hundred milliseconds of sustained traffic overruns it, and
+#: an overrun does not slow the guest down - it wedges its NIC.
+_SOCKET_BUFFER = 4 * 1024 * 1024
+
+
+def _widen_buffers(sock: socket.socket) -> None:
+    """Ask for a large send and receive buffer, taking what we are given.
+
+    The kernel silently caps this, so the request is best-effort by design -
+    but going from the default to whatever the cap is buys the headroom that
+    keeps backpressure away from the guest's virtio queue.
+    """
+    for option in (socket.SO_RCVBUF, socket.SO_SNDBUF):
+        for size in (_SOCKET_BUFFER, 1024 * 1024, 256 * 1024):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, option, size)
+                break
+            except OSError:
+                continue
+
+
 @dataclass
 class GatewayStats:
     frames_in: int = 0
@@ -293,6 +321,10 @@ class GatewayStats:
     returned: int = 0
     dhcp_replies: int = 0
     dropped: int = 0
+    #: Frames the host could not hand to the guest, almost always ENOBUFS.
+    #: Counted rather than logged at debug: this is the number that says the
+    #: relay is falling behind, and it used to be invisible.
+    send_failed: int = 0
     drops_by_reason: dict[str, int] = field(default_factory=dict)
 
     def drop(self, reason: str) -> None:
@@ -498,10 +530,12 @@ class GatewayRunner:
         finally:
             os.umask(old_umask)
         self._net.settimeout(0.5)
+        _widen_buffers(self._net)
 
         self._wg = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._wg.bind(("127.0.0.1", 0))
         self._wg.settimeout(0.5)
+        _widen_buffers(self._wg)
         self._running = True
 
     def run_in_thread(self) -> "threading.Thread":
@@ -555,31 +589,42 @@ class GatewayRunner:
             self._publish_stats()
 
     def _on_guest_frame(self) -> None:
+        """Drain the guest's queue, not one frame per wakeup.
+
+        One recvfrom per select() meant a round trip through poll for every
+        single frame. Under a container image pull that is not fast enough:
+        our receive buffer fills, vfkit cannot write into it, and the guest's
+        virtio transmit queue wedges - NETDEV WATCHDOG, and the interface never
+        recovers. Draining in a batch keeps the buffer empty enough that the
+        backpressure never reaches the guest's NIC.
+        """
         if self._net is None:
             return
-        try:
-            raw, peer = self._net.recvfrom(65535)
-        except (BlockingIOError, socket.timeout):
-            return
-        except OSError:
-            return  # socket closed during teardown
-        if peer:
-            self._peer = peer
-        for out in self.gateway.handle_frame(raw):
-            self._send_to_guest(out)
+        for _ in range(_DRAIN_BATCH):
+            try:
+                raw, peer = self._net.recvfrom(65535)
+            except (BlockingIOError, socket.timeout):
+                return
+            except OSError:
+                return  # socket closed during teardown
+            if peer:
+                self._peer = peer
+            for out in self.gateway.handle_frame(raw):
+                self._send_to_guest(out)
 
     def _on_wireguard_reply(self) -> None:
         if self._wg is None:
             return
-        try:
-            payload, _ = self._wg.recvfrom(65535)
-        except (BlockingIOError, socket.timeout):
-            return
-        except OSError:
-            return  # socket closed during teardown
-        frame = self.gateway.build_return_frame(payload)
-        if frame:
-            self._send_to_guest(frame)
+        for _ in range(_DRAIN_BATCH):
+            try:
+                payload, _ = self._wg.recvfrom(65535)
+            except (BlockingIOError, socket.timeout):
+                return
+            except OSError:
+                return  # socket closed during teardown
+            frame = self.gateway.build_return_frame(payload)
+            if frame:
+                self._send_to_guest(frame)
 
     def _send_to_guest(self, frame: bytes) -> None:
         if self._net is None or self._peer is None:
@@ -587,6 +632,11 @@ class GatewayRunner:
         try:
             self._net.sendto(frame, self._peer)
         except OSError as exc:
+            # ENOBUFS here means the guest is not draining fast enough, or we
+            # are not. Either way it is a lost frame, and counting it is the
+            # difference between "the network went strange" and a number in
+            # `asbx diag` that says how far behind the relay is.
+            self.gateway.stats.send_failed += 1
             logger.debug("failed to send frame to guest: %s", exc)
 
     def _publish_stats(self, force: bool = False) -> None:
@@ -613,6 +663,7 @@ class GatewayRunner:
             "returned": stats.returned,
             "dhcp_replies": stats.dhcp_replies,
             "dropped": stats.dropped,
+            "send_failed": stats.send_failed,
             "drops_by_reason": dict(stats.drops_by_reason),
         }
 

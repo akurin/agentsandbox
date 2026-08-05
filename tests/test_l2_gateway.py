@@ -328,3 +328,48 @@ def test_gateway_stats_are_published_for_other_processes(tmp_path):
     published = json.loads(stats.read_text())
     assert published["dropped"] == 1
     assert published["drops_by_reason"]["not_wireguard_endpoint"] == 1
+
+
+def test_the_socket_buffers_are_widened():
+    """A container image pull wedged the guest's NIC.
+
+    The guest transmits into a unix datagram socket we drain from Python. With
+    the default buffer, sustained traffic overran it, vfkit could no longer
+    write, and virtio_net reported NETDEV WATCHDOG transmit timeouts that never
+    cleared - the interface was dead for the rest of the session.
+    """
+    import socket as _socket
+
+    from agentsandbox.vm.gateway import _widen_buffers
+
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    try:
+        before = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_RCVBUF)
+        _widen_buffers(sock)
+        after = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_RCVBUF)
+        assert after >= before
+    finally:
+        sock.close()
+
+
+def test_frames_the_host_cannot_deliver_are_counted():
+    """It used to be a debug log nobody reads. The count is what says the
+    relay is falling behind, before the guest's NIC gives up."""
+    from agentsandbox.vm.gateway import GatewayStats
+
+    stats = GatewayStats()
+    assert stats.send_failed == 0
+    stats.send_failed += 1
+    assert stats.send_failed == 1
+
+
+def test_a_wakeup_drains_more_than_one_frame():
+    """One recvfrom per select() is a poll round trip per frame, which is not
+    fast enough to keep our receive buffer empty under load."""
+    import inspect
+
+    from agentsandbox.vm.gateway import GatewayRunner, _DRAIN_BATCH
+
+    assert _DRAIN_BATCH > 1
+    assert "_DRAIN_BATCH" in inspect.getsource(GatewayRunner._on_guest_frame)
+    assert "_DRAIN_BATCH" in inspect.getsource(GatewayRunner._on_wireguard_reply)
