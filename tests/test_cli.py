@@ -397,6 +397,17 @@ def test_web_attach_and_detach_are_reachable():
         args = cli.build_parser().parse_args(["web", action])
         assert args.func is cli.cmd_web
         assert args.action == action
+        assert args.name is None
+
+
+def test_web_takes_a_trailing_box_name_like_shell_and_stop_take_a_leading_one():
+    """`asbx --session neo web attach` read backwards from every other box
+    command. `name` trails `action` here only because `action` already owns
+    the first positional and its choices are fixed - a free-text `name` ahead
+    of it would swallow `attach`/`detach` on the no-name-given form."""
+    args = cli.build_parser().parse_args(["web", "attach", "neo"])
+    assert args.action == "attach"
+    assert args.name == "neo"
 
 
 def test_mitmweb_is_not_a_start_time_flag():

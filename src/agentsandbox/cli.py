@@ -1485,7 +1485,10 @@ def cmd_web(args: argparse.Namespace) -> int:
     """
     from .broker.server import read_token, send_command
 
-    session = _resolve_session(args.session)
+    # The positional wins over --session: it is the one that reads like every
+    # other box command (`asbx stop neo`), and --session is what is left for
+    # someone who still wants to name a session id directly.
+    session = _resolve_session(args.name or args.session)
     attach = args.action == "attach"
     try:
         reply = send_command(
@@ -1712,6 +1715,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     web = sub.add_parser("web", help="attach or detach the mitmweb traffic inspector")
     web.add_argument("action", choices=["attach", "detach"])
+    # Trailing, not leading like `shell`/`stop`'s `name`: `action` already
+    # occupies the first positional and its choices are fixed, so there is no
+    # ambiguity in putting a free-text box name after it - putting it before
+    # would (`asbx web neo attach` needing `name` first) make plain
+    # `asbx web attach` bind "attach" to `name` and leave `action` unfilled.
+    web.add_argument("name", nargs="?", help="box (default: the only one running)")
     web.add_argument(
         "--port", type=int, default=0, metavar="N", help="fixed port (default: random)"
     )
