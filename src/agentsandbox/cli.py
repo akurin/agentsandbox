@@ -971,6 +971,7 @@ def cmd_diag(args: argparse.Namespace) -> int:
         # mounted, they are simply absent, and their absence is the symptom
         # rather than the explanation. The console says why.
         ("guest console", paths.vm / "console.log"),
+        ("cloud-init", paths.guest_logs / "cloud-init.log"),
         ("guest bootstrap", paths.guest_logs / "bootstrap.log"),
         ("guest netcheck", paths.guest_logs / "netcheck.log"),
         ("mitmproxy", paths.root / "mitmproxy.log"),

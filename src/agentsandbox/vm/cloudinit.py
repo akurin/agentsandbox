@@ -156,11 +156,18 @@ def render_user_data(
         # hardcodes one. Readable by `agent` alone: `builder` (which runs
         # package installs) cannot see them. These are placeholders, not
         # credentials - they are worthless outside this session.
+        # Root-owned here, chowned to agent by the bootstrap. It must NOT name
+        # `agent` as the owner at this point: cloud-init runs write_files before
+        # users_groups, so the account does not exist yet, the chown fails, and
+        # cc_write_files aborts - silently skipping every entry after this one.
+        # That took out the sshd unit and the session CA, which are written
+        # later in this list, and cost a long time to find because the symptom
+        # was a guest with no https and no ssh rather than a file that failed
+        # to write.
         _write_file(
             "/run/asbx/capabilities.env",
             "".join(f"export {name}={value}\n" for name, value in sorted((capability_env or {}).items())),
             "0600",
-            "agent:agent",
         ),
         # Sourced by interactive shells so `echo $GITHUB_TOKEN` just works.
         _write_file(
@@ -222,6 +229,11 @@ def render_user_data(
     runcmd = [
         ["systemctl", "daemon-reload"],
         ["systemctl", "restart", "serial-getty@hvc0.service"],
+        # cloud-init's own log, where the host can read it. Anything that goes
+        # wrong in write_files or the earlier stages is recorded there and
+        # nowhere else the host can reach - the guest may power itself off
+        # before anyone can log in and look.
+        ["sh", "-c", "mkdir -p /var/log/asbx && cp /var/log/cloud-init.log /var/log/asbx/cloud-init.log 2>/dev/null || true"],
     ]
     # The operator's way in comes up *before* the bootstrap, not after.
     #

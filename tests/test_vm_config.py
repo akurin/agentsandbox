@@ -303,7 +303,10 @@ def test_capability_placeholders_are_delivered_as_guest_environment(session, dri
     payload = json.loads(rendered.split("\n", 1)[1])
     entry = next(f for f in payload["write_files"] if f["path"] == "/run/asbx/capabilities.env")
     assert entry["permissions"] == "0600"
-    assert entry["owner"] == "agent:agent"
+    # Root-owned at write time and chowned by the bootstrap: cloud-init runs
+    # write_files before users_groups, so naming `agent` here fails the chown
+    # and aborts the module, skipping every later entry.
+    assert entry["owner"] == "root:root"
 
     # And an interactive shell picks them up.
     assert "capabilities.env" in files["/etc/profile.d/asbx-capabilities.sh"]
@@ -447,3 +450,27 @@ def test_ssh_starts_before_the_bootstrap(session, driver):
     ssh_at = next(i for i, c in enumerate(flat) if "asbx-sshd-vsock" in c)
     boot_at = next(i for i, c in enumerate(flat) if "asbx-bootstrap" in c)
     assert ssh_at < boot_at
+
+
+def test_no_write_files_entry_names_a_user_cloud_init_has_not_created_yet(session, driver):
+    """cloud-init runs write_files before users_groups.
+
+    An entry owned by `agent` fails its chown, and cc_write_files aborts -
+    silently skipping every entry after it. That took out the sshd unit and
+    the session CA, and presented as a guest with no https and no ssh rather
+    than as a file that failed to write. Ownership belongs in the bootstrap,
+    which runs once the accounts exist.
+    """
+    payload = json.loads(user_data(session).split("\n", 1)[1])
+    offenders = [
+        f["path"] for f in payload["write_files"] if f.get("owner", "root:root") != "root:root"
+    ]
+    assert not offenders
+
+
+def test_cloud_init_log_is_copied_where_the_host_can_read_it(session, driver):
+    """A guest that fails early powers itself off, taking its journal with it.
+    cloud-init's log is the only record of what happened before runcmd."""
+    payload = json.loads(user_data(session).split("\n", 1)[1])
+    flat = " ".join(" ".join(c) if isinstance(c, list) else str(c) for c in payload["runcmd"])
+    assert "cloud-init.log" in flat and "/var/log/asbx" in flat
