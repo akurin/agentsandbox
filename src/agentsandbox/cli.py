@@ -1,6 +1,6 @@
 """``asbx`` - the operator's interface to the sandbox.
 
-Everything a human does happens here, on the trusted side: starting sessions,
+Everything a human does happens here, on the trusted side: starting boxes,
 minting capabilities, answering approval prompts, reviewing and applying the
 agent's changes.  The guest has no channel to any of it.
 """
@@ -37,28 +37,29 @@ EXIT_DENIED = 3
 # helpers
 
 
-def _resolve_session(session_arg: str | None) -> Session:
+def _resolve_session(target: str | None) -> Session:
     """Which session a command acts on.
 
-    ``session_arg`` may be a session id, or - since that is what everyone
-    actually names things by - a box name. A box can have at most one running
-    session (`cmd_box_start` already refuses to start a second), so naming the
-    box is never ambiguous where naming the session id would have been; it
-    just fails with "not running" instead of guessing.
+    ``target`` may be a box name (what every `box`, `cap` and `secret`
+    subcommand actually passes - the bare positional on `box` commands,
+    ``--box`` everywhere else) or a session id. A box can have at most one
+    running session (`cmd_box_start` already refuses to start a second), so
+    naming the box is never ambiguous where naming the session id would have
+    been; it just fails with "not running" instead of guessing.
 
     A bare session id still works, and still has to for a stopped session:
-    `asbx --session ID diag` is the only way to look at one after its box has
-    moved on to a different run.
+    `asbx box diag ID` is the only way to look at one after its box has moved
+    on to a different run.
     """
     from .box import Box
     from .errors import SessionError
 
-    if session_arg and Box.exists(session_arg):
-        session = _running_session_for(session_arg)
+    if target and Box.exists(target):
+        session = _running_session_for(target)
         if session is None:
-            raise SessionError(f"{session_arg} is not running; start it with `asbx start`")
+            raise SessionError(f"{target} is not running; start it with `asbx box start`")
         return session
-    return Session.load(resolve_session_id(session_arg))
+    return Session.load(resolve_session_id(target))
 
 
 def _print(data) -> None:
@@ -118,7 +119,7 @@ def _parse_secret_ref(value: str) -> SecretRef:
 
 
 # ---------------------------------------------------------------------------
-# session
+# box lifecycle
 
 
 def cmd_box_start(args: argparse.Namespace) -> int:
@@ -132,8 +133,8 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     # attachment is invalid", which says nothing about the real cause.
     if existing := _running_session_for(box.name):
         print(f"!! {box.name} is already running (session {existing.session_id})", file=sys.stderr)
-        print(f"   asbx shell {box.name}    open a shell in it", file=sys.stderr)
-        print(f"   asbx stop {box.name}     stop it first to restart", file=sys.stderr)
+        print(f"   asbx box shell {box.name}    open a shell in it", file=sys.stderr)
+        print(f"   asbx box stop {box.name}     stop it first to restart", file=sys.stderr)
         return EXIT_USAGE
 
     # Before the fork, so a missing image is an error in this terminal rather
@@ -141,8 +142,8 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     # about. An image can be deleted after the box was created.
     if not resolve_image(box.image).exists():
         print(f"!! {box.name} needs image {box.image!r}, which is not built", file=sys.stderr)
-        print("   asbx image ls                       what is built", file=sys.stderr)
-        print(f"   asbx set {box.name} --image NAME    point it at one of those", file=sys.stderr)
+        print("   asbx image ls                           what is built", file=sys.stderr)
+        print(f"   asbx box set {box.name} --image NAME    point it at one of those", file=sys.stderr)
         return EXIT_USAGE
 
     if args.fresh and box.has_disk:
@@ -182,7 +183,7 @@ def cmd_box_start(args: argparse.Namespace) -> int:
             return EXIT_DENIED
 
     # Detached, like `podman start`: the supervisor outlives this terminal, so
-    # `asbx shell` from anywhere keeps working and closing the window is safe.
+    # `asbx box shell` from anywhere keeps working and closing the window is safe.
     args.console = False
     from .daemon import StartupFailed, spawn_supervisor
 
@@ -284,8 +285,8 @@ def _report_started(box) -> None:
 
     for port, info in session.forwards.items():
         print(f"  forward    guest:{port} -> {info['url']}")
-    print(f"\n  asbx shell {box.name}      open a shell (as many as you like)")
-    print(f"  asbx stop {box.name}       shut it down")
+    print(f"\n  asbx box shell {box.name}      open a shell (as many as you like)")
+    print(f"  asbx box stop {box.name}       shut it down")
 
 
 def _ssh_vm_config(box, session) -> dict:
@@ -370,11 +371,11 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         disk_override=box.disk_path if box else None,
         efi_override=box.efi_store if box else None,
         persist_disk=bool(box),
-        # The box names its own base image, so `asbx reset` rebuilds
+        # The box names its own base image, so `asbx box reset` rebuilds
         # from what it was created with rather than from whatever was built
         # on this host most recently.
         golden_image=resolve_image(box.image) if box else default_golden_image(),
-        # sshd only exists in a box, where `asbx shell` needs it. A
+        # sshd only exists in a box, where `asbx box shell` needs it. A
         # one-off session keeps the smaller surface of console-only access.
         **_ssh_vm_config(box, session),
     )
@@ -420,7 +421,7 @@ def _await_ssh_channel(manager, timeout: float = 20.0) -> None:
     never coming.
 
     Not waiting for *sshd* - that is inside the guest and takes as long as the
-    boot takes. `asbx shell` retries for it.
+    boot takes. `asbx box shell` retries for it.
     """
     driver = getattr(manager, "vm", None)
     socket_path = getattr(getattr(driver, "vm", None), "ssh_socket", None)
@@ -451,11 +452,11 @@ def _supervise(manager: SessionManager, *, purge: bool = False) -> None:
     signal.signal(signal.SIGTERM, _handle)
     signal.signal(signal.SIGINT, _handle)
 
-    # Do not report ready until the box is usable. `asbx start` prints
-    # "asbx shell NAME" as the next step, and vfkit creates that socket a
+    # Do not report ready until the box is usable. `asbx box start` prints
+    # "asbx box shell NAME" as the next step, and vfkit creates that socket a
     # moment after the guest process exists - so signalling here immediately
-    # meant `asbx start box && asbx shell box` lost a race with its own
-    # advice, and failed claiming the session predated ssh support.
+    # meant `asbx box start neo && asbx box shell neo` lost a race with its
+    # own advice, and failed claiming the session predated ssh support.
     _await_ssh_channel(manager)
 
     # Detached: tell the CLI it can return. Foreground: a no-op.
@@ -473,7 +474,7 @@ def _supervise(manager: SessionManager, *, purge: bool = False) -> None:
                     for line in tail.splitlines()[-15:]:
                         print(f"  {line}", file=sys.stderr)
                     print(f"\nFull log: {log}", file=sys.stderr)
-                    print(f"More context: asbx --session {session.session_id} diag", file=sys.stderr)
+                    print(f"More context: asbx box diag {session.session_id}", file=sys.stderr)
                 break
             time.sleep(0.5)
     finally:
@@ -481,7 +482,10 @@ def _supervise(manager: SessionManager, *, purge: bool = False) -> None:
         print(f"session {session.session_id} stopped")
 
 
-def cmd_session_list(args: argparse.Namespace) -> int:
+def cmd_system_sessions(args: argparse.Namespace) -> int:
+    """Every session that ever ran, across every box (`asbx box ls` lists box
+    *definitions*; this lists individual *runs* - several stopped sessions can
+    belong to the same box name over its history)."""
     sessions = list_sessions()
     if not sessions:
         print("no sessions")
@@ -500,8 +504,8 @@ def cmd_session_list(args: argparse.Namespace) -> int:
         print(
             f"\n{stopped} stopped session(s) kept for audit - they cannot be resumed "
             "(the\nguest disk is deleted and every capability revoked on teardown). "
-            "Read one with\n`asbx --session <id> diag`, or clear them with "
-            "`asbx session prune`."
+            "Read one with\n`asbx box diag <id>`, or clear them with "
+            "`asbx system prune`."
         )
     return 0
 
@@ -516,8 +520,9 @@ def _human_age(seconds: int) -> str:
     return f"{seconds // 86400}d"
 
 
-def cmd_session_prune(args: argparse.Namespace) -> int:
-    """Delete stopped sessions' leftover state."""
+def cmd_system_prune(args: argparse.Namespace) -> int:
+    """Delete stopped sessions' leftover state. Not box-scoped: sweeps every
+    box's history at once, including a box since renamed or deleted."""
     from .session import purge_session_dir
 
     victims = [s for s in list_sessions() if s.state == STATE_STOPPED]
@@ -541,25 +546,10 @@ def cmd_session_prune(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_session_status(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.session)
+def cmd_box_status(args: argparse.Namespace) -> int:
+    session = _resolve_session(args.name)
     manager = SessionManager(session)
     _print(manager.status())
-    return 0
-
-
-def cmd_session_stop(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.session)
-    if session.supervisor_pid and session.supervisor_pid != os.getpid():
-        # Let the process that owns the sockets do the teardown.
-        try:
-            os.kill(session.supervisor_pid, signal.SIGTERM)
-            print(f"asked session {session.session_id} to stop")
-            return 0
-        except ProcessLookupError:
-            pass  # supervisor is gone; clean up from here
-    stop_session_by_id(session.session_id, purge=args.purge)
-    print(f"session {session.session_id} stopped")
     return 0
 
 
@@ -568,7 +558,7 @@ def cmd_session_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_cap_issue(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.session)
+    session = _resolve_session(args.box)
     manager = SessionManager(session)
     spec = CapabilitySpec(
         provider=args.provider,
@@ -624,7 +614,7 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
         "    ]\n"
         "  }\n"
     )
-    print("  asbx create my-project --profile my-project && asbx start my-project")
+    print("  asbx box create my-project --profile my-project && asbx box start my-project")
     return 0
 
 
@@ -642,7 +632,7 @@ def cmd_cap_try(args: argparse.Namespace) -> int:
     """
     import urllib.parse
 
-    session = _resolve_session(args.session)
+    session = _resolve_session(args.box)
     parsed = urllib.parse.urlsplit(args.url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         print(f"!! not a usable url: {args.url}", file=sys.stderr)
@@ -697,13 +687,13 @@ def cmd_cap_try(args: argparse.Namespace) -> int:
 
 
 def cmd_cap_list(args: argparse.Namespace) -> int:
-    """List capabilities. Without a session, list every session's.
+    """List capabilities. Without --box, list every session's.
 
     Listing is read-only and unambiguous across sessions, so it does not need
     a target the way issuing and revoking do.
     """
-    if args.session or os.environ.get("ASBX_SESSION"):
-        sessions = [_resolve_session(args.session)]
+    if args.box or os.environ.get("ASBX_SESSION"):
+        sessions = [_resolve_session(args.box)]
     else:
         sessions = list_sessions()
         if not sessions:
@@ -726,7 +716,7 @@ def cmd_cap_list(args: argparse.Namespace) -> int:
 
 
 def cmd_cap_renew(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.session)
+    session = _resolve_session(args.box)
     store = CapabilityStore(session.paths.capabilities, session.session_id)
     cap = store.renew(args.cap_id, ttl_seconds=args.ttl)
     if cap is None:
@@ -743,7 +733,7 @@ def cmd_cap_renew(args: argparse.Namespace) -> int:
 
 
 def cmd_cap_revoke(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.session)
+    session = _resolve_session(args.box)
     store = CapabilityStore(session.paths.capabilities, session.session_id)
     if args.cap_id == "all":
         count = store.revoke_all()
@@ -789,7 +779,7 @@ def cmd_secret_refresh(args: argparse.Namespace) -> int:
     from .broker.server import send_command
     from .box import Box
 
-    session = _resolve_session(args.session)
+    session = _resolve_session(args.box)
     if session.box_name and Box.exists(session.box_name):
         box = Box.load(session.box_name)
         if box.profile:
@@ -809,7 +799,7 @@ def cmd_secret_refresh(args: argparse.Namespace) -> int:
 
 
 def cmd_approvals(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.session)
+    session = _resolve_session(args.name)
     gate = FileApprovalGate(session.paths.root / "approvals")
     pending = gate.list_pending()
     if not pending:
@@ -823,7 +813,7 @@ def cmd_approvals(args: argparse.Namespace) -> int:
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.session)
+    session = _resolve_session(args.name)
     gate = FileApprovalGate(session.paths.root / "approvals")
     gate.answer(args.request_id, approved=not args.deny, note=args.note)
     print(f"{'denied' if args.deny else 'approved'} {args.request_id}")
@@ -836,7 +826,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.session)
+    session = _resolve_session(args.name)
     log = AuditLog(session.paths.audit_log, session.session_id)
     records = log.read()
     for record in records[-args.tail :]:
@@ -921,7 +911,7 @@ def _diag_session(explicit: str | None) -> Session:
 
     Ordinary commands refuse when nothing is running, which is right: acting on
     a dead session is a mistake. Diagnosis is the opposite case. A guest that
-    fails hard powers itself off, so by the time anyone runs `asbx diag` there
+    fails hard powers itself off, so by the time anyone runs `asbx box diag` there
     is nothing running *by definition* - and refusing to look is refusing
     exactly when the logs matter most.
     """
@@ -948,7 +938,7 @@ def cmd_diag(args: argparse.Namespace) -> int:
     Ordered by how often it is the answer: what the gateway saw, what the guest
     said on its way up, then the proxy and the audit trail.
     """
-    session = _diag_session(args.session)
+    session = _diag_session(args.name)
     paths = session.paths
     manager = SessionManager(session)
     status = manager.status()
@@ -1025,7 +1015,7 @@ def cmd_diag(args: argparse.Namespace) -> int:
 
 
 def cmd_box_create(args: argparse.Namespace) -> int:
-    """Define a box. Nothing boots until `asbx start`."""
+    """Define a box. Nothing boots until `asbx box start`."""
     from .box import Box, validate_name
 
     name = validate_name(args.name)
@@ -1071,7 +1061,7 @@ def cmd_box_create(args: argparse.Namespace) -> int:
         print(f"  profile  {box.profile}")
     print(f"  image    {box.image}")
     print(f"  disk     {box.disk_path} (built on first start)")
-    print(f"\nStart it with:  asbx start {name}")
+    print(f"\nStart it with:  asbx box start {name}")
     return 0
 
 
@@ -1119,13 +1109,13 @@ def cmd_box_set(args: argparse.Namespace) -> int:
         # Changing the image does not re-clone: the box already has a
         # disk, and start boots that. Saying nothing here would leave the
         # config claiming a distro the guest is not running.
-        print(f"\n  the disk still holds the old image; `asbx reset {box.name}` re-clones")
+        print(f"\n  the disk still holds the old image; `asbx box reset {box.name}` re-clones")
 
     if _running_session_for(box.name):
         # Silently writing config a running guest is not using would look like
         # it worked and change nothing.
         print(f"\n{box.name} is running with the old settings. To apply:")
-        print(f"  asbx stop {box.name} && asbx start {box.name}")
+        print(f"  asbx box stop {box.name} && asbx box start {box.name}")
     return 0
 
 
@@ -1135,7 +1125,7 @@ def cmd_box_list(args: argparse.Namespace) -> int:
 
     boxes = list_boxes()
     if not boxes:
-        print("no boxes; create one with `asbx create NAME --project DIR`")
+        print("no boxes; create one with `asbx box create NAME --project DIR`")
         return 0
 
     running = {s.box_name for s in list_sessions() if s.state == STATE_RUNNING and s.box_name}
@@ -1178,7 +1168,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
         running = [s for s in running if s.box_name == box.name]
     if not running:
         target = args.name or "anything"
-        print(f"!! {target} is not running; start it with `asbx start`", file=sys.stderr)
+        print(f"!! {target} is not running; start it with `asbx box start`", file=sys.stderr)
         return EXIT_USAGE
     if len(running) > 1:
         listed = "\n".join(f"  {s.box_name or s.session_id}" for s in running)
@@ -1189,12 +1179,13 @@ def cmd_shell(args: argparse.Namespace) -> int:
     box = box or Box.load(session.box_name)
     identity = SshIdentity(box.ssh_dir)
     if not identity.exists:
-        print(f"!! {box.name} has no ssh keys; recreate it with `asbx create`", file=sys.stderr)
+        print(f"!! {box.name} has no ssh keys; recreate it with `asbx box create`", file=sys.stderr)
         return EXIT_USAGE
 
-    # vfkit creates this a moment after the guest process appears. `asbx start`
-    # now waits for it before reporting ready, so it is normally already here;
-    # the poll covers a box started by other means, and a slow host.
+    # vfkit creates this a moment after the guest process appears. `asbx box
+    # start` now waits for it before reporting ready, so it is normally
+    # already here; the poll covers a box started by other means, and a slow
+    # host.
     socket_path = session.paths.run / "ssh.sock"
     deadline = time.monotonic() + 20.0
     while not socket_path.exists() and time.monotonic() < deadline:
@@ -1202,7 +1193,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
     if not socket_path.exists():
         print(
             f"!! {box.name} has no ssh channel at {socket_path} after 20s.\n"
-            f"   The guest may have failed early - `asbx diag` shows its console.",
+            f"   The guest may have failed early - `asbx box diag` shows its console.",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -1215,7 +1206,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
     if not _wait_for_sshd(socket_path, guest_logs=session.paths.guest_logs):
         print(
             f"!! {box.name} is up but its sshd never answered.\n"
-            f"   `asbx diag` shows the guest console; the bootstrap may have failed.",
+            f"   `asbx box diag` shows the guest console; the bootstrap may have failed.",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -1256,7 +1247,7 @@ def _wait_for_sshd(
     ssh's own ConnectionAttempts does not help here: with a ProxyCommand, a
     proxy that exits is a fatal error rather than a retryable connect failure,
     so ssh gives up on the first try. And it gives up quietly - the symptom is
-    `asbx shell` returning instantly with no output at all.
+    `asbx box shell` returning instantly with no output at all.
 
     Connecting to the socket proves nothing either: vfkit accepts, then fails
     to dial the guest's vsock port and closes. Only the banner means sshd is
@@ -1391,9 +1382,9 @@ def cmd_box_stop(args: argparse.Namespace) -> int:
             pass
         else:
             # Wait for it to actually be gone. Returning at the signal made
-            # `asbx stop box && asbx start box` - the obvious way to restart -
-            # race the shutdown and fail with "already running", pointing at a
-            # session that was in the middle of exiting.
+            # `asbx box stop neo && asbx box start neo` - the obvious way to
+            # restart - race the shutdown and fail with "already running",
+            # pointing at a session that was in the middle of exiting.
             if args.wait and _await_supervisor_exit(session.supervisor_pid):
                 print(f"stopped {name}")
                 return 0
@@ -1468,7 +1459,7 @@ def _mitmweb_warning() -> str:
         "   Nothing else in this sandbox stores traffic, and the UI is readable\n"
         "   by anything on this Mac. It is capped at 2000 flows, but detach it\n"
         "   when you are done rather than leaving it attached for a long run:\n"
-        "       asbx web detach"
+        "       asbx box web detach"
     )
 
 
@@ -1483,10 +1474,7 @@ def cmd_web(args: argparse.Namespace) -> int:
     """
     from .broker.server import read_token, send_command
 
-    # The positional wins over --session: it is the one that reads like every
-    # other box command (`asbx stop neo`), and --session is what is left for
-    # someone who still wants to name a session id directly.
-    session = _resolve_session(args.name or args.session)
+    session = _resolve_session(args.name)
     attach = args.action == "attach"
     try:
         reply = send_command(
@@ -1540,7 +1528,7 @@ def cmd_image_rm(args: argparse.Namespace) -> int:
     users = [box.name for box in list_boxes() if box.image == args.name]
     if users and not args.force:
         print(f"!! {args.name} is in use by: {', '.join(sorted(users))}", file=sys.stderr)
-        print("   point them elsewhere with `asbx set NAME --image ...`, or --force", file=sys.stderr)
+        print("   point them elsewhere with `asbx box set NAME --image ...`, or --force", file=sys.stderr)
         return EXIT_USAGE
 
     used = raw.stat().st_blocks * 512
@@ -1641,14 +1629,31 @@ def _hide_suppressed_from_usage(sub) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """``asbx <resource> <action> [args]``, with one rule for naming a box:
+
+    A command that *is* a box action (``box start``, ``box shell``, ...) takes
+    the box name as its own bare positional - it is the thing being acted on.
+    A command that acts on something *belonging to* a box (a capability, a
+    secret) takes ``--box`` instead, because its positional slot already
+    belongs to that other thing (a capability id, a request id). The check is
+    mechanical: is the word right after ``asbx`` literally ``box``? Positional.
+    Anything else? ``--box``.
+    """
     parser = argparse.ArgumentParser(prog="asbx", description=__doc__)
-    parser.add_argument(
-        "--session", help="box name or session id (default: the only session running)"
-    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # -- boxes (the everyday path) -----------------------------------
-    create = sub.add_parser("create", help="define a box (does not boot it)")
+    # `--box` is shared, not redefined per leaf, so the six places that need
+    # it (cap's four verbs, secret refresh) cannot drift out of sync with each
+    # other. `add_help=False`: without it every leaf would register a second
+    # `-h`, and argparse refuses that outright.
+    box_flag = argparse.ArgumentParser(add_help=False)
+    box_flag.add_argument("--box", help="which box (default: the only one running)")
+
+    # -- box (the resource this tool exists for) -----------------------------
+    box_parser = sub.add_parser("box", help="create, boot, and manage sandboxed VMs")
+    box_sub = box_parser.add_subparsers(dest="subcommand", required=True)
+
+    create = box_sub.add_parser("create", help="define a box (does not boot it)")
     create.add_argument("name")
     create.add_argument("--project", help="host directory to mount in the guest")
     create.add_argument("--mount-path", help="where it mounts inside (default: same as host)")
@@ -1668,7 +1673,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--force", action="store_true", help="redefine an existing box")
     create.set_defaults(func=cmd_box_create)
 
-    start = sub.add_parser("start", help="boot a box")
+    start = box_sub.add_parser("start", help="boot a box")
     start.add_argument("name")
     start.add_argument("--fresh", action="store_true", help="discard the disk and rebuild it")
     start.add_argument("--forward", action="append", type=_parse_forward, default=[],
@@ -1680,28 +1685,36 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--netcheck", choices=["halt", "warn"], default="halt")
     start.set_defaults(func=cmd_box_start, vm=True, console=False)
 
-    ls = sub.add_parser("ls", help="list boxes")
+    ls = box_sub.add_parser("ls", help="list boxes")
     ls.set_defaults(func=cmd_box_list)
 
-    inspect = sub.add_parser("inspect", help="show a box's configuration")
+    inspect = box_sub.add_parser("inspect", help="show a box's configuration")
     inspect.add_argument("name")
     inspect.set_defaults(func=cmd_box_inspect)
 
-    rm = sub.add_parser("rm", help="delete a box and its disk")
+    status = box_sub.add_parser("status", help="show a box's live session")
+    status.add_argument("name", nargs="?", help="box (default: the only one running)")
+    status.set_defaults(func=cmd_box_status)
+
+    rm = box_sub.add_parser("rm", help="delete a box and its disk")
     rm.add_argument("name")
     rm.add_argument("--keep-disk", action="store_true")
     rm.set_defaults(func=cmd_box_rm)
 
-    shell = sub.add_parser("shell", help="open a shell in a running box")
+    shell = box_sub.add_parser("shell", help="open a shell in a running box")
     shell.add_argument("name", nargs="?", help="box (default: the only running one)")
     shell.add_argument("command", nargs=argparse.REMAINDER, help="run this instead of a shell")
     shell.set_defaults(func=cmd_shell)
 
+    # `asbx box shell` shells out to us as ssh's ProxyCommand: `python -m
+    # agentsandbox.cli vsock-proxy <socket>`, argv and all, so this has to
+    # keep working as a top-level subcommand - moving it under `box` would
+    # silently break every shell without a syntax error to point at why.
     proxy = _hidden_parser(sub, "vsock-proxy")
     proxy.add_argument("socket")
     proxy.set_defaults(func=cmd_vsock_proxy)
 
-    stop_env = sub.add_parser("stop", help="stop a running box")
+    stop_env = box_sub.add_parser("stop", help="stop a running box")
     stop_env.add_argument("name", nargs="?", help="box name (default: the only running one)")
     stop_env.add_argument("--purge", action="store_true", help="also erase the run's audit trail")
     stop_env.add_argument(
@@ -1712,31 +1725,58 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stop_env.set_defaults(func=cmd_box_stop, wait=True)
 
-    prune_top = sub.add_parser("prune", help="delete leftover state from finished runs")
-    prune_top.add_argument("--older-than", type=int, metavar="DAYS")
-    prune_top.add_argument("--dry-run", action="store_true")
-    prune_top.set_defaults(func=cmd_session_prune)
-
-    set_cmd = sub.add_parser("set", help="change a box's cpus or memory")
+    set_cmd = box_sub.add_parser("set", help="change a box's cpus or memory")
     set_cmd.add_argument("name")
     set_cmd.add_argument("--memory", type=int, metavar="MIB", help="guest RAM in MiB")
     set_cmd.add_argument("--cpus", type=int)
-    set_cmd.add_argument("--image", help="base image; takes effect on the next `asbx reset`")
+    set_cmd.add_argument("--image", help="base image; takes effect on the next `asbx box reset`")
     set_cmd.set_defaults(func=cmd_box_set)
 
-    web = sub.add_parser("web", help="attach or detach the mitmweb traffic inspector")
+    reset = box_sub.add_parser("reset", help="discard a box's disk, keeping its config")
+    reset.add_argument("name")
+    reset.set_defaults(func=cmd_box_reset)
+
+    web = box_sub.add_parser("web", help="attach or detach the mitmweb traffic inspector")
     web.add_argument("action", choices=["attach", "detach"])
     # Trailing, not leading like `shell`/`stop`'s `name`: `action` already
     # occupies the first positional and its choices are fixed, so there is no
     # ambiguity in putting a free-text box name after it - putting it before
-    # would (`asbx web neo attach` needing `name` first) make plain
-    # `asbx web attach` bind "attach" to `name` and leave `action` unfilled.
+    # would (`asbx box web neo attach` needing `name` first) make plain
+    # `asbx box web attach` bind "attach" to `name` and leave `action` unfilled.
     web.add_argument("name", nargs="?", help="box (default: the only one running)")
     web.add_argument(
         "--port", type=int, default=0, metavar="N", help="fixed port (default: random)"
     )
     web.set_defaults(func=cmd_web)
 
+    diag = box_sub.add_parser("diag", help="one-shot diagnostics for a misbehaving session")
+    diag.add_argument(
+        "name", nargs="?", help="box or session id (default: the most recent session, even if stopped)"
+    )
+    diag.add_argument("--tail", type=int, default=25, help="lines per log section")
+    diag.set_defaults(func=cmd_diag)
+
+    audit = box_sub.add_parser("audit", help="show a box's session audit log")
+    audit.add_argument("name", nargs="?", help="box (default: the only one running)")
+    audit.add_argument("--tail", type=int, default=50)
+    audit.set_defaults(func=cmd_audit)
+
+    approvals = box_sub.add_parser("approvals", help="list pending approvals")
+    approvals.add_argument("name", nargs="?", help="box (default: the only one running)")
+    approvals.set_defaults(func=cmd_approvals)
+
+    # `request_id` leads and `name` trails, same shape as `web`'s `action`
+    # then `name`: the required, command-specific positional goes first, and
+    # the optional box name fills in after it, so there is nothing for
+    # argparse - or a reader - to disambiguate by position.
+    approve = box_sub.add_parser("approve", help="answer a pending approval")
+    approve.add_argument("request_id")
+    approve.add_argument("name", nargs="?", help="box (default: the only one running)")
+    approve.add_argument("--deny", action="store_true")
+    approve.add_argument("--note", default="")
+    approve.set_defaults(func=cmd_approve)
+
+    # -- image ----------------------------------------------------------------
     image_parser = sub.add_parser("image", help="base images boxes clone from")
     image_sub = image_parser.add_subparsers(dest="subcommand", required=True)
     image_ls = image_sub.add_parser("ls", help="list built images")
@@ -1749,43 +1789,11 @@ def build_parser() -> argparse.ArgumentParser:
     image_gc.add_argument("--dry-run", action="store_true")
     image_gc.set_defaults(func=cmd_image_gc)
 
-    reset = sub.add_parser("reset", help="discard a box's disk, keeping its config")
-    reset.add_argument("name")
-    reset.set_defaults(func=cmd_box_reset)
-
-    # -- session --------------------------------------------------------------
-    # No CLI `session start`. Booting a box (`asbx start <name>`) already
-    # covers everything a running session needs, and an anonymous, boxless,
-    # optionally guest-less (`--no-vm`) session is a real capability but only
-    # ever a programmatic one - `SessionManager.create()` plus `manager.start()`
-    # - for exercising the tunnel and policy layer on their own. It does not
-    # need a CLI front door: nothing here calls it through one, precisely
-    # because `_start_session`'s foreground supervise loop makes it awkward to
-    # drive from a script anyway. `session list/status/prune/stop` remain,
-    # since they inspect and tear down whatever `asbx start` already created -
-    # box-derived sessions included.
-    session_parser = sub.add_parser("session", help="session lifecycle")
-    session_sub = session_parser.add_subparsers(dest="subcommand", required=True)
-
-    session_sub.add_parser("list", help="list sessions").set_defaults(func=cmd_session_list)
-
-    status = session_sub.add_parser("status", help="show one session")
-    status.set_defaults(func=cmd_session_status)
-
-    prune = session_sub.add_parser("prune", help="delete stopped sessions' leftover state")
-    prune.add_argument("--older-than", type=int, metavar="DAYS", help="only those older than N days")
-    prune.add_argument("--dry-run", action="store_true")
-    prune.set_defaults(func=cmd_session_prune)
-
-    stop = session_sub.add_parser("stop", help="tear a session down")
-    stop.add_argument("--purge", action="store_true", help="also erase session state")
-    stop.set_defaults(func=cmd_session_stop)
-
-    # -- capabilities -------------------------------------------------------
+    # -- cap --------------------------------------------------------------
     cap = sub.add_parser("cap", help="capability management")
     cap_sub = cap.add_subparsers(dest="subcommand", required=True)
 
-    issue = cap_sub.add_parser("issue", help="mint a capability placeholder")
+    issue = cap_sub.add_parser("issue", parents=[box_flag], help="mint a capability placeholder")
     issue.add_argument("--provider", required=True, help="e.g. github, openai, aws")
     issue.add_argument("--account", default="", help="which account at that provider")
     issue.add_argument(
@@ -1823,10 +1831,12 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument("--label", default="")
     issue.set_defaults(func=cmd_cap_issue)
 
-    cap_sub.add_parser("list", help="list capabilities").set_defaults(func=cmd_cap_list)
+    cap_sub.add_parser("ls", parents=[box_flag], help="list capabilities").set_defaults(
+        func=cmd_cap_list
+    )
 
     try_cmd = cap_sub.add_parser(
-        "try", help="send one request through the broker, as the guest would"
+        "try", parents=[box_flag], help="send one request through the broker, as the guest would"
     )
     try_cmd.add_argument("capability", help="the cap_v1_... placeholder")
     try_cmd.add_argument("--url", required=True, help="full https URL to request")
@@ -1843,7 +1853,7 @@ def build_parser() -> argparse.ArgumentParser:
     try_cmd.add_argument("--max-body", type=int, default=2000)
     try_cmd.set_defaults(func=cmd_cap_try)
 
-    renew = cap_sub.add_parser("renew", help="extend a capability that ran out")
+    renew = cap_sub.add_parser("renew", parents=[box_flag], help="extend a capability that ran out")
     renew.add_argument("cap_id")
     renew.add_argument(
         "--ttl",
@@ -1853,53 +1863,55 @@ def build_parser() -> argparse.ArgumentParser:
     )
     renew.set_defaults(func=cmd_cap_renew)
 
-    revoke = cap_sub.add_parser("revoke", help="revoke one capability, or 'all'")
+    revoke = cap_sub.add_parser("revoke", parents=[box_flag], help="revoke one capability, or 'all'")
     revoke.add_argument("cap_id")
     revoke.set_defaults(func=cmd_cap_revoke)
 
-    # -- secrets ------------------------------------------------------------
+    # -- secret -----------------------------------------------------------
     secret = sub.add_parser("secret", help="credentials in the macOS keychain")
     secret_sub = secret.add_subparsers(dest="subcommand", required=True)
     secret_refresh = secret_sub.add_parser(
-        "refresh", help="re-read credentials into a running box"
+        "refresh", parents=[box_flag], help="re-read credentials into a running box"
     )
     secret_refresh.set_defaults(func=cmd_secret_refresh)
 
+    # No --box: this writes to the Keychain directly, before any box exists
+    # to name.
     secret_set = secret_sub.add_parser("set", help="store a credential (prompts, never echoes)")
     secret_set.add_argument("--service", required=True)
     secret_set.add_argument("--account", default="")
     secret_set.set_defaults(func=cmd_secret_set)
 
-    # -- approvals ----------------------------------------------------------
-    sub.add_parser("approvals", help="list pending approvals").set_defaults(func=cmd_approvals)
-    approve = sub.add_parser("approve", help="answer a pending approval")
-    approve.add_argument("request_id")
-    approve.add_argument("--deny", action="store_true")
-    approve.add_argument("--note", default="")
-    approve.set_defaults(func=cmd_approve)
-
-
-
-    # -- profiles -----------------------------------------------------------
+    # -- profile ------------------------------------------------------------
+    # No --box either: a profile is a reusable declaration, referenced by
+    # `--profile` at `box create` time - it does not belong to a running box.
     profile = sub.add_parser("profile", help="capability profiles")
     profile_sub = profile.add_subparsers(dest="subcommand", required=True)
-    profile_list = profile_sub.add_parser("list", help="list available profiles")
-    profile_list.set_defaults(func=cmd_profile_list)
+    profile_ls = profile_sub.add_parser("ls", help="list available profiles")
+    profile_ls.set_defaults(func=cmd_profile_list)
     profile_show = profile_sub.add_parser("show", help="show one profile's contents")
     profile_show.add_argument("name")
     profile_show.set_defaults(func=cmd_profile_show)
 
-    # -- misc ---------------------------------------------------------------
-    audit = sub.add_parser("audit", help="show the session audit log")
-    audit.add_argument("--tail", type=int, default=50)
-    audit.set_defaults(func=cmd_audit)
+    # -- system ---------------------------------------------------------------
+    # Host-wide, not scoped to any one box: `doctor` checks the Mac, and
+    # `sessions`/`prune` sweep every session regardless of which box (or none,
+    # for one since deleted) it came from. Neither `box` nor `cap` was ever
+    # really the right home for `prune` - which is why it used to exist under
+    # both, registered twice for the same function.
+    system = sub.add_parser("system", help="host checks and cross-box bookkeeping")
+    system_sub = system.add_subparsers(dest="subcommand", required=True)
+    system_sub.add_parser("doctor", help="check the host prerequisites").set_defaults(
+        func=cmd_doctor
+    )
+    system_sub.add_parser("sessions", help="list every session, across every box").set_defaults(
+        func=cmd_system_sessions
+    )
+    prune = system_sub.add_parser("prune", help="delete stopped sessions' leftover state")
+    prune.add_argument("--older-than", type=int, metavar="DAYS", help="only those older than N days")
+    prune.add_argument("--dry-run", action="store_true")
+    prune.set_defaults(func=cmd_system_prune)
 
-
-    diag = sub.add_parser("diag", help="one-shot diagnostics for a misbehaving session")
-    diag.add_argument("--tail", type=int, default=25, help="lines per log section")
-    diag.set_defaults(func=cmd_diag)
-
-    sub.add_parser("doctor", help="check the host prerequisites").set_defaults(func=cmd_doctor)
     # Spell the usage line from the commands that are actually registered.
     # It used to be a hand-written string, which meant a new subcommand was
     # invisible in `asbx` until someone remembered to edit it in two places -

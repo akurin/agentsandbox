@@ -161,10 +161,10 @@ def test_a_persistent_disk_is_not_reclaimed_from_golden(session, tmp_path):
 
 
 def test_cli_create_inspect_and_rm(project, capsys):
-    assert cli.main(["create", "neo", "--project", str(project), "--profile", "p"]) == 0
+    assert cli.main(["box", "create", "neo", "--project", str(project), "--profile", "p"]) == 0
     assert "created" in capsys.readouterr().out
 
-    assert cli.main(["inspect", "neo"]) == 0
+    assert cli.main(["box", "inspect", "neo"]) == 0
     import json
 
     view = json.loads(capsys.readouterr().out)
@@ -172,35 +172,35 @@ def test_cli_create_inspect_and_rm(project, capsys):
     assert view["project"] == str(project)
     assert view["disk"] == "(not built yet)"
 
-    assert cli.main(["rm", "neo"]) == 0
+    assert cli.main(["box", "rm", "neo"]) == 0
     capsys.readouterr()
     assert list_boxes() == []
 
 
 def test_cli_create_refuses_to_clobber(project, capsys):
-    assert cli.main(["create", "neo", "--project", str(project)]) == 0
+    assert cli.main(["box", "create", "neo", "--project", str(project)]) == 0
     capsys.readouterr()
 
-    assert cli.main(["create", "neo", "--project", str(project)]) == cli.EXIT_USAGE
+    assert cli.main(["box", "create", "neo", "--project", str(project)]) == cli.EXIT_USAGE
     assert "already exists" in capsys.readouterr().err
 
-    assert cli.main(["create", "neo", "--project", str(project), "--force"]) == 0
+    assert cli.main(["box", "create", "neo", "--project", str(project), "--force"]) == 0
 
 
 def test_cli_ls_reports_build_state(project, capsys):
-    cli.main(["create", "neo", "--project", str(project)])
+    cli.main(["box", "create", "neo", "--project", str(project)])
     capsys.readouterr()
 
-    assert cli.main(["ls"]) == 0
+    assert cli.main(["box", "ls"]) == 0
     assert "not built" in capsys.readouterr().out
 
     Box.load("neo").disk_path.write_bytes(b"x")
-    assert cli.main(["ls"]) == 0
+    assert cli.main(["box", "ls"]) == 0
     assert "stopped" in capsys.readouterr().out
 
 
 def test_cli_ls_with_nothing_suggests_create(capsys):
-    assert cli.main(["ls"]) == 0
+    assert cli.main(["box", "ls"]) == 0
     assert "create one" in capsys.readouterr().out
 
 
@@ -391,7 +391,7 @@ def test_starting_an_already_running_box_is_refused(project, capsys, monkeypatch
     from agentsandbox.manager import SessionManager
     from agentsandbox.session import STATE_RUNNING
 
-    cli.main(["create", "neo", "--project", str(project)])
+    cli.main(["box", "create", "neo", "--project", str(project)])
     capsys.readouterr()
 
     manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
@@ -399,10 +399,10 @@ def test_starting_an_already_running_box_is_refused(project, capsys, monkeypatch
     manager.session.supervisor_pid = os.getpid()  # alive
     manager.session.save()
 
-    assert cli.main(["start", "neo"]) == cli.EXIT_USAGE
+    assert cli.main(["box", "start", "neo"]) == cli.EXIT_USAGE
     err = capsys.readouterr().err
     assert "already running" in err
-    assert "asbx shell neo" in err
+    assert "asbx box shell neo" in err
 
 
 def test_a_crashed_supervisor_does_not_block_the_box(project, capsys):
@@ -411,7 +411,7 @@ def test_a_crashed_supervisor_does_not_block_the_box(project, capsys):
     from agentsandbox.manager import SessionManager
     from agentsandbox.session import STATE_RUNNING, Session
 
-    cli.main(["create", "neo", "--project", str(project)])
+    cli.main(["box", "create", "neo", "--project", str(project)])
     capsys.readouterr()
 
     manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
@@ -426,7 +426,7 @@ def test_a_crashed_supervisor_does_not_block_the_box(project, capsys):
 
 
 def test_resizing_memory_does_not_touch_the_disk():
-    """The obvious worry about `asbx set --memory` is losing the box.
+    """The obvious worry about `asbx box set --memory` is losing the box.
 
     cpus and memory are vfkit boot arguments; the disk is a separate file, so
     the two cannot interact.

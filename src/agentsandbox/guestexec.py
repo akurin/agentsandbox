@@ -24,8 +24,9 @@ class GuestResult:
     """What a guest command did. ``reached`` is the interesting one."""
 
     #: False means we never got as far as running it - no box, no keys, no
-    #: ssh socket. That is a normal state (`asbx session start` has no sshd),
-    #: not a failure, and callers are expected to carry on without it.
+    #: ssh socket. That is a normal state (a boxless session, only ever
+    #: reachable through `SessionManager.create()`, has no sshd), not a
+    #: failure, and callers are expected to carry on without it.
     reached: bool
     returncode: int = -1
     stdout: str = ""

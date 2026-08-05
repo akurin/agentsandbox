@@ -77,8 +77,9 @@ class Session:
     vm_pid: int = 0
     mitm_pid: int = 0
     broker_pid: int = 0
-    #: The foreground `asbx session start` process; `asbx session stop` signals
-    #: it so teardown runs in the process that owns the sockets and threads.
+    #: The supervisor process - `asbx box start`'s detached child, or the CLI
+    #: itself in `--attach` mode; `asbx box stop` signals it so teardown runs
+    #: in the process that owns the sockets and threads.
     supervisor_pid: int = 0
     vm_driver: str = "vfkit"
 
@@ -225,16 +226,16 @@ def resolve_session_id(explicit: str | None = None) -> str:
             f"  {s.session_id}  {s.label or s.project_path or '(no label)'}" for s in running
         )
         raise SessionError(
-            f"{len(running)} sessions are running - name one with --session:\n{listed}"
+            f"{len(running)} sessions are running - name the box:\n{listed}"
         )
 
     stopped = list_sessions()
     if stopped:
         raise SessionError(
             f"no session is running ({len(stopped)} stopped). "
-            "Use --session <id> to inspect one, or `asbx session list`."
+            "Name a box or session id explicitly, or find one with `asbx system sessions`."
         )
-    raise SessionError("no sessions exist; start one with `asbx session start`")
+    raise SessionError("no sessions exist; start one with `asbx box start`")
 
 
 def purge_session_dir(session_id: str) -> None:

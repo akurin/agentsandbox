@@ -33,7 +33,7 @@ Example (``~/.config/asbx/profiles/oss-contributor.json``)::
 
 Then::
 
-    asbx session start --profile oss-contributor
+    asbx box create neo --profile oss-contributor && asbx box start neo
 
 Issues all three capabilities in one command.  Only the placeholder strings
 are shown to the guest; the real credentials live in Keychain and are fetched

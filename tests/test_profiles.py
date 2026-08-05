@@ -61,7 +61,7 @@ def test_list_profiles_includes_builtin_example():
 
 def test_cli_profile_list(capsys):
     from agentsandbox import cli
-    assert cli.main(["profile", "list"]) == 0
+    assert cli.main(["profile", "ls"]) == 0
     out = capsys.readouterr().out
     assert "example" in out
 

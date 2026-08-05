@@ -450,8 +450,8 @@ class SessionManager:
         """Expose guest ports at random localhost URLs.
 
         Ports have to be declared before the guest boots: vfkit attaches vsock
-        devices at start-up and cannot hot-plug them, so ``asbx session start
-        --preview 3000`` is the only place this can happen.
+        devices at start-up and cannot hot-plug them, so ``asbx box start
+        --forward 3000`` is the only place this can happen.
         """
         if not ports:
             return {}
@@ -542,7 +542,7 @@ class SessionManager:
     def status(self) -> dict:
         """Status, whether or not this process is the one running the session.
 
-        ``asbx session status`` usually runs in a second terminal, where there
+        ``asbx box status`` usually runs in a second terminal, where there
         are no live process handles - so liveness falls back to the recorded
         pids rather than reporting everything as stopped.
         """
@@ -667,7 +667,7 @@ def _terminate(pid: int, timeout: float = 5.0) -> None:
 
 
 def stop_session_by_id(session_id: str, *, purge: bool = False) -> None:
-    """Used by ``asbx session stop`` when the manager is in another process."""
+    """Used by ``asbx box stop`` when the manager is in another process."""
     session = Session.load(session_id)
     manager = SessionManager(session)
     manager.stop(purge=purge)

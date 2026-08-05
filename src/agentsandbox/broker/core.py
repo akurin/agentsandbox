@@ -245,8 +245,8 @@ class BrokerCore:
         if not flag or cap is None:
             return ""
         return (
-            f"on the host: asbx --session {self.session_id} "
-            f"cap renew {cap.cap_id} {flag} <seconds>"
+            f"on the host: asbx cap renew {cap.cap_id} {flag} <seconds> "
+            f"--box {self.session_id}"
         )
 
     # -- steps --------------------------------------------------------------

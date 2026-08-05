@@ -790,5 +790,5 @@ def test_the_suggested_remedy_is_a_command_that_actually_parses(session, store, 
 
     args = build_parser().parse_args(shlex.split(command)[1:])
     assert args.cap_id == cap.cap_id
-    assert args.session == session.session_id
+    assert args.box == session.session_id
     assert args.ttl == 600

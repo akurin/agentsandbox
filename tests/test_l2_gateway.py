@@ -314,7 +314,7 @@ def test_dhcp_to_a_port_that_is_not_dhcp_is_still_dropped(gateway, relayed):
 
 
 def test_gateway_stats_are_published_for_other_processes(tmp_path):
-    """`asbx session status` runs in a second terminal and must still see them."""
+    """`asbx box status` runs in a second terminal and must still see them."""
     import json
 
     from agentsandbox.vm.gateway import GatewayRunner

@@ -43,28 +43,28 @@ def test_hidden_commands_stay_out_of_help_entirely():
     assert "vsock-proxy" not in parser.format_help()
 
 
-def test_session_has_no_start_subcommand():
-    """`asbx start <box>` is what every real workflow uses. An anonymous,
-    boxless session is still a real capability - `SessionManager.create()`
-    plus `manager.start()`, which is how the test suite exercises it - but it
-    has no CLI front door: `asbx session start` sitting next to `asbx start`
-    read as a typo of it rather than a different thing, and nothing here ever
-    called it through the CLI anyway."""
+def test_session_is_no_longer_a_command():
+    """`asbx box start <box>` is what every real workflow uses, and everything
+    `session` used to cover is redistributed: `box status`, `system sessions`,
+    `system prune`. `session stop` had no case left it did not already share
+    with `box stop`, once every session came from a box, so it was dropped
+    rather than moved. There is no CLI front door left for a boxless session -
+    `SessionManager.create()` plus `manager.start()` still works, and is how
+    the test suite exercises it - `session start` never had a real caller
+    through the CLI at all."""
     parser = cli.build_parser()
-    session_sub = next(
-        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
-    ).choices["session"]
-    action = next(a for a in session_sub._actions if isinstance(a, argparse._SubParsersAction))
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
 
-    assert "start" not in action.choices
+    assert "session" not in sub.choices
     assert not hasattr(cli, "cmd_session_start")
+    assert not hasattr(cli, "cmd_session_stop")
 
     with pytest.raises(SystemExit):
         parser.parse_args(["session", "start"])
 
 
 def test_set_is_reachable_and_wired_up():
-    args = cli.build_parser().parse_args(["set", "neo", "--memory", "8192"])
+    args = cli.build_parser().parse_args(["box", "set", "neo", "--memory", "8192"])
     assert args.func is cli.cmd_box_set
     assert args.name == "neo"
     assert args.memory == 8192
@@ -112,7 +112,7 @@ def test_an_environment_records_the_image_it_was_created_with():
     from agentsandbox.box import Box
 
     _build_image("ubuntu-24.04", "ubuntu")
-    assert cli.main(["create", "on-ubuntu", "--image", "ubuntu-24.04"]) == 0
+    assert cli.main(["box", "create", "on-ubuntu", "--image", "ubuntu-24.04"]) == 0
     assert Box.load("on-ubuntu").image == "ubuntu-24.04"
 
     # Building another image later must not move it.
@@ -124,15 +124,15 @@ def test_two_environments_can_run_different_images():
     from agentsandbox.box import Box
 
     _build_image("ubuntu-24.04", "ubuntu")
-    assert cli.main(["create", "box-deb"]) == 0
-    assert cli.main(["create", "box-ubu", "--image", "ubuntu-24.04"]) == 0
+    assert cli.main(["box", "create", "box-deb"]) == 0
+    assert cli.main(["box", "create", "box-ubu", "--image", "ubuntu-24.04"]) == 0
     assert Box.load("box-deb").image == "debian-13"
     assert Box.load("box-ubu").image == "ubuntu-24.04"
 
 
 def test_creating_on_an_image_that_does_not_exist_is_refused():
     """Otherwise it looks fine until the first start, which fails in vfkit."""
-    assert cli.main(["create", "doomed", "--image", "no-such-image"]) == cli.EXIT_USAGE
+    assert cli.main(["box", "create", "doomed", "--image", "no-such-image"]) == cli.EXIT_USAGE
     from agentsandbox.box import Box
 
     assert not Box.exists("doomed")
@@ -170,9 +170,9 @@ def test_diag_collects_the_guest_console():
 
 
 def test_start_waits_for_the_ssh_channel_before_reporting_ready():
-    """`asbx start box && asbx shell box` must not lose a race with its own
-    advice. start prints "asbx shell NAME" as the next step, so it has to be
-    true by the time it prints it."""
+    """`asbx box start neo && asbx box shell neo` must not lose a race with
+    its own advice. start prints "asbx box shell NAME" as the next step, so
+    it has to be true by the time it prints it."""
     import inspect
 
     source = inspect.getsource(cli._supervise)
@@ -207,7 +207,7 @@ def test_shell_waits_for_the_sshd_banner_not_just_the_socket():
     dial the guest's vsock port and closes. Only the banner means sshd is
     listening - and ssh's own ConnectionAttempts cannot cover the gap, because
     with a ProxyCommand a proxy that exits is fatal rather than retryable.
-    That is why `asbx shell` returned instantly with no output at all."""
+    That is why `asbx box shell` returned instantly with no output at all."""
     import inspect
 
     source = inspect.getsource(cli._wait_for_sshd)
@@ -361,7 +361,7 @@ def test_a_half_written_bootstrap_log_is_not_ready(tmp_path):
 
 
 def test_stop_waits_for_the_supervisor_to_exit():
-    """`asbx stop box && asbx start box` is how anyone restarts a box.
+    """`asbx box stop neo && asbx box start neo` is how anyone restarts a box.
 
     Returning at the signal made that race the shutdown: start found the
     session still marked running and refused, naming a session that was in the
@@ -388,9 +388,9 @@ def test_waiting_gives_up_rather_than_hanging():
 
 
 def test_no_wait_is_available_for_scripts():
-    args = cli.build_parser().parse_args(["stop", "neo", "--no-wait"])
+    args = cli.build_parser().parse_args(["box", "stop", "neo", "--no-wait"])
     assert args.wait is False
-    assert cli.build_parser().parse_args(["stop", "neo"]).wait is True
+    assert cli.build_parser().parse_args(["box", "stop", "neo"]).wait is True
 
 
 def test_the_flow_cap_is_loaded_only_in_web_mode():
@@ -409,23 +409,23 @@ def test_attaching_mitmweb_warns_that_it_retains_traffic():
     behind a loopback UI anything on the Mac can read."""
     warning = cli._mitmweb_warning()
     assert "memory" in warning
-    assert "asbx web detach" in warning
+    assert "asbx box web detach" in warning
 
 
 def test_web_attach_and_detach_are_reachable():
     for action in ("attach", "detach"):
-        args = cli.build_parser().parse_args(["web", action])
+        args = cli.build_parser().parse_args(["box", "web", action])
         assert args.func is cli.cmd_web
         assert args.action == action
         assert args.name is None
 
 
-def test_web_takes_a_trailing_box_name_like_shell_and_stop_take_a_leading_one():
-    """`asbx --session neo web attach` read backwards from every other box
-    command. `name` trails `action` here only because `action` already owns
-    the first positional and its choices are fixed - a free-text `name` ahead
-    of it would swallow `attach`/`detach` on the no-name-given form."""
-    args = cli.build_parser().parse_args(["web", "attach", "neo"])
+def test_web_takes_a_trailing_box_name_like_approve_takes_a_trailing_one():
+    """`name` trails `action` here only because `action` already owns the
+    first positional and its choices are fixed - a free-text `name` ahead of
+    it would swallow `attach`/`detach` on the no-name-given form. Same shape
+    `box approve` uses for `request_id` then `name`."""
+    args = cli.build_parser().parse_args(["box", "web", "attach", "neo"])
     assert args.action == "attach"
     assert args.name == "neo"
 
@@ -439,11 +439,11 @@ def test_mitmweb_is_not_a_start_time_flag():
     """
     parser = cli.build_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args(["start", "neo", "--mitmweb"])
+        parser.parse_args(["box", "start", "neo", "--mitmweb"])
 
 
 def test_the_web_port_moved_to_the_command_that_starts_it():
-    args = cli.build_parser().parse_args(["web", "attach", "--port", "8081"])
+    args = cli.build_parser().parse_args(["box", "web", "attach", "--port", "8081"])
     assert args.action == "attach"
     assert args.port == 8081
 
@@ -545,7 +545,7 @@ def test_a_missing_image_is_reported_before_the_fork(capsys):
     from agentsandbox.box import Box
 
     Box(name="orphan", image="never-built").save()
-    assert cli.main(["start", "orphan"]) == cli.EXIT_USAGE
+    assert cli.main(["box", "start", "orphan"]) == cli.EXIT_USAGE
 
     err = capsys.readouterr().err
     assert "never-built" in err

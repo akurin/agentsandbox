@@ -496,7 +496,7 @@ class GatewayRunner:
 
         self.config = config
         self.socket_path = Path(socket_path)
-        #: Counters are also written here, so `asbx session status` can report
+        #: Counters are also written here, so `asbx box status` can report
         #: them from another terminal instead of only from the process that
         #: owns the gateway.
         self.stats_path = Path(stats_path) if stats_path else None

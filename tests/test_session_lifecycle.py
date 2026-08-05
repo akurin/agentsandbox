@@ -203,7 +203,7 @@ def test_cli_issue_list_and_revoke(capsys, monkeypatch):
     issued = capsys.readouterr().out
     token = next(word for word in issued.split() if word.startswith("cap_v1_"))
 
-    assert cli.main(["cap", "list"]) == 0
+    assert cli.main(["cap", "ls"]) == 0
     listed = capsys.readouterr().out
     # The listing shows the short id, never the placeholder.
     assert token not in listed
@@ -220,10 +220,10 @@ def test_cli_session_list_and_status(capsys, monkeypatch):
     manager = SessionManager.create(allow_hosts=["example.com"], label="statustest")
     monkeypatch.setenv("ASBX_SESSION", manager.session.session_id)
 
-    assert cli.main(["session", "list"]) == 0
+    assert cli.main(["system", "sessions"]) == 0
     assert manager.session.session_id in capsys.readouterr().out
 
-    assert cli.main(["session", "status"]) == 0
+    assert cli.main(["box", "status"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["session"] == manager.session.session_id
     assert status["allow_hosts"] == ["example.com"]
@@ -245,13 +245,13 @@ def test_cli_session_with_project_adds_a_share(capsys):
 def test_cli_audit_shows_events(capsys, monkeypatch):
     manager = SessionManager.create(allow_hosts=["example.com"])
     monkeypatch.setenv("ASBX_SESSION", manager.session.session_id)
-    assert cli.main(["audit"]) == 0
+    assert cli.main(["box", "audit"]) == 0
     assert "session.created" in capsys.readouterr().out
 
 
 def test_cli_reports_a_missing_session_without_a_traceback(capsys, monkeypatch):
     monkeypatch.setenv("ASBX_SESSION", "does-not-exist")
-    assert cli.main(["cap", "list"]) == cli.EXIT_DENIED
+    assert cli.main(["cap", "ls"]) == cli.EXIT_DENIED
     assert "no such session" in capsys.readouterr().err
 
 
@@ -369,7 +369,7 @@ def test_diag_survives_a_session_with_no_logs_yet(capsys, monkeypatch):
     manager = SessionManager.create(allow_hosts=["api.github.com"])
     monkeypatch.setenv("ASBX_SESSION", manager.session.session_id)
 
-    assert cli.main(["diag"]) == 0
+    assert cli.main(["box", "diag"]) == 0
     out = capsys.readouterr().out
     assert "l2 gateway" in out
     assert "guest endpoint config" in out
@@ -463,14 +463,14 @@ def test_cap_list_works_across_sessions_without_a_target(capsys, monkeypatch):
     cli_issue(first)
     cli_issue(second)
 
-    assert cli.main(["cap", "list"]) == 0
+    assert cli.main(["cap", "ls"]) == 0
     listed = json.loads(capsys.readouterr().out)
     assert len({c["session"] for c in listed}) == 2
 
 
 def test_cap_list_with_no_sessions_is_not_an_error(capsys, monkeypatch):
     monkeypatch.delenv("ASBX_SESSION", raising=False)
-    assert cli.main(["cap", "list"]) == 0
+    assert cli.main(["cap", "ls"]) == 0
     assert "no sessions" in capsys.readouterr().out
 
 
@@ -488,7 +488,7 @@ def test_prune_removes_only_stopped_sessions(monkeypatch):
     alive.session.supervisor_pid = os.getpid()
     alive.session.save()
 
-    assert cli.main(["session", "prune"]) == 0
+    assert cli.main(["system", "prune"]) == 0
     remaining = {s.session_id for s in list_sessions()}
     assert alive.session.session_id in remaining
     assert dead.session.session_id not in remaining
@@ -501,7 +501,7 @@ def test_prune_dry_run_deletes_nothing(capsys, monkeypatch):
     manager = SessionManager.create(allow_hosts=["example.com"])
     manager.stop()
 
-    assert cli.main(["session", "prune", "--dry-run"]) == 0
+    assert cli.main(["system", "prune", "--dry-run"]) == 0
     assert "would remove" in capsys.readouterr().out
     assert len(list_sessions()) == 1
 
@@ -511,7 +511,7 @@ def test_session_list_explains_that_stopped_means_gone(capsys, monkeypatch):
     manager = SessionManager.create(allow_hosts=["example.com"])
     manager.stop()
 
-    assert cli.main(["session", "list"]) == 0
+    assert cli.main(["system", "sessions"]) == 0
     out = capsys.readouterr().out
     assert "cannot be resumed" in out
     assert "prune" in out
@@ -556,9 +556,9 @@ def test_a_failing_command_is_reported_not_fatal(session, broker, tmp_path):
 
 def test_a_session_whose_supervisor_died_is_not_running(monkeypatch):
     """Three failed starts left three sessions marked running with nothing
-    behind them, and `asbx web attach` refused with "3 sessions are running -
-    name one". The state on disk is written by a supervisor that may not have
-    survived to write STOPPED."""
+    behind them, and `asbx box web attach` refused with "3 sessions are
+    running - name the box". The state on disk is written by a supervisor
+    that may not have survived to write STOPPED."""
     from agentsandbox.session import (
         STATE_RUNNING,
         STATE_STOPPED,
@@ -633,7 +633,7 @@ def test_waiting_for_the_listener_gives_up_when_the_proxy_dies(monkeypatch):
 def test_renegotiating_the_tunnel_is_skipped_when_there_is_no_guest_to_ask():
     """A session started without a box has no sshd. Best-effort means the
     reattach carries on and WireGuard's own timers take over - not an
-    exception out of `asbx web detach`."""
+    exception out of `asbx box web detach`."""
     manager = SessionManager.create(allow_hosts=["example.com"])
     result = manager.renegotiate_tunnel()
 
@@ -648,9 +648,9 @@ def test_renegotiating_the_tunnel_is_skipped_when_there_is_no_guest_to_ask():
 
 
 def test_a_command_can_name_the_box_instead_of_the_session_id(monkeypatch):
-    """`asbx --session neo web attach` should work: a box has at most one
-    running session, so its name is never ambiguous where a bare session id
-    would have been the only option."""
+    """`asbx cap ls --box neo` should work: a box has at most one running
+    session, so its name is never ambiguous where a bare session id would
+    have been the only option."""
     from agentsandbox.box import Box
     from agentsandbox.session import STATE_RUNNING
 
@@ -677,9 +677,9 @@ def test_naming_a_box_that_is_not_running_says_so(monkeypatch):
 
 
 def test_a_bare_session_id_still_resolves_when_no_box_shares_its_name():
-    """The fallback that made `--session` useful before box names ever
-    worked with it - and still the only way to reach a stopped session, whose
-    box has since moved on to a different run."""
+    """A raw session id is still accepted anywhere a box name is - and still
+    the only way to reach a stopped session, whose box has since moved on to
+    a different run."""
     manager = SessionManager.create(allow_hosts=["example.com"])
     resolved = cli._resolve_session(manager.session.session_id)
     assert resolved.session_id == manager.session.session_id
