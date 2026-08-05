@@ -198,3 +198,55 @@ def test_an_auth_challenge_reaches_the_guest():
     challenge = 'Bearer realm="https://auth.docker.io/token",service="registry.docker.io"'
     kept = sanitize_response_headers([("WWW-Authenticate", challenge)])
     assert kept == [("WWW-Authenticate", challenge)]
+
+
+def test_an_empty_post_body_still_gets_a_content_length(policy):
+    """A guest that POSTs with no body - a token-mint call with nothing to
+    send, `Content-Length: 0` on the wire - hit a strict frontend that refused
+    it with 411 Length Required. `clean_headers` strips Content-Length
+    unconditionally (it has to be recomputed for whatever body is actually
+    forwarded), but the header that was supposed to put it back only fired
+    `if body`, and an empty body is falsy - so nothing did."""
+    executor = ScriptedExecutor(policy, [ok(b"")])
+    executor.execute(
+        Destination("https", "api.example.com", 443),
+        "POST",
+        "/apiAuth",
+        headers=[],
+        body=b"",
+        credential_headers=CREDENTIAL,
+        max_bytes=1_000_000,
+    )
+    sent = dict(executor.hops[0]["headers"])
+    assert sent["Content-Length"] == "0"
+
+
+def test_a_populated_post_body_keeps_its_recomputed_length(policy):
+    executor = ScriptedExecutor(policy, [ok(b"")])
+    executor.execute(
+        Destination("https", "api.example.com", 443),
+        "POST",
+        "/thing",
+        headers=[],
+        body=b'{"a":1}',
+        credential_headers=CREDENTIAL,
+        max_bytes=1_000_000,
+    )
+    sent = dict(executor.hops[0]["headers"])
+    assert sent["Content-Length"] == "7"
+
+
+def test_get_and_head_carry_no_content_length(policy):
+    executor = ScriptedExecutor(policy, [ok(b""), ok(b"")])
+    for method in ("GET", "HEAD"):
+        executor.execute(
+            Destination("https", "api.example.com", 443),
+            method,
+            "/thing",
+            headers=[],
+            body=b"",
+            credential_headers=CREDENTIAL,
+            max_bytes=1_000_000,
+        )
+    for hop in executor.hops:
+        assert "Content-Length" not in dict(hop["headers"])

@@ -150,7 +150,15 @@ class UpstreamExecutor:
             if carry_credentials:
                 send_headers = send_headers + list(credential_headers)
             send_headers.append(("Host", _host_header(current)))
-            if body and current_method not in ("GET", "HEAD"):
+            # `if body` used to gate this, so an empty POST - `body == b""`,
+            # falsy - got no Content-Length at all: `clean_headers` had
+            # already stripped whatever the guest sent (Content-Length is
+            # hop-by-hop here precisely because it must be recomputed for
+            # whatever body we actually forward), and nothing put it back.
+            # A strict frontend refused it outright: 411 Length Required,
+            # which is the correct response to a POST with neither
+            # Content-Length nor Transfer-Encoding.
+            if current_method not in ("GET", "HEAD"):
                 send_headers.append(("Content-Length", str(len(body))))
 
             response = self._round_trip(
