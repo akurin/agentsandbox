@@ -82,6 +82,9 @@ def render_user_data(
     shares: list[Share] | None = None,
     netcheck: str = "halt",
     capability_env: dict[str, str] | None = None,
+    ssh_host_key: str = "",
+    ssh_host_pub: str = "",
+    ssh_authorized_key: str = "",
 ) -> str:
     vsock_ports = vsock_ports or {}
     shares = shares or []
@@ -156,6 +159,26 @@ def render_user_data(
             "0644",
         ),
     ]
+    if ssh_host_key and ssh_authorized_key:
+        write_files += [
+            # sshd binds loopback only; the vsock bridge is the sole way in.
+            _write_file(
+                "/etc/ssh/sshd_config.d/asbx.conf",
+                "ListenAddress 127.0.0.1\n"
+                "PermitRootLogin no\n"
+                "PasswordAuthentication no\n"
+                "KbdInteractiveAuthentication no\n"
+                "PubkeyAuthentication yes\n"
+                "AllowUsers agent\n"
+                "X11Forwarding no\n",
+                "0644",
+            ),
+            _write_file(
+                "/etc/systemd/system/asbx-sshd-vsock.service",
+                _guest_file("asbx-sshd-vsock.service"),
+            ),
+        ]
+
     if ca_cert:
         write_files.append(
             _write_file("/usr/local/share/ca-certificates/asbx-session-ca.crt", ca_cert, "0644")
@@ -182,6 +205,12 @@ def render_user_data(
     for tag, mount_point, _fs, options, *_ in mounts:
         if tag != "asbxlog" and "ro," not in options:
             runcmd.append(["chown", "agent:agent", mount_point])
+    if ssh_host_key and ssh_authorized_key:
+        runcmd += [
+            ["systemctl", "unmask", "ssh.socket"],
+            ["systemctl", "enable", "--now", "ssh.service"],
+            ["systemctl", "enable", "--now", "asbx-sshd-vsock.service"],
+        ]
     for guest_port in sorted(vsock_ports):
         runcmd.append(["systemctl", "enable", "--now", f"asbx-forward@{guest_port}.service"])
 
@@ -191,6 +220,9 @@ def render_user_data(
             {
                 "name": "agent",
                 "shell": "/bin/bash",
+                # cloud-init owns authorized_keys; writing the file ourselves
+                # races its own ssh module.
+                "ssh_authorized_keys": [ssh_authorized_key.strip()] if ssh_authorized_key else [],
                 # sudoers is written by the bootstrap: root in the guest,
                 # plus the drop-down to `builder` for untrusted subprocesses.
                 "sudo": None,
@@ -210,6 +242,17 @@ def render_user_data(
         "mounts": mounts,
         "runcmd": runcmd,
     }
+    if ssh_host_key and ssh_host_pub:
+        # cloud-init defaults to ssh_deletekeys=true: on every new instance-id
+        # it deletes the host keys and generates fresh ones, which silently
+        # replaced any key we wrote via write_files and made `asbx shell` fail
+        # host-key verification. Supplying them here is the supported path -
+        # cc_ssh installs exactly these and skips generation.
+        payload["ssh_keys"] = {
+            "ed25519_private": ssh_host_key,
+            "ed25519_public": ssh_host_pub.strip(),
+        }
+        payload["ssh_deletekeys"] = False
     if netcheck == "halt":
         # cloud-init powers off when the condition command *succeeds*, so
         # netcheck inverts its exit code under this flag: success means "this

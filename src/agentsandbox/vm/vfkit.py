@@ -79,6 +79,13 @@ class VmConfig:
     disk_override: Path | None = None
     efi_override: Path | None = None
     persist_disk: bool = False
+    #: SSH key material for `asbx shell`. Without it the guest runs no sshd at
+    #: all, which is the right default for a one-off session.
+    ssh_host_key: str = ""
+    ssh_host_pub: str = ""
+    ssh_authorized_key: str = ""
+    #: Unix socket vfkit bridges to the guest's sshd vsock port.
+    ssh_socket: Path | None = None
     #: "log" writes the guest console to a file; "stdio" attaches it to this
     #: terminal, which is how you get a shell in the guest. There is no SSH
     #: into a session guest by design - the console is the operator's channel,
@@ -212,6 +219,9 @@ class VfkitDriver:
             shares=list(self.vm.shares),
             netcheck=self.vm.netcheck,
             capability_env=dict(self.vm.capability_env),
+            ssh_host_key=self.vm.ssh_host_key,
+            ssh_host_pub=self.vm.ssh_host_pub,
+            ssh_authorized_key=self.vm.ssh_authorized_key,
         )
         user_data_path = self.cloud_init_dir / "user-data"
         write_private_file(user_data_path, user_data)
@@ -270,6 +280,13 @@ class VfkitDriver:
             argv += ["--device", spec]
 
         # Host dials in; the guest cannot dial out over these.
+        if self.vm.ssh_socket is not None:
+            from . import VSOCK_SSH_PORT
+
+            argv += [
+                "--device",
+                f"virtio-vsock,port={VSOCK_SSH_PORT},socketURL={self.vm.ssh_socket},connect",
+            ]
         for guest_port, socket_path in sorted(self.vm.vsock_ports.items()):
             argv += [
                 "--device",

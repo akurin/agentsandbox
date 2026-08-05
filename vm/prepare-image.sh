@@ -56,8 +56,11 @@ runcmd:
   - [ sh, -c, "sed -i 's/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"console=hvc0 console=ttyS0,115200n8\"/' /etc/default/grub || true" ]
   - [ sh, -c, "update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg || true" ]
   # Nothing should be listening in a session guest.
+  # sshd stays installed but does not listen on any network interface. The
+  # session bootstrap binds it to loopback and bridges it to a vsock port, so
+  # the host can dial in and nothing else can - not the LAN, not the tunnel.
   - [ sh, -c, "systemctl disable --now ssh 2>/dev/null || true" ]
-  - [ sh, -c, "systemctl mask ssh.socket 2>/dev/null || true" ]
+  - [ sh, -c, "systemctl disable --now ssh.socket 2>/dev/null || true" ]
   - [ sh, -c, "systemctl enable systemd-networkd 2>/dev/null || true" ]
   # Report success where the host can see it.
   - [ sh, -c, "modprobe virtiofs 2>/dev/null || true" ]

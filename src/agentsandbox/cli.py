@@ -11,6 +11,7 @@ import argparse
 import getpass
 import json
 import os
+import shlex
 import signal
 import sys
 import time
@@ -21,7 +22,6 @@ from .broker.approvals import FileApprovalGate
 from .broker.core import BrokerRequest
 from .broker.server import UnixBrokerClient, read_token
 from .capabilities import CapabilitySpec, CapabilityStore, InjectionSpec, SecretRef
-from .config import SessionPaths
 from .errors import SandboxError
 from .keychain import KeychainProvider
 from .manager import SessionManager, check_environment, stop_session_by_id
@@ -124,11 +124,73 @@ def cmd_env_start(args: argparse.Namespace) -> int:
 
     env.last_started = time.time()
     env.save()
-    return _start_session(args, env=env)
+
+    if args.attach:
+        # Foreground: this terminal owns the guest, and Ctrl-C stops it. Useful
+        # when the guest is broken enough that ssh never comes up.
+        args.console = True
+        return _start_session(args, env=env)
+
+    # Detached, like `podman start`: the supervisor outlives this terminal, so
+    # `asbx shell` from anywhere keeps working and closing the window is safe.
+    args.console = False
+    from .daemon import StartupFailed, spawn_supervisor
+
+    try:
+        spawn_supervisor(
+            lambda: _start_session(args, env=env),
+            log_path=envs_supervisor_log(env),
+        )
+    except StartupFailed as exc:
+        print(f"!! {env.name} failed to start: {exc}", file=sys.stderr)
+        print(f"   log: {envs_supervisor_log(env)}", file=sys.stderr)
+        return 1
+
+    _report_started(env)
+    return 0
+
+
+def envs_supervisor_log(env) -> Path:
+    return env.ssh_dir.parent / f"{env.name}.log"
+
+
+def _report_started(env) -> None:
+    """Summarise a detached environment, since its own output went to a log."""
+    from .session import STATE_RUNNING
+
+    session = next(
+        (s for s in list_sessions() if s.env_name == env.name and s.state == STATE_RUNNING),
+        None,
+    )
+    print(f"{env.name} started")
+    if session is None:
+        return
+    print(f"  session    {session.session_id}")
+    for port, info in session.forwards.items():
+        print(f"  forward    guest:{port} -> {info['url']}")
+    print(f"\n  asbx shell {env.name}      open a shell (as many as you like)")
+    print(f"  asbx stop {env.name}       shut it down")
 
 
 def cmd_session_start(args: argparse.Namespace) -> int:
     return _start_session(args, env=None)
+
+
+def _ssh_vm_config(env, session) -> dict:
+    """SSH key material for the guest, or nothing for an anonymous session."""
+    if env is None:
+        return {}
+    from .env import SshIdentity
+
+    identity = SshIdentity(env.ssh_dir)
+    if not identity.exists:
+        identity.generate(env.name)
+    return {
+        "ssh_host_key": identity.host_key.read_text(),
+        "ssh_host_pub": identity.host_key.with_suffix(".pub").read_text(),
+        "ssh_authorized_key": identity.client_key.with_suffix(".pub").read_text(),
+        "ssh_socket": session.paths.run / "ssh.sock",
+    }
 
 
 def _start_session(args: argparse.Namespace, env=None) -> int:
@@ -192,6 +254,9 @@ def _start_session(args: argparse.Namespace, env=None) -> int:
         disk_override=env.disk_path if env else None,
         efi_override=env.efi_store if env else None,
         persist_disk=bool(env),
+        # sshd only exists in an environment, where `asbx shell` needs it. A
+        # one-off session keeps the smaller surface of console-only access.
+        **_ssh_vm_config(env, session),
     )
     dev_targets = dict(pair.split(":", 1) for pair in args.dev_target) if args.dev_target else {}
     dev_targets = {int(k): int(v) for k, v in dev_targets.items()}
@@ -224,6 +289,20 @@ def _start_session(args: argparse.Namespace, env=None) -> int:
         print("\nNo guest started (--no-vm). Point a WireGuard peer at the endpoint above:")
         print(f"  {session.paths.guest_wireguard_conf}")
 
+    _supervise(manager, purge=args.purge_on_stop)
+    return 0
+
+
+def _supervise(manager: SessionManager, *, purge: bool = False) -> None:
+    """Own the session until the guest exits or someone asks us to stop.
+
+    This is the whole job of the supervisor process: hold the broker, the L2
+    gateway and the forwards open for as long as the guest is alive, then tear
+    them down in the order that revokes capabilities first.
+    """
+    from .daemon import signal_ready
+
+    session = manager.session
     stop = {"requested": False}
 
     def _handle(signum, frame):  # noqa: ANN001, ARG001
@@ -232,12 +311,14 @@ def _start_session(args: argparse.Namespace, env=None) -> int:
     signal.signal(signal.SIGTERM, _handle)
     signal.signal(signal.SIGINT, _handle)
 
-    print("\nsession running - Ctrl-C or `asbx session stop` to tear it down")
+    # Detached: tell the CLI it can return. Foreground: a no-op.
+    signal_ready()
+
     try:
         while not stop["requested"]:
             if manager.vm is not None and not manager.vm.is_running():
-                # Say *why*. Without --console vfkit's output goes to a log,
-                # and "guest exited" on its own is useless.
+                # Say *why*. Without a console attached, vfkit's output goes to
+                # a log, and "guest exited" on its own is useless.
                 print("guest exited; shutting the session down", file=sys.stderr)
                 log = manager.vm.vm_dir / "vfkit.log"
                 if log.exists() and (tail := log.read_text(errors="replace").strip()):
@@ -249,9 +330,8 @@ def _start_session(args: argparse.Namespace, env=None) -> int:
                 break
             time.sleep(0.5)
     finally:
-        manager.stop(purge=args.purge_on_stop)
+        manager.stop(purge=purge)
         print(f"session {session.session_id} stopped")
-    return 0
 
 
 def cmd_session_list(args: argparse.Namespace) -> int:
@@ -574,23 +654,6 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_guest_config(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.session)
-    paths: SessionPaths = session.paths
-    if args.what == "wireguard":
-        print(paths.guest_wireguard_conf.read_text())
-    elif args.what == "ca":
-        print(paths.ca_cert.read_text() if paths.ca_cert.exists() else "", end="")
-    else:
-        _print(
-            {
-                "wireguard_conf": str(paths.guest_wireguard_conf),
-                "ca_cert": str(paths.ca_cert),
-                "cloud_init": str(paths.vm / "cloud-init" / "user-data"),
-            }
-        )
-    return 0
-
 
 def cmd_profile_list(args: argparse.Namespace) -> int:
     from .profiles import list_profiles
@@ -722,6 +785,9 @@ def cmd_env_create(args: argparse.Namespace) -> int:
         cpus=args.cpus,
         memory_mib=args.memory,
     )
+    from .env import SshIdentity
+
+    SshIdentity(env.ssh_dir).generate(name)
     env.save()
     print(f"environment {name} created")
     if project:
@@ -765,6 +831,94 @@ def cmd_env_rm(args: argparse.Namespace) -> int:
     env.delete(keep_disk=args.keep_disk)
     print(f"removed environment {env.name}{'' if args.keep_disk else size}")
     return 0
+
+
+def cmd_shell(args: argparse.Namespace) -> int:
+    """Open a shell in a running environment, over ssh-on-vsock.
+
+    Any number of these can run at once, which is the point - the console is a
+    single seat, this is not.
+    """
+    from .env import Environment, SshIdentity
+    from .session import STATE_RUNNING
+
+    env = Environment.load(args.name) if args.name else None
+    running = [s for s in list_sessions() if s.state == STATE_RUNNING]
+    if env:
+        running = [s for s in running if s.env_name == env.name]
+    if not running:
+        target = args.name or "anything"
+        print(f"!! {target} is not running; start it with `asbx start`", file=sys.stderr)
+        return EXIT_USAGE
+    if len(running) > 1:
+        listed = "\n".join(f"  {s.env_name or s.session_id}" for s in running)
+        print(f"!! several are running - name one:\n{listed}", file=sys.stderr)
+        return EXIT_USAGE
+
+    session = running[0]
+    env = env or Environment.load(session.env_name)
+    identity = SshIdentity(env.ssh_dir)
+    if not identity.exists:
+        print(f"!! {env.name} has no ssh keys; recreate it with `asbx create`", file=sys.stderr)
+        return EXIT_USAGE
+
+    socket_path = session.paths.run / "ssh.sock"
+    if not socket_path.exists():
+        print(
+            f"!! {env.name} is running but has no ssh channel at {socket_path}.\n"
+            "   It was probably started before ssh support existed - restart it.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    # ProxyCommand shells out to us: a tiny stdio<->unix relay, so we do not
+    # depend on which netcat flavour happens to be installed.
+    proxy = f"{shlex.quote(sys.executable)} -m agentsandbox.cli vsock-proxy {shlex.quote(str(socket_path))}"
+    identity.write_client_config(env.name, proxy)
+
+    argv = ["ssh", "-F", str(identity.config), f"asbx-{env.name}"]
+    if args.command:
+        argv += ["--", *args.command]
+    os.execvp("ssh", argv)  # replace ourselves; ssh owns the terminal from here
+    return 0  # unreachable
+
+
+def cmd_vsock_proxy(args: argparse.Namespace) -> int:
+    """Relay stdin/stdout to a unix socket. Used as ssh's ProxyCommand."""
+    import selectors
+    import socket
+
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(args.socket)
+    except OSError as exc:
+        print(f"asbx: cannot reach the guest at {args.socket}: {exc.strerror}", file=sys.stderr)
+        return 1
+
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
+    selector = selectors.DefaultSelector()
+    selector.register(stdin, selectors.EVENT_READ, "stdin")
+    selector.register(sock, selectors.EVENT_READ, "sock")
+
+    try:
+        while True:
+            for key, _ in selector.select():
+                if key.data == "stdin":
+                    chunk = stdin.read1(65536)
+                    if not chunk:
+                        return 0
+                    sock.sendall(chunk)
+                else:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        return 0
+                    stdout.write(chunk)
+                    stdout.flush()
+    except (BrokenPipeError, ConnectionResetError, KeyboardInterrupt):
+        return 0
+    finally:
+        sock.close()
 
 
 def cmd_env_stop(args: argparse.Namespace) -> int:
@@ -828,7 +982,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asbx", description=__doc__)
     parser.add_argument("--session", help="session id (default: the newest running session)")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="{create,start,stop,shell,ls,inspect,rm,reset,cap,profile,secret,"
+        "approvals,approve,audit,diag,doctor,prune}",
+    )
 
     # -- environments (the everyday path) -----------------------------------
     create = sub.add_parser("create", help="define an environment (does not boot it)")
@@ -855,11 +1014,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help=argparse.SUPPRESS)
     start.add_argument("--mitmweb", action="store_true", help="live traffic inspector on loopback")
     start.add_argument("--web-port", type=int, default=0)
-    start.add_argument("--console", action="store_true", default=True,
-                       help="attach the guest console to this terminal (default)")
-    start.add_argument("--no-console", dest="console", action="store_false")
+    start.add_argument("-a", "--attach", action="store_true",
+                       help="keep it in the foreground with the guest console attached")
     start.add_argument("--netcheck", choices=["halt", "warn"], default="halt")
-    start.set_defaults(func=cmd_env_start, vm=True)
+    start.set_defaults(func=cmd_env_start, vm=True, console=False)
 
     ls = sub.add_parser("ls", help="list environments")
     ls.set_defaults(func=cmd_env_list)
@@ -873,10 +1031,24 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("--keep-disk", action="store_true")
     rm.set_defaults(func=cmd_env_rm)
 
+    shell = sub.add_parser("shell", help="open a shell in a running environment")
+    shell.add_argument("name", nargs="?", help="environment (default: the only running one)")
+    shell.add_argument("command", nargs=argparse.REMAINDER, help="run this instead of a shell")
+    shell.set_defaults(func=cmd_shell)
+
+    proxy = sub.add_parser("vsock-proxy", help=argparse.SUPPRESS)
+    proxy.add_argument("socket")
+    proxy.set_defaults(func=cmd_vsock_proxy)
+
     stop_env = sub.add_parser("stop", help="stop a running environment")
     stop_env.add_argument("name", nargs="?", help="environment name (default: the only running one)")
     stop_env.add_argument("--purge", action="store_true", help="also erase the run's audit trail")
     stop_env.set_defaults(func=cmd_env_stop)
+
+    prune_top = sub.add_parser("prune", help="delete leftover state from finished runs")
+    prune_top.add_argument("--older-than", type=int, metavar="DAYS")
+    prune_top.add_argument("--dry-run", action="store_true")
+    prune_top.set_defaults(func=cmd_session_prune)
 
     reset = sub.add_parser("reset", help="discard an environment's disk, keeping its config")
     reset.add_argument("name")
@@ -1064,9 +1236,6 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--tail", type=int, default=50)
     audit.set_defaults(func=cmd_audit)
 
-    guest = sub.add_parser("guest", help="files the guest needs")
-    guest.add_argument("what", nargs="?", choices=["paths", "wireguard", "ca"], default="paths")
-    guest.set_defaults(func=cmd_guest_config)
 
     diag = sub.add_parser("diag", help="one-shot diagnostics for a misbehaving session")
     diag.add_argument("--tail", type=int, default=25, help="lines per log section")

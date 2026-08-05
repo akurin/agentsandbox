@@ -1,0 +1,22 @@
+[Unit]
+Description=agentsandbox: bridge vsock to the local sshd
+Documentation=man:sshd(8)
+After=ssh.service
+Requires=ssh.service
+
+[Service]
+Type=exec
+# sshd itself listens on 127.0.0.1 only (see the drop-in written by cloud-init),
+# so this bridge is the *only* way to reach it. vsock is dialled host-to-guest,
+# which means the host can log in and nothing on any network can - not the LAN,
+# not the tunnel, not another guest.
+ExecStart=/usr/bin/socat VSOCK-LISTEN:2222,fork,reuseaddr TCP:127.0.0.1:22
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_VSOCK AF_INET
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

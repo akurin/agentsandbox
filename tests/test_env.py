@@ -7,6 +7,8 @@ getting it wrong in either direction is a security or a usability bug.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from agentsandbox import cli
@@ -200,3 +202,183 @@ def test_cli_ls_reports_build_state(project, capsys):
 def test_cli_ls_with_nothing_suggests_create(capsys):
     assert cli.main(["ls"]) == 0
     assert "create one" in capsys.readouterr().out
+
+
+# -- ssh access --------------------------------------------------------------
+
+
+def test_each_environment_gets_its_own_keys(project):
+    """One environment's key must not open another's guest."""
+    from agentsandbox.env import SshIdentity
+
+    first = Environment(name="one")
+    first.save()
+    second = Environment(name="two")
+    second.save()
+
+    a, b = SshIdentity(first.ssh_dir), SshIdentity(second.ssh_dir)
+    a.generate("one")
+    b.generate("two")
+
+    assert a.client_key.read_text() != b.client_key.read_text()
+    assert a.host_key.read_text() != b.host_key.read_text()
+    # Private keys are owner-only.
+    assert a.client_key.stat().st_mode & 0o077 == 0
+    assert a.host_key.stat().st_mode & 0o077 == 0
+
+
+def test_key_generation_is_idempotent(project):
+    from agentsandbox.env import SshIdentity
+
+    env = Environment(name="neo")
+    env.save()
+    identity = SshIdentity(env.ssh_dir)
+    identity.generate("neo")
+    original = identity.client_key.read_text()
+
+    identity.generate("neo")  # again
+    assert identity.client_key.read_text() == original
+
+
+def test_the_ssh_config_pins_the_host_key(project):
+    """No trust-on-first-use: a swapped guest must be refused, not accepted."""
+    from agentsandbox.env import SshIdentity
+
+    env = Environment(name="neo")
+    env.save()
+    identity = SshIdentity(env.ssh_dir)
+    identity.generate("neo")
+    identity.write_client_config("neo", "/bin/true")
+
+    config = identity.config.read_text()
+    assert "StrictHostKeyChecking yes" in config
+    assert str(identity.known_hosts) in config
+    assert "IdentitiesOnly yes" in config
+    # Agent forwarding off: the guest is untrusted and must not reach host keys.
+    assert "ForwardAgent no" in config
+
+    known = identity.known_hosts.read_text()
+    assert known.startswith("asbx-neo ssh-ed25519 ")
+
+
+def test_sshd_in_the_guest_listens_on_loopback_only(session):
+    """The vsock bridge is the only way in - nothing binds a network address."""
+    import base64
+    import json as _json
+
+    from agentsandbox.vm.cloudinit import render_user_data
+    from agentsandbox.vm.gateway import GatewayConfig, guest_network_facts
+    from agentsandbox.wireguard import WireGuardIdentity
+
+    session.paths.create()
+    WireGuardIdentity.generate().write_guest_config(session.paths.guest_wireguard_conf)
+
+    rendered = render_user_data(
+        session=session,
+        wg_config=session.paths.guest_wireguard_conf.read_text(),
+        ca_cert="x",
+        net=guest_network_facts(GatewayConfig()),
+        ssh_host_key="HOSTKEY",
+        ssh_host_pub="HOSTPUB",
+        ssh_authorized_key="CLIENTPUB",
+    )
+    payload = _json.loads(rendered.split("\n", 1)[1])
+    files = {
+        f["path"]: base64.b64decode(f["content"]).decode() for f in payload["write_files"]
+    }
+
+    sshd = files["/etc/ssh/sshd_config.d/asbx.conf"]
+    assert "ListenAddress 127.0.0.1" in sshd
+    assert "PasswordAuthentication no" in sshd
+    assert "PermitRootLogin no" in sshd
+    assert "AllowUsers agent" in sshd
+
+    # Host key and authorized_keys go through cloud-init's own ssh handling.
+    # Planting them as files loses a race with cc_ssh, which deletes and
+    # regenerates host keys on every new instance-id.
+    assert payload["ssh_keys"]["ed25519_private"] == "HOSTKEY"
+    assert payload["ssh_keys"]["ed25519_public"] == "HOSTPUB"
+    assert payload["ssh_deletekeys"] is False
+    agent = next(u for u in payload["users"] if u["name"] == "agent")
+    assert agent["ssh_authorized_keys"] == ["CLIENTPUB"]
+
+    # And nothing writes those paths directly any more.
+    assert "/etc/ssh/ssh_host_ed25519_key" not in files
+    assert "/home/agent/.ssh/authorized_keys" not in files
+
+
+def test_no_sshd_without_keys(session):
+    """An anonymous session keeps the smaller surface: console only."""
+    import json as _json
+
+    from agentsandbox.vm.cloudinit import render_user_data
+    from agentsandbox.vm.gateway import GatewayConfig, guest_network_facts
+    from agentsandbox.wireguard import WireGuardIdentity
+
+    session.paths.create()
+    WireGuardIdentity.generate().write_guest_config(session.paths.guest_wireguard_conf)
+
+    payload = _json.loads(
+        render_user_data(
+            session=session,
+            wg_config=session.paths.guest_wireguard_conf.read_text(),
+            ca_cert="x",
+            net=guest_network_facts(GatewayConfig()),
+        ).split("\n", 1)[1]
+    )
+    paths = {f["path"] for f in payload["write_files"]}
+    assert not any("ssh" in p for p in paths)
+
+
+def test_the_ssh_vsock_device_is_connect_only(session, tmp_path):
+    """Same direction guarantee as forwards: we dial in, the guest cannot."""
+    from agentsandbox.vm.vfkit import VfkitDriver, VmConfig
+
+    driver = VfkitDriver(session, VmConfig(ssh_socket=tmp_path / "ssh.sock"))
+    spec = next(a for a in driver.build_argv() if "port=2222" in a)
+    assert spec.endswith(",connect")
+    assert "listen" not in spec
+
+
+# -- detached supervisor -----------------------------------------------------
+
+
+def test_a_detached_supervisor_reports_ready(tmp_path):
+    """The CLI must not return until the session is actually usable."""
+
+    from agentsandbox.daemon import signal_ready, spawn_supervisor
+
+    marker = tmp_path / "ran"
+
+    def run():
+        marker.write_text("yes")
+        signal_ready()
+
+    spawn_supervisor(run, log_path=tmp_path / "sup.log", ready_timeout=20)
+    # spawn_supervisor returned, so the child signalled; give the fs a moment.
+    for _ in range(100):
+        if marker.exists():
+            break
+        time.sleep(0.05)
+    assert marker.read_text() == "yes"
+
+
+def test_a_supervisor_that_dies_reports_why(tmp_path):
+    """A failure during startup must surface, not vanish into a log."""
+    from agentsandbox.daemon import StartupFailed, spawn_supervisor
+
+    def run():
+        raise RuntimeError("golden image missing")
+
+    with pytest.raises(StartupFailed, match="golden image missing"):
+        spawn_supervisor(run, log_path=tmp_path / "sup.log", ready_timeout=20)
+
+
+def test_a_supervisor_that_never_signals_times_out(tmp_path):
+    from agentsandbox.daemon import StartupFailed, spawn_supervisor
+
+    def run():
+        time.sleep(30)
+
+    with pytest.raises(StartupFailed, match="did not come up"):
+        spawn_supervisor(run, log_path=tmp_path / "sup.log", ready_timeout=1)
