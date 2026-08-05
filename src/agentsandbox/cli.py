@@ -811,24 +811,57 @@ def cmd_profile_list(args: argparse.Namespace) -> int:
 
 
 def cmd_profile_show(args: argparse.Namespace) -> int:
+    """Print what a profile resolves to, resolved rather than as written.
 
-    from .profiles import load_profile, resolve_profile
+    Everything that changes behaviour is shown, including the parts the file
+    left out - a default is still a decision, and the reason to run this is to
+    find out what it will actually do. Fields that are only documentation are
+    not shown at all.
+    """
+    from .capabilities import MUTATING_METHODS
+    from .profiles import load_profile, load_profile_env, resolve_profile
 
     path = resolve_profile(args.name)
     specs = load_profile(path)
     print(f"# {path}")
+
+    if literals := load_profile_env(path):
+        print("\n  guest environment (literal, not secret):")
+        for name, value in sorted(literals.items()):
+            print(f"    {name}={value}")
+
     for spec in specs:
-        print(f"  - provider: {spec.provider}")
-        print(f"    hosts: [{', '.join(spec.hosts)}]")
-        print(f"    methods: [{', '.join(spec.methods)}]")
-        print(f"    paths: [{', '.join(spec.path_globs)}]")
-        print(f"    secret: {spec.secret.backend}:{spec.secret.service}"
+        approve = (
+            list(spec.approval_required_methods)
+            if spec.approval_required_methods is not None
+            else list(MUTATING_METHODS)
+        )
+        inject = spec.injection
+        how = {
+            "basic": f"basic auth as {inject.username!r}",
+            "bearer": "Authorization: Bearer <secret>",
+            "header": f"{inject.header}: {inject.template.replace('{secret}', '<secret>')}",
+        }.get(inject.kind, inject.kind)
+
+        print(f"\n  - provider: {spec.provider}")
+        print(f"    placeholder:  ${spec.env_var}" if spec.env_var else
+              "    placeholder:  (none - copy it from `asbx cap issue` by hand)")
+        print(f"    secret:       {spec.secret.backend}:{spec.secret.service}"
               f"{':' + spec.secret.account if spec.secret.account else ''}")
+        print(f"    attached as:  {how}")
+        print(f"    hosts:        {', '.join(spec.hosts)}")
+        print(f"    methods:      {', '.join(spec.methods)}")
+        print(f"    paths:        {', '.join(spec.path_globs)}")
+        if spec.deny_path_globs:
+            print(f"    denied:       {', '.join(spec.deny_path_globs)}")
         if spec.resources:
-            print(f"    resources: [{', '.join(spec.resources)}]")
-        if spec.label:
-            print(f"    label: {spec.label}")
-        print()
+            print(f"    resources:    {', '.join(spec.resources)}")
+        # Spelled out even when empty: "nothing needs approval" is the single
+        # most consequential thing a profile can say, and its absence from the
+        # file is what silently routes every POST through an operator prompt.
+        print(f"    approval:     {', '.join(approve) if approve else 'none'}")
+        print(f"    expires:      {f'{spec.ttl_seconds}s' if spec.ttl_seconds else 'never'}")
+    print()
     return 0
 
 

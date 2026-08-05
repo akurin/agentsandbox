@@ -231,3 +231,45 @@ def test_no_module_hardcodes_a_default_that_config_owns():
             if re.search(r"\b(ttl|max_response_bytes)\w*\s*=.*\b(3600|8 \* 1024 \* 1024)\b", line):
                 offenders.append(f"{path.name}:{number}: {line.strip()}")
     assert not offenders, "\n".join(offenders)
+
+
+def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
+    """It used to print `label`, which does nothing, and hide approval,
+    injection, deny_paths and the placeholder name - so the fields that decide
+    whether a request succeeds were the ones you could not see."""
+    from agentsandbox import cli
+
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "env": {"API_BASE": "https://api.example.com"},
+        "capabilities": [{
+            "provider": "svc",
+            "label": "ignore me",
+            "env": "SVC_TOKEN",
+            "hosts": ["api.example.com"],
+            "methods": ["GET", "POST"],
+            "paths": ["/v1/*"],
+            "deny_paths": ["/v1/admin/*"],
+            "approve_methods": [],
+            "secret": "pass:svc/token",
+            "injection": {"kind": "header", "header": "X-Key", "template": "{secret}"},
+        }],
+    }))
+    assert cli.main(["profile", "show", "p"]) == 0
+    out = capsys.readouterr().out
+
+    assert "$SVC_TOKEN" in out            # what the agent actually uses
+    assert "X-Key: <secret>" in out       # how it is attached
+    assert "/v1/admin/*" in out           # the deny list is a security control
+    assert "approval:     none" in out    # empty is a decision, not an absence
+    assert "expires:      never" in out
+    assert "API_BASE=https://api.example.com" in out
+    assert "ignore me" not in out         # documentation-only, not shown
+
+
+def test_profile_show_spells_out_defaults_the_file_omitted():
+    """A default is still a decision; the point of the command is to learn
+    what will happen, not to see the file read back."""
+    from agentsandbox import cli
+
+    assert cli.main(["profile", "show", "example"]) == 0
