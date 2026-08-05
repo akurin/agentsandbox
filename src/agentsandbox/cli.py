@@ -362,8 +362,6 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
             vm_config=vm_config,
             forward_ports=args.forward or [],
             dev_targets=dev_targets,
-            web=args.mitmweb,
-            web_port=args.web_port,
             resolver=resolver,
         )
     except SandboxError as exc:
@@ -379,9 +377,6 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         print(f"  project    {session.project_path} -> guest:{mount} (read-write)")
     for port, info in session.forwards.items():
         print(f"  forward    guest:{port} -> {info['url']}")
-    if manager.mitm is not None and manager.mitm.web:
-        print(f"  mitmweb    {manager.mitm.web_url}")
-        print(_mitmweb_warning(), file=sys.stderr)
     if not args.vm:
         print("\nNo guest started (--no-vm). Point a WireGuard peer at the endpoint above:")
         print(f"  {session.paths.guest_wireguard_conf}")
@@ -1464,7 +1459,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         reply = send_command(
             session.paths.broker_socket,
             read_token(session.paths.broker_token),
-            "web-attach" if attach else "web-detach",
+            f"web-attach:{args.port}" if attach else "web-detach",
         )
     except SandboxError as exc:
         print(f"!! {exc}", file=sys.stderr)
@@ -1564,8 +1559,6 @@ def build_parser() -> argparse.ArgumentParser:
                        metavar="[HOST:]GUEST", help="forward a guest port to localhost")
     start.add_argument("--dev-target", action="append", default=[], metavar="GUESTPORT:HOSTPORT",
                        help=argparse.SUPPRESS)
-    start.add_argument("--mitmweb", action="store_true", help="live traffic inspector on loopback")
-    start.add_argument("--web-port", type=int, default=0)
     start.add_argument("-a", "--attach", action="store_true",
                        help="keep it in the foreground with the guest console attached")
     start.add_argument("--netcheck", choices=["halt", "warn"], default="halt")
@@ -1617,6 +1610,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     web = sub.add_parser("web", help="attach or detach the mitmweb traffic inspector")
     web.add_argument("action", choices=["attach", "detach"])
+    web.add_argument(
+        "--port", type=int, default=0, metavar="N", help="fixed port (default: random)"
+    )
     web.set_defaults(func=cmd_web)
 
     image_parser = sub.add_parser("image", help="base images boxes clone from")
@@ -1680,17 +1676,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["halt", "warn"],
         default="halt",
         help="what the guest does if it is not fail-closed (default: power off)",
-    )
-    start.add_argument(
-        "--mitmweb",
-        action="store_true",
-        help="expose the live mitmproxy web UI on loopback",
-    )
-    start.add_argument(
-        "--web-port",
-        type=int,
-        default=0,
-        help="fixed port for --mitmweb (default: random)",
     )
     start.add_argument(
         "--console",

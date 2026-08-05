@@ -216,8 +216,10 @@ class SessionManager:
             read_token(self.session.paths.broker_token),
             audit=self.audit,
         )
-        server.commands["web-attach"] = lambda: self.reattach_proxy(web=True)
-        server.commands["web-detach"] = lambda: self.reattach_proxy(web=False)
+        server.commands["web-attach"] = lambda port: self.reattach_proxy(
+            web=True, web_port=int(port or 0)
+        )
+        server.commands["web-detach"] = lambda _: self.reattach_proxy(web=False)
         server.serve_in_thread()
         self.broker_server = server
         self.session.broker_pid = os.getpid()

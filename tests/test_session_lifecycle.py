@@ -492,10 +492,11 @@ def test_the_control_socket_takes_registered_commands(session, broker, tmp_path)
     server = BrokerServer(broker, tmp_path / "b.sock", "tok")
     try:
         calls = []
-        server.commands["web-attach"] = lambda: (calls.append(1), {"ok": True, "url": "u"})[1]
+        server.commands["web-attach"] = lambda port: (calls.append(port), {"ok": True, "url": "u"})[1]
 
         assert json.loads(server.handle_command("web-attach")) == {"ok": True, "url": "u"}
-        assert calls == [1]
+        assert json.loads(server.handle_command("web-attach:8081"))["ok"] is True
+        assert calls == ["", "8081"]
         assert json.loads(server.handle_command("nope"))["ok"] is False
     finally:
         server.server_close()
@@ -508,7 +509,7 @@ def test_a_failing_command_is_reported_not_fatal(session, broker, tmp_path):
 
     server = BrokerServer(broker, tmp_path / "b2.sock", "tok")
     try:
-        def _boom():
+        def _boom(_argument):
             raise RuntimeError("mitmproxy would not start")
 
         server.commands["web-attach"] = _boom

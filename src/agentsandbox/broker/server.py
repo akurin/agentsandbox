@@ -140,7 +140,9 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
         #: act on. The broker runs inside the supervisor, so this socket is the
         #: only authenticated way for a CLI process to reach the running
         #: session - which is what lets mitmweb be attached without a restart.
-        self.commands: dict[str, "Callable[[], dict]"] = {}
+        #: Handlers take the part after the first ":", or "" when there is
+        #: none, so a command can carry one argument without a second protocol.
+        self.commands: dict[str, "Callable[[str], dict]"] = {}
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(socket_path.parent, 0o700)
         if socket_path.exists():
@@ -160,11 +162,12 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
         again; this is what lets a rotated credential land without restarting
         a box that has been running for days.
         """
-        if handler := self.commands.get(command):
+        name, _, argument = command.partition(":")
+        if handler := self.commands.get(name):
             try:
-                return json.dumps(handler())
+                return json.dumps(handler(argument))
             except Exception as exc:  # noqa: BLE001 - reported, never fatal
-                self.audit.emit("command.failed", command=command, error=str(exc))
+                self.audit.emit("command.failed", command=name, error=str(exc))
                 return json.dumps({"ok": False, "error": str(exc)})
         if command == "refresh-secrets":
             resolver = getattr(self.core, "resolver", None)

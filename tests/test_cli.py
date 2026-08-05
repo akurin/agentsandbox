@@ -395,3 +395,22 @@ def test_web_attach_and_detach_are_reachable():
         args = cli.build_parser().parse_args(["web", action])
         assert args.func is cli.cmd_web
         assert args.action == action
+
+
+def test_mitmweb_is_not_a_start_time_flag():
+    """One way to do it, and the retaining mode is temporary by construction.
+
+    `--mitmweb` put the whole session into the mode that keeps every flow and
+    left it there for the session's life - which for a box meant to run for
+    weeks is precisely the shape the warning exists to discourage.
+    """
+    parser = cli.build_parser()
+    for argv in (["start", "neo", "--mitmweb"], ["session", "start", "--mitmweb"]):
+        with pytest.raises(SystemExit):
+            parser.parse_args(argv)
+
+
+def test_the_web_port_moved_to_the_command_that_starts_it():
+    args = cli.build_parser().parse_args(["web", "attach", "--port", "8081"])
+    assert args.action == "attach"
+    assert args.port == 8081
