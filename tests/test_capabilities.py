@@ -269,3 +269,73 @@ def test_denied_paths_are_visible_when_reviewing_a_capability(store):
         )
     )
     assert cap.public_view()["denied_paths"] == ["/dangerous"]
+
+
+def test_a_capability_does_not_expire_by_default(store):
+    """An agent may run unattended for days.
+
+    A capability that dies mid-run fails far from its cause: the agent sees an
+    HTTP error from a call that worked an hour earlier. Scope is what contains
+    a capability, and scope does not decay.
+    """
+    _, cap = store.issue(
+        CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
+    )
+    assert cap.expires_at == 0.0
+    cap.check_alive(now=time.time() + 86400 * 30)
+
+
+def test_the_request_budget_is_unlimited_by_default(store):
+    token, cap = store.issue(
+        CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
+    )
+    for _ in range(500):
+        store.record_usage(cap, 4096)
+    reloaded = store.lookup(token)
+    assert reloaded.used_requests == 500
+    reloaded.check_alive()
+
+
+def test_an_unlimited_request_budget_implies_an_unlimited_byte_budget(store):
+    """The byte budget derives from the request budget when not set outright.
+
+    Without this, removing one ceiling would leave the other at zero - which
+    denies every request rather than allowing them all.
+    """
+    _, cap = store.issue(
+        CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
+    )
+    assert cap.byte_budget == 0
+    cap.used_bytes = 10 * 1024**3
+    cap.check_alive()
+
+
+def test_explicit_ceilings_still_apply(store):
+    """Unlimited is the default, not the only option."""
+    _, cap = store.issue(
+        CapabilitySpec(
+            provider="test",
+            hosts=["api.github.com"],
+            secret=SecretRef(service="x"),
+            ttl_seconds=60,
+            max_requests=1,
+        )
+    )
+    assert cap.expires_at > 0
+    cap.used_requests = 1
+    with pytest.raises(PolicyDenied) as exc:
+        cap.check_alive()
+    assert exc.value.reason == "request_budget_exhausted"
+
+
+def test_usage_is_still_reported_when_unlimited(store):
+    """No ceiling is not a reason to stop counting - `asbx cap ls` still shows
+    how much a capability has been used."""
+    _, cap = store.issue(
+        CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
+    )
+    store.record_usage(cap, 2048)
+    summary = cap.public_view()
+    assert summary["requests"] == "1/unlimited"
+    assert summary["bytes"] == "2048/unlimited"
+    assert summary["expires_in"] is None

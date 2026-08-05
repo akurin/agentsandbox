@@ -22,11 +22,22 @@ TUNNEL_DNS_ADDR = "10.0.0.53"
 CAPABILITY_PREFIX = "cap_v1_"
 
 #: Default ceilings applied to a capability when the issuer does not say
-#: otherwise.  They are deliberately small: a capability is meant to be minted
-#: for a task, not for a day.
-DEFAULT_MAX_REQUESTS = 100
+#: otherwise.  ``0`` means no limit.
+#:
+#: Expiry and request budgets default to unlimited because an agent may run
+#: unattended for days, and a capability that dies mid-run fails far from its
+#: cause: the agent sees an HTTP error from a call that worked an hour ago.
+#: What actually contains a capability is its *scope* - the host, path and
+#: method it is bound to, and the credential it can never read - and that
+#: holds however long it lives.  A ceiling is still available per capability
+#: (``--ttl``, ``--max-requests``) when a task genuinely is short.
+DEFAULT_MAX_REQUESTS = 0
+DEFAULT_TTL_SECONDS = 0
+
+#: Not a budget: a single response larger than this is *refused*, not
+#: truncated, so a runaway download cannot exhaust host memory. Unrelated to
+#: how long a capability lives, so it keeps a real value.
 DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
-DEFAULT_TTL_SECONDS = 3600
 DEFAULT_MAX_REDIRECTS = 3
 DEFAULT_UPSTREAM_TIMEOUT = 30.0
 

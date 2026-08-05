@@ -22,6 +22,7 @@ from .broker.approvals import FileApprovalGate
 from .broker.core import BrokerRequest
 from .broker.server import UnixBrokerClient, read_token
 from .capabilities import CapabilitySpec, CapabilityStore, InjectionSpec, SecretRef
+from .config import DEFAULT_MAX_REQUESTS, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
 from .errors import SandboxError
 from .keychain import KeychainProvider
 from .manager import SessionManager, check_environment, stop_session_by_id
@@ -542,7 +543,8 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
     where = session.label or session.project_path or "no label"
     print(f"capability {cap.cap_id} issued for {spec.provider}")
     print(f"  in session {session.session_id} ({where})")
-    print(f"  expires in {args.ttl}s, and is revoked when that session stops")
+    lifetime = f"expires in {args.ttl}s, and is" if args.ttl else "does not expire, but is"
+    print(f"  {lifetime} revoked when that session stops")
 
     print("\nPlaceholder (shown exactly once):\n")
     print(f"  {token}\n")
@@ -1290,9 +1292,21 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument("--header", default="Authorization", help="header name for --injection header")
     issue.add_argument("--template", default="Bearer {secret}", help="value template, must contain {secret}")
     issue.add_argument("--username", help="username for --injection basic")
-    issue.add_argument("--ttl", type=int, default=3600, help="lifetime in seconds")
-    issue.add_argument("--max-requests", type=int, default=100)
-    issue.add_argument("--max-response-bytes", type=int, default=8 * 1024 * 1024)
+    issue.add_argument(
+        "--ttl",
+        type=int,
+        default=DEFAULT_TTL_SECONDS,
+        help="lifetime in seconds (0 = never expires, the default)",
+    )
+    issue.add_argument(
+        "--max-requests",
+        type=int,
+        default=DEFAULT_MAX_REQUESTS,
+        help="request budget (0 = unlimited, the default)",
+    )
+    issue.add_argument(
+        "--max-response-bytes", type=int, default=DEFAULT_MAX_RESPONSE_BYTES
+    )
     issue.add_argument(
         "--approve-methods",
         nargs="*",

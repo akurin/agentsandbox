@@ -152,8 +152,17 @@ class Capability:
 
     @property
     def byte_budget(self) -> int:
+        """Cumulative byte ceiling, or ``0`` for unlimited.
+
+        Derived from the request budget when not set outright, so an unlimited
+        request budget implies an unlimited byte budget - otherwise removing
+        one ceiling would silently leave the other at zero, denying every
+        request.
+        """
         if self.max_total_bytes:
             return self.max_total_bytes
+        if not self.max_requests:
+            return 0
         return self.max_requests * self.max_response_bytes
 
     # -- validation ---------------------------------------------------------
@@ -164,9 +173,10 @@ class Capability:
             raise PolicyDenied("capability_revoked", "capability has been revoked")
         if self.expires_at and now >= self.expires_at:
             raise PolicyDenied("capability_expired", "capability has expired")
-        if self.used_requests >= self.max_requests:
+        # 0 means no ceiling; only enforce a budget that was actually asked for.
+        if self.max_requests and self.used_requests >= self.max_requests:
             raise PolicyDenied("request_budget_exhausted", "capability request budget spent")
-        if self.used_bytes >= self.byte_budget:
+        if self.byte_budget and self.used_bytes >= self.byte_budget:
             raise PolicyDenied("byte_budget_exhausted", "capability byte budget spent")
 
     def check_session(self, session_id: str) -> None:
@@ -248,8 +258,8 @@ class Capability:
             "operations": self.operations,
             "expires_at": self.expires_at,
             "expires_in": max(0, int(self.expires_at - time.time())) if self.expires_at else None,
-            "requests": f"{self.used_requests}/{self.max_requests}",
-            "bytes": f"{self.used_bytes}/{self.byte_budget}",
+            "requests": f"{self.used_requests}/{self.max_requests or 'unlimited'}",
+            "bytes": f"{self.used_bytes}/{self.byte_budget or 'unlimited'}",
             "approval_for": self.approval_required_methods,
             "revoked": self.revoked,
         }
@@ -389,7 +399,7 @@ class CapabilityStore:
             operations=list(spec.operations),
             secret=spec.secret,
             injection=spec.injection,
-            expires_at=time.time() + spec.ttl_seconds,
+            expires_at=(time.time() + spec.ttl_seconds) if spec.ttl_seconds else 0.0,
             max_requests=spec.max_requests,
             max_response_bytes=spec.max_response_bytes,
             max_total_bytes=spec.max_total_bytes,
