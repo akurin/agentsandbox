@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import time
 
+import pytest
+
 from agentsandbox import cli
 
 def test_every_command_appears_in_the_usage_line():
@@ -176,3 +178,48 @@ def test_waiting_returns_as_soon_as_the_socket_appears(tmp_path):
     started = time.monotonic()
     cli._await_ssh_channel(_WithSsh(), timeout=5.0)
     assert time.monotonic() - started < 1.0
+
+
+def test_shell_waits_for_the_sshd_banner_not_just_the_socket():
+    """Connecting to ssh.sock proves nothing: vfkit accepts, then fails to
+    dial the guest's vsock port and closes. Only the banner means sshd is
+    listening - and ssh's own ConnectionAttempts cannot cover the gap, because
+    with a ProxyCommand a proxy that exits is fatal rather than retryable.
+    That is why `asbx shell` returned instantly with no output at all."""
+    import inspect
+
+    source = inspect.getsource(cli._wait_for_sshd)
+    assert 'b"SSH-"' in source
+    assert "ConnectionAttempts" not in inspect.getsource(cli.cmd_shell)
+
+
+def test_the_sshd_probe_gives_up_rather_than_hanging(tmp_path):
+    started = time.monotonic()
+    assert cli._wait_for_sshd(tmp_path / "nothing.sock", timeout=1.0) is False
+    assert time.monotonic() - started < 10.0
+
+
+def test_the_sshd_probe_returns_when_the_banner_arrives(tmp_path):
+    import socket
+    import threading
+
+    from helpers import unix_sockets_available
+
+    if not unix_sockets_available(tmp_path):
+        pytest.skip("outbound unix sockets are blocked in this box")
+
+    path = tmp_path / "ssh.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen(1)
+
+    def _greet():
+        conn, _ = server.accept()
+        conn.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+        conn.close()
+
+    threading.Thread(target=_greet, daemon=True).start()
+    try:
+        assert cli._wait_for_sshd(path, timeout=10.0) is True
+    finally:
+        server.close()

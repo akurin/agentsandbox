@@ -96,6 +96,19 @@ runcmd:
   - [ sh, -c, "systemctl disable --now ssh 2>/dev/null || true" ]
   - [ sh, -c, "systemctl disable --now ssh.socket 2>/dev/null || true" ]
   - [ sh, -c, "systemctl enable systemd-networkd 2>/dev/null || true" ]
+  # Nothing in a session guest is allowed to wait for "the network to be
+  # online". The interface never gets a default route - wg-quick installs the
+  # only route there is - so wait-online can never call the link routable and
+  # burns its full two-minute timeout every boot. That delay lands before
+  # cloud-init's runcmd, which is what starts the bootstrap that brings up the
+  # tunnel, so the guest sits there with no tunnel and no sshd looking dead.
+  #
+  # Masked in the image rather than configured by cloud-init: cloud-init is
+  # what the stall delays, so anything it writes arrives too late to prevent
+  # it. RequiredForOnline=no in the .network unit covers later boots; this
+  # covers the first one.
+  - [ sh, -c, "systemctl mask systemd-networkd-wait-online.service 2>/dev/null || true" ]
+  - [ sh, -c, "systemctl mask systemd-networkd-wait-online@.service 2>/dev/null || true" ]
   # Report success where the host can see it.
   - [ sh, -c, "modprobe virtiofs 2>/dev/null || true" ]
   - [ mkdir, -p, /mnt/asbxprep ]

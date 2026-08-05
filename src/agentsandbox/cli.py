@@ -1162,23 +1162,55 @@ def cmd_shell(args: argparse.Namespace) -> int:
     proxy = f"{shlex.quote(sys.executable)} -m agentsandbox.cli vsock-proxy {shlex.quote(str(socket_path))}"
     identity.write_client_config(box.name, proxy)
 
-    # sshd comes up when the guest finishes booting, which on a first boot is
-    # after cloud-init has installed packages. Retrying here is the difference
-    # between "wait a few seconds" and "connection refused, try again yourself".
-    argv = [
-        "ssh",
-        "-F",
-        str(identity.config),
-        "-o",
-        "ConnectTimeout=5",
-        "-o",
-        "ConnectionAttempts=24",
-        f"asbx-{box.name}",
-    ]
+    if not _wait_for_sshd(socket_path):
+        print(
+            f"!! {box.name} is up but its sshd never answered.\n"
+            f"   `asbx diag` shows the guest console; the bootstrap may have failed.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    argv = ["ssh", "-F", str(identity.config), f"asbx-{box.name}"]
     if args.command:
         argv += ["--", *args.command]
     os.execvp("ssh", argv)  # replace ourselves; ssh owns the terminal from here
     return 0  # unreachable
+
+
+def _wait_for_sshd(socket_path: Path, timeout: float = 180.0) -> bool:
+    """Wait until the guest's sshd answers, by looking for its banner.
+
+    ssh's own ConnectionAttempts does not help here: with a ProxyCommand, a
+    proxy that exits is a fatal error rather than a retryable connect failure,
+    so ssh gives up on the first try. And it gives up quietly - the symptom is
+    `asbx shell` returning instantly with no output at all.
+
+    Connecting to the socket proves nothing either: vfkit accepts, then fails
+    to dial the guest's vsock port and closes. Only the banner means sshd is
+    actually listening.
+    """
+    import socket as _socket
+
+    deadline = time.monotonic() + timeout
+    announced = False
+    while time.monotonic() < deadline:
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.settimeout(5.0)
+        try:
+            sock.connect(str(socket_path))
+            if sock.recv(4).startswith(b"SSH-"):
+                return True
+        except OSError:
+            pass
+        finally:
+            sock.close()
+        if not announced:
+            # A first boot installs packages before sshd is reachable. Silence
+            # for two minutes is indistinguishable from a hang.
+            print("waiting for the guest to finish booting...", file=sys.stderr)
+            announced = True
+        time.sleep(2.0)
+    return False
 
 
 def cmd_vsock_proxy(args: argparse.Namespace) -> int:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+
 from agentsandbox.broker.core import BrokerRequest
 from agentsandbox.broker.upstream import UpstreamResponse
 
@@ -55,3 +57,25 @@ def make_request(token: str, **overrides) -> BrokerRequest:
     }
     fields.update(overrides)
     return BrokerRequest(**fields)
+
+
+def unix_sockets_available(tmp_path) -> bool:
+    """Claude's sandbox denies outbound unix connections; detect and skip."""
+    path = tmp_path / "probe.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(path))
+        server.listen(1)
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.connect(str(path))
+            return True
+        except OSError:
+            return False
+        finally:
+            client.close()
+    except OSError:
+        return False
+    finally:
+        server.close()
+        path.unlink(missing_ok=True)
