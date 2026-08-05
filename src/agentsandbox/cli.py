@@ -1189,7 +1189,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
     proxy = f"{shlex.quote(sys.executable)} -m agentsandbox.cli vsock-proxy {shlex.quote(str(socket_path))}"
     identity.write_client_config(box.name, proxy)
 
-    if not _wait_for_sshd(socket_path, ready_marker=session.paths.guest_logs / "ready"):
+    if not _wait_for_sshd(socket_path, guest_logs=session.paths.guest_logs):
         print(
             f"!! {box.name} is up but its sshd never answered.\n"
             f"   `asbx diag` shows the guest console; the bootstrap may have failed.",
@@ -1204,8 +1204,29 @@ def cmd_shell(args: argparse.Namespace) -> int:
     return 0  # unreachable
 
 
+def _guest_is_ready(guest_logs: Path | None) -> bool:
+    """Has the bootstrap finished?
+
+    Two signals, either of which counts. The marker file is the cheap one. The
+    bootstrap log is the fallback, and it exists because the marker is written
+    with `|| true` - it must never be able to abort a bootstrap that otherwise
+    succeeded - and because a guest booted by an older version writes the log
+    but not the marker. Requiring only the marker means waiting the full
+    timeout for something that is never coming, on a guest that is perfectly
+    healthy.
+    """
+    if guest_logs is None:
+        return True
+    if (guest_logs / "ready").exists():
+        return True
+    log = guest_logs / "bootstrap.log"
+    if log.exists():
+        return "[asbx-bootstrap] ready" in log.read_text(errors="replace")
+    return False
+
+
 def _wait_for_sshd(
-    socket_path: Path, timeout: float = 180.0, ready_marker: Path | None = None
+    socket_path: Path, timeout: float = 180.0, guest_logs: Path | None = None
 ) -> bool:
     """Wait until the guest's sshd answers, by looking for its banner.
 
@@ -1235,7 +1256,7 @@ def _wait_for_sshd(
                 # in that window has no tunnel and no capability placeholders,
                 # because the file holding them is still root-owned and the
                 # profile script skips what it cannot read.
-                if ready_marker is None or ready_marker.exists():
+                if _guest_is_ready(guest_logs):
                     return True
         except OSError:
             pass

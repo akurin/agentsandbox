@@ -274,7 +274,6 @@ def test_reachable_is_not_ready(tmp_path):
         pytest.skip("outbound unix sockets are blocked in this box")
 
     path = tmp_path / "ssh.sock"
-    marker = tmp_path / "ready"
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(path))
     server.listen(8)
@@ -290,10 +289,12 @@ def test_reachable_is_not_ready(tmp_path):
 
     threading.Thread(target=_greet, daemon=True).start()
     try:
+        logs = tmp_path / "guest-logs"
+        logs.mkdir()
         # sshd answers, but the bootstrap has not finished.
-        assert cli._wait_for_sshd(path, timeout=3.0, ready_marker=marker) is False
-        marker.write_text("2026-08-05T09:00:00Z")
-        assert cli._wait_for_sshd(path, timeout=10.0, ready_marker=marker) is True
+        assert cli._wait_for_sshd(path, timeout=3.0, guest_logs=logs) is False
+        (logs / "ready").write_text("2026-08-05T09:00:00Z")
+        assert cli._wait_for_sshd(path, timeout=10.0, guest_logs=logs) is True
     finally:
         server.close()
 
@@ -305,3 +306,32 @@ def test_the_bootstrap_writes_the_marker_last():
     ).read_text()
     assert "/var/log/asbx/ready" in text
     assert text.index("asbx-netcheck") < text.index("/var/log/asbx/ready")
+
+
+def test_a_finished_bootstrap_log_counts_as_ready(tmp_path):
+    """The marker is written with `|| true` so it can never abort a bootstrap
+    that otherwise succeeded - which means it can also fail to appear. And a
+    guest booted before the marker existed writes the log but not the file.
+    Requiring only the marker means waiting the full timeout for something
+    that is never coming, on a guest that is fine."""
+    logs = tmp_path / "guest-logs"
+    logs.mkdir()
+    assert cli._guest_is_ready(logs) is False
+
+    (logs / "bootstrap.log").write_text("[asbx-bootstrap] bringing up the tunnel\n")
+    assert cli._guest_is_ready(logs) is False
+
+    (logs / "bootstrap.log").write_text(
+        "[asbx-bootstrap] bringing up the tunnel\n[asbx-bootstrap] ready\n"
+    )
+    assert cli._guest_is_ready(logs) is True
+
+
+def test_a_half_written_bootstrap_log_is_not_ready(tmp_path):
+    """A bootstrap that died partway leaves a log without the last line."""
+    logs = tmp_path / "guest-logs"
+    logs.mkdir()
+    (logs / "bootstrap.log").write_text(
+        "[asbx-bootstrap] FATAL: no session CA - https would fail for everything\n"
+    )
+    assert cli._guest_is_ready(logs) is False
