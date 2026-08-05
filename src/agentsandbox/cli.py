@@ -1068,19 +1068,30 @@ def cmd_box_set(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         changes.append(f"image   {box.image} -> {args.image}")
         box.image = args.image
-    if args.mount is not None:
-        # Replaces the whole list, the same way --image replaces the whole
-        # value rather than editing it in place - there is no --unmount to
-        # pair with an additive --mount, so "these are the mounts now" is the
-        # only shape that does not need one.
-        if conflict := _mount_collision(args.mount):
+    if args.mount_rm or args.mount_add:
+        # Incremental, not replace: a replace flag risks silently dropping
+        # whatever mount the caller forgot to retype. Removals apply first,
+        # so `--mount-rm X --mount-add ...:X` reads as "change what's at X"
+        # in one command.
+        mounts = list(box.mounts)
+        for guest in args.mount_rm or []:
+            match = next((m for m in mounts if m.guest == guest), None)
+            if match is None:
+                print(f"!! no mount at guest path {guest!r} to remove", file=sys.stderr)
+                return EXIT_USAGE
+            mounts.remove(match)
+            changes.append(f"mount   - {guest}")
+        mounts.extend(args.mount_add or [])
+        if conflict := _mount_collision(mounts):
             print(f"!! {conflict}", file=sys.stderr)
             return EXIT_USAGE
-        changes.append(f"mounts  {len(box.mounts)} -> {len(args.mount)}")
-        box.mounts = args.mount
+        for mount in args.mount_add or []:
+            mode = "ro" if mount.read_only else "rw"
+            changes.append(f"mount   + {mount.host}:{mount.guest}:{mode}")
+        box.mounts = mounts
 
     if not changes:
-        print("nothing to change: pass --memory, --cpus, --image or --mount", file=sys.stderr)
+        print("nothing to change: pass --memory, --cpus, --image, --mount-add or --mount-rm", file=sys.stderr)
         return EXIT_USAGE
 
     box.save()
@@ -1727,11 +1738,19 @@ def build_parser() -> argparse.ArgumentParser:
     set_cmd.add_argument("--cpus", type=int)
     set_cmd.add_argument("--image", help="base image; takes effect on the next `asbx box reset`")
     set_cmd.add_argument(
-        "--mount",
+        "--mount-add",
         action="append",
+        dest="mount_add",
         type=_parse_mount,
         metavar="HOST:GUEST[:ro|rw]",
-        help="replace the box's whole mount list (repeatable; takes effect on the next start)",
+        help="add a mount (repeatable; takes effect on the next start)",
+    )
+    set_cmd.add_argument(
+        "--mount-rm",
+        action="append",
+        dest="mount_rm",
+        metavar="GUEST",
+        help="remove the mount at this guest path (repeatable; takes effect on the next start)",
     )
     set_cmd.set_defaults(func=cmd_box_set)
 

@@ -468,3 +468,80 @@ def test_the_rest_of_the_configuration_survives_a_resize():
     assert reloaded.profile == "wiremock"
     assert reloaded.allow_hosts == ["example.com"]
     assert reloaded.mounts == [Mount(host="/some/project", guest="/some/project")]
+
+
+def test_box_set_mount_add_and_rm_are_incremental(project, tmp_path, capsys):
+    """`box set` has no replace-mode --mount: forgetting to retype an existing
+    mount would silently drop it. --mount-add/--mount-rm can only ever touch
+    the entry they name."""
+    extra = tmp_path / "extra"
+    extra.mkdir()
+
+    cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo"])
+    capsys.readouterr()
+
+    assert cli.main(["box", "set", "neo", "--mount-add", f"{extra}:/mnt/extra:ro"]) == 0
+    box = Box.load("neo")
+    assert [m.guest for m in box.mounts] == ["/home/agent/neo", "/mnt/extra"]
+    assert box.mounts[1].read_only is True
+
+    assert cli.main(["box", "set", "neo", "--mount-rm", "/home/agent/neo"]) == 0
+    box = Box.load("neo")
+    assert [m.guest for m in box.mounts] == ["/mnt/extra"]
+
+
+def test_box_set_mount_rm_unknown_guest_is_an_error(project, capsys):
+    cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo"])
+    capsys.readouterr()
+
+    assert cli.main(["box", "set", "neo", "--mount-rm", "/no/such/guest"]) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "/no/such/guest" in err
+    assert Box.load("neo").mounts[0].guest == "/home/agent/neo"
+
+
+def test_box_set_mount_add_collision_is_rejected(project, tmp_path, capsys):
+    other = tmp_path / "other"
+    other.mkdir()
+
+    cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo"])
+    capsys.readouterr()
+
+    assert cli.main(["box", "set", "neo", "--mount-add", f"{other}:/home/agent/neo"]) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "/home/agent/neo" in err
+    assert len(Box.load("neo").mounts) == 1
+
+
+def test_box_set_mount_rm_then_add_same_guest_replaces_it(project, tmp_path, capsys):
+    """Removal is applied before addition, so swapping what's mounted at a
+    guest path is one command, not "rm, check it worked, then add"."""
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+
+    cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo"])
+    capsys.readouterr()
+
+    assert (
+        cli.main(
+            [
+                "box", "set", "neo",
+                "--mount-rm", "/home/agent/neo",
+                "--mount-add", f"{replacement}:/home/agent/neo",
+            ]
+        )
+        == 0
+    )
+    box = Box.load("neo")
+    assert len(box.mounts) == 1
+    assert box.mounts[0].host == str(replacement.resolve())
+
+
+def test_box_set_with_nothing_to_change_is_an_error(project, capsys):
+    cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo"])
+    capsys.readouterr()
+
+    assert cli.main(["box", "set", "neo"]) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "--mount-add" in err
+    assert "--mount-rm" in err
