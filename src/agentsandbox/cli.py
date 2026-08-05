@@ -389,6 +389,27 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
     return 0
 
 
+def _await_ssh_channel(manager, timeout: float = 20.0) -> None:
+    """Block until vfkit has created the ssh socket, if there is to be one.
+
+    Only waits when ssh was configured: a one-off `asbx session start` has no
+    sshd and no socket, and waiting for one would add twenty seconds to every
+    such run before timing out for a file that is never coming.
+
+    Not waiting for *sshd* - that is inside the guest and takes as long as the
+    boot takes. `asbx shell` retries for it.
+    """
+    driver = getattr(manager, "vm", None)
+    socket_path = getattr(getattr(driver, "vm", None), "ssh_socket", None)
+    if not socket_path:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if Path(socket_path).exists():
+            return
+        time.sleep(0.1)
+
+
 def _supervise(manager: SessionManager, *, purge: bool = False) -> None:
     """Own the session until the guest exits or someone asks us to stop.
 
@@ -406,6 +427,13 @@ def _supervise(manager: SessionManager, *, purge: bool = False) -> None:
 
     signal.signal(signal.SIGTERM, _handle)
     signal.signal(signal.SIGINT, _handle)
+
+    # Do not report ready until the box is usable. `asbx start` prints
+    # "asbx shell NAME" as the next step, and vfkit creates that socket a
+    # moment after the guest process exists - so signalling here immediately
+    # meant `asbx start box && asbx shell box` lost a race with its own
+    # advice, and failed claiming the session predated ssh support.
+    _await_ssh_channel(manager)
 
     # Detached: tell the CLI it can return. Foreground: a no-op.
     signal_ready()
@@ -1111,11 +1139,17 @@ def cmd_shell(args: argparse.Namespace) -> int:
         print(f"!! {box.name} has no ssh keys; recreate it with `asbx create`", file=sys.stderr)
         return EXIT_USAGE
 
+    # vfkit creates this a moment after the guest process appears. `asbx start`
+    # now waits for it before reporting ready, so it is normally already here;
+    # the poll covers a box started by other means, and a slow host.
     socket_path = session.paths.run / "ssh.sock"
+    deadline = time.monotonic() + 20.0
+    while not socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.2)
     if not socket_path.exists():
         print(
-            f"!! {box.name} is running but has no ssh channel at {socket_path}.\n"
-            "   It was probably started before ssh support existed - restart it.",
+            f"!! {box.name} has no ssh channel at {socket_path} after 20s.\n"
+            f"   The guest may have failed early - `asbx diag` shows its console.",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -1125,7 +1159,19 @@ def cmd_shell(args: argparse.Namespace) -> int:
     proxy = f"{shlex.quote(sys.executable)} -m agentsandbox.cli vsock-proxy {shlex.quote(str(socket_path))}"
     identity.write_client_config(box.name, proxy)
 
-    argv = ["ssh", "-F", str(identity.config), f"asbx-{box.name}"]
+    # sshd comes up when the guest finishes booting, which on a first boot is
+    # after cloud-init has installed packages. Retrying here is the difference
+    # between "wait a few seconds" and "connection refused, try again yourself".
+    argv = [
+        "ssh",
+        "-F",
+        str(identity.config),
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "ConnectionAttempts=24",
+        f"asbx-{box.name}",
+    ]
     if args.command:
         argv += ["--", *args.command]
     os.execvp("ssh", argv)  # replace ourselves; ssh owns the terminal from here

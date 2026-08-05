@@ -8,6 +8,7 @@ but the surface: what is reachable, and what a user can discover from
 from __future__ import annotations
 
 import argparse
+import time
 
 from agentsandbox import cli
 
@@ -142,3 +143,36 @@ def test_diag_collects_the_guest_console():
     source = inspect.getsource(cli.cmd_diag)
     assert 'paths.vm / "console.log"' in source
     assert source.index('"guest console"') < source.index('"guest bootstrap"')
+
+
+def test_start_waits_for_the_ssh_channel_before_reporting_ready():
+    """`asbx start box && asbx shell box` must not lose a race with its own
+    advice. start prints "asbx shell NAME" as the next step, so it has to be
+    true by the time it prints it."""
+    import inspect
+
+    source = inspect.getsource(cli._supervise)
+    assert source.index("_await_ssh_channel") < source.index("signal_ready()")
+
+
+def test_waiting_for_the_channel_is_skipped_when_there_is_no_sshd():
+    """A one-off session has no ssh socket, and waiting twenty seconds for a
+    file that is never coming would be added to every such run."""
+
+    class _NoSsh:
+        vm = None
+
+    started = time.monotonic()
+    cli._await_ssh_channel(_NoSsh(), timeout=5.0)
+    assert time.monotonic() - started < 1.0
+
+
+def test_waiting_returns_as_soon_as_the_socket_appears(tmp_path):
+    class _WithSsh:
+        class vm:
+            ssh_socket = tmp_path / "ssh.sock"
+
+    (tmp_path / "ssh.sock").write_text("")
+    started = time.monotonic()
+    cli._await_ssh_channel(_WithSsh(), timeout=5.0)
+    assert time.monotonic() - started < 1.0
