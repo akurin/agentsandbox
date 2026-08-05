@@ -135,16 +135,39 @@ class BrokerResponse:
         )
 
 
-def denial(reason: str, message: str, *, status: int = 403, cap_id: str = "") -> BrokerResponse:
+#: Denials an operator can undo by extending the grant, mapped to the flag
+#: that does it. Anything not listed here is a scope decision, and telling the
+#: guest how to "fix" those would be advice on how to get around the policy.
+RENEWABLE_REASONS = {"capability_expired": "--ttl"}
+
+
+def denial(
+    reason: str,
+    message: str,
+    *,
+    status: int = 403,
+    cap_id: str = "",
+    remedy: str = "",
+) -> BrokerResponse:
     """A denial the guest sees as an ordinary HTTP error.
 
     The message is intentionally about *policy*, never about the credential:
     it must not tell an attacker whether a capability exists, only that this
     operation is not permitted.
+
+    ``remedy`` is the exception, and only for a capability that has simply run
+    out: an expired grant is otherwise indistinguishable from a broken
+    credential, so an agent hitting one has no way to report anything useful
+    and a human reading the audit log has to reconstruct the context by hand.
+    Naming the capability and the command that extends it leaks nothing the
+    holder of that capability does not already know.
     """
-    body = json.dumps(
-        {"error": "sandbox_policy", "reason": reason, "message": message}, indent=2
-    ).encode()
+    payload = {"error": "sandbox_policy", "reason": reason, "message": message}
+    if cap_id:
+        payload["capability"] = cap_id
+    if remedy:
+        payload["remedy"] = remedy
+    body = json.dumps(payload, indent=2).encode()
     return BrokerResponse(
         status_code=status,
         headers=[
@@ -188,10 +211,16 @@ class BrokerCore:
         started = time.monotonic()
         cap: Capability | None = None
         try:
-            cap = self._authorize(req)
+            cap = self._resolve(req)
+            self._authorize(req, cap)
             response = self._perform(req, cap)
         except PolicyDenied as denied:
-            response = denial(denied.reason, denied.message, cap_id=cap.cap_id if cap else "")
+            response = denial(
+                denied.reason,
+                denied.message,
+                cap_id=cap.cap_id if cap else "",
+                remedy=self._remedy(denied.reason, cap),
+            )
         except UpstreamError as exc:
             response = denial("upstream_failed", str(exc), status=502, cap_id=cap.cap_id if cap else "")
 
@@ -210,9 +239,27 @@ class BrokerCore:
         )
         return response
 
+    def _remedy(self, reason: str, cap: Capability | None) -> str:
+        """The command that would let this request through, if one exists."""
+        flag = RENEWABLE_REASONS.get(reason)
+        if not flag or cap is None:
+            return ""
+        return (
+            f"on the host: asbx --session {self.session_id} "
+            f"cap renew {cap.cap_id} {flag} <seconds>"
+        )
+
     # -- steps --------------------------------------------------------------
 
-    def _authorize(self, req: BrokerRequest) -> Capability:
+    def _resolve(self, req: BrokerRequest) -> Capability:
+        """Find the capability, before deciding anything about it.
+
+        Kept separate from :meth:`_authorize` so that every denial *after* this
+        point can name the capability it is about. Doing the lookup inside the
+        checks meant an expired grant produced a denial that identified
+        nothing - which is exactly the case where the operator most needs to
+        know which one to renew.
+        """
         if not req.capability.startswith(CAPABILITY_PREFIX):
             raise PolicyDenied("malformed_capability", "not a capability placeholder")
 
@@ -227,7 +274,9 @@ class BrokerCore:
                 method=req.method,
             )
             raise PolicyDenied("unknown_capability", "this capability is not valid")
+        return cap
 
+    def _authorize(self, req: BrokerRequest, cap: Capability) -> None:
         # Session-wide egress policy applies before the capability's own scope:
         # a capability cannot widen where the session may talk.
         self.policy.check(req.dest)
@@ -260,7 +309,6 @@ class BrokerCore:
             )
             if not self.approvals.decide(approval):
                 raise PolicyDenied("approval_denied", "the operator did not approve this operation")
-        return cap
 
     def _reject_username_mismatch(self, req: BrokerRequest, cap: Capability) -> None:
         """Check the basic-auth credentials the guest actually presented.

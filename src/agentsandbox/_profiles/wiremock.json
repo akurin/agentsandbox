@@ -32,8 +32,7 @@
       "injection": {
         "kind": "basic",
         "username": "developer"
-      },
-      "max_requests": 500
+      }
     }
   ]
 }

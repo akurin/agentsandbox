@@ -22,7 +22,7 @@ from .broker.approvals import FileApprovalGate
 from .broker.core import BrokerRequest
 from .broker.server import UnixBrokerClient, read_token
 from .capabilities import CapabilitySpec, CapabilityStore, InjectionSpec, SecretRef
-from .config import DEFAULT_MAX_REQUESTS, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
+from .config import DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
 from .errors import SandboxError
 from .keychain import KeychainProvider
 from .manager import SessionManager, check_environment, stop_session_by_id
@@ -531,7 +531,6 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
             username=args.username,
         ),
         ttl_seconds=args.ttl,
-        max_requests=args.max_requests,
         max_response_bytes=args.max_response_bytes,
         approval_required_methods=args.approve_methods,
         label=args.label,
@@ -668,6 +667,23 @@ def cmd_cap_list(args: argparse.Namespace) -> int:
         print(f"no capabilities in {len(sessions)} session(s)")
         return 0
     _print(out)
+    return 0
+
+
+def cmd_cap_renew(args: argparse.Namespace) -> int:
+    session = _resolve_session(args.session)
+    store = CapabilityStore(session.paths.capabilities, session.session_id)
+    cap = store.renew(args.cap_id, ttl_seconds=args.ttl)
+    if cap is None:
+        print(f"no such capability: {args.cap_id}", file=sys.stderr)
+        return 1
+
+    AuditLog(session.paths.audit_log, session.session_id).emit(
+        "capability.renewed", cap_id=cap.cap_id, ttl=args.ttl
+    )
+    print(f"renewed {cap.cap_id} ({cap.provider})")
+    print(f"  expires in {args.ttl}s" if args.ttl else "  no longer expires")
+    print("  takes effect on the next request; no restart needed")
     return 0
 
 
@@ -1299,12 +1315,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="lifetime in seconds (0 = never expires, the default)",
     )
     issue.add_argument(
-        "--max-requests",
-        type=int,
-        default=DEFAULT_MAX_REQUESTS,
-        help="request budget (0 = unlimited, the default)",
-    )
-    issue.add_argument(
         "--max-response-bytes", type=int, default=DEFAULT_MAX_RESPONSE_BYTES
     )
     issue.add_argument(
@@ -1334,6 +1344,16 @@ def build_parser() -> argparse.ArgumentParser:
     try_cmd.add_argument("--show-body", action="store_true")
     try_cmd.add_argument("--max-body", type=int, default=2000)
     try_cmd.set_defaults(func=cmd_cap_try)
+
+    renew = cap_sub.add_parser("renew", help="extend a capability that ran out")
+    renew.add_argument("cap_id")
+    renew.add_argument(
+        "--ttl",
+        type=int,
+        required=True,
+        help="seconds from now (0 = never expires)",
+    )
+    renew.set_defaults(func=cmd_cap_renew)
 
     revoke = cap_sub.add_parser("revoke", help="revoke one capability, or 'all'")
     revoke.add_argument("cap_id")

@@ -15,7 +15,7 @@ from agentsandbox.capabilities import (
     find_placeholders,
     res_matches,
 )
-from agentsandbox.errors import PolicyDenied
+from agentsandbox.errors import CapabilityError, PolicyDenied
 from agentsandbox.netpolicy import Destination
 
 GITHUB = Destination("https", "api.github.com", 443)
@@ -99,40 +99,6 @@ def test_expiry(store):
     with pytest.raises(PolicyDenied) as exc:
         cap.check_alive(now=time.time() + 2)
     assert exc.value.reason == "capability_expired"
-
-
-def test_request_budget_is_spent(store):
-    token, cap = store.issue(
-        CapabilitySpec(
-            provider="test",
-            hosts=["api.github.com"],
-            secret=SecretRef(service="x"),
-            max_requests=2,
-        )
-    )
-    store.record_usage(cap, 10)
-    store.record_usage(cap, 10)
-    reloaded = store.lookup(token)
-    assert reloaded.used_requests == 2
-    with pytest.raises(PolicyDenied) as exc:
-        reloaded.check_alive()
-    assert exc.value.reason == "request_budget_exhausted"
-
-
-def test_byte_budget_is_spent(store):
-    token, cap = store.issue(
-        CapabilitySpec(
-            provider="test",
-            hosts=["api.github.com"],
-            secret=SecretRef(service="x"),
-            max_requests=100,
-            max_total_bytes=1000,
-        )
-    )
-    store.record_usage(cap, 1500)
-    with pytest.raises(PolicyDenied) as exc:
-        store.lookup(token).check_alive()
-    assert exc.value.reason == "byte_budget_exhausted"
 
 
 def test_revocation_is_immediate(store, github_capability):
@@ -285,57 +251,116 @@ def test_a_capability_does_not_expire_by_default(store):
     cap.check_alive(now=time.time() + 86400 * 30)
 
 
-def test_the_request_budget_is_unlimited_by_default(store):
-    token, cap = store.issue(
-        CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
-    )
-    for _ in range(500):
-        store.record_usage(cap, 4096)
-    reloaded = store.lookup(token)
-    assert reloaded.used_requests == 500
-    reloaded.check_alive()
-
-
-def test_an_unlimited_request_budget_implies_an_unlimited_byte_budget(store):
-    """The byte budget derives from the request budget when not set outright.
-
-    Without this, removing one ceiling would leave the other at zero - which
-    denies every request rather than allowing them all.
-    """
-    _, cap = store.issue(
-        CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
-    )
-    assert cap.byte_budget == 0
-    cap.used_bytes = 10 * 1024**3
-    cap.check_alive()
-
-
-def test_explicit_ceilings_still_apply(store):
-    """Unlimited is the default, not the only option."""
+def test_renew_extends_an_expired_capability(store):
     _, cap = store.issue(
         CapabilitySpec(
             provider="test",
             hosts=["api.github.com"],
             secret=SecretRef(service="x"),
-            ttl_seconds=60,
-            max_requests=1,
+            ttl_seconds=1,
         )
     )
-    assert cap.expires_at > 0
-    cap.used_requests = 1
-    with pytest.raises(PolicyDenied) as exc:
-        cap.check_alive()
-    assert exc.value.reason == "request_budget_exhausted"
+    with pytest.raises(PolicyDenied):
+        cap.check_alive(now=time.time() + 2)
+
+    renewed = store.renew(cap.cap_id, ttl_seconds=3600)
+    assert renewed is not None
+    renewed.check_alive(now=time.time() + 2)
 
 
-def test_usage_is_still_reported_when_unlimited(store):
-    """No ceiling is not a reason to stop counting - `asbx cap ls` still shows
-    how much a capability has been used."""
+def test_renewing_an_unknown_capability_reports_it(store):
+    assert store.renew("nosuchid", ttl_seconds=60) is None
+
+
+def test_renew_to_zero_ttl_means_never_expires(store):
     _, cap = store.issue(
+        CapabilitySpec(
+            provider="test",
+            hosts=["api.github.com"],
+            secret=SecretRef(service="x"),
+            ttl_seconds=1,
+        )
+    )
+    renewed = store.renew(cap.cap_id, ttl_seconds=0)
+    assert renewed.expires_at == 0.0
+    renewed.check_alive(now=time.time() + 86400)
+
+
+def test_usage_is_counted_even_though_nothing_caps_it(store):
+    """Budgets are gone; the counters are not.
+
+    They are what `asbx cap ls` and the audit log report, and "how much has
+    this capability actually been used" stays worth knowing when the answer
+    no longer changes any decision.
+    """
+    token, cap = store.issue(
         CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
     )
-    store.record_usage(cap, 2048)
-    summary = cap.public_view()
-    assert summary["requests"] == "1/unlimited"
-    assert summary["bytes"] == "2048/unlimited"
-    assert summary["expires_in"] is None
+    for _ in range(300):
+        store.record_usage(cap, 4096)
+    reloaded = store.lookup(token)
+    assert reloaded.used_requests == 300
+    assert reloaded.used_bytes == 300 * 4096
+    reloaded.check_alive()
+    assert reloaded.public_view()["requests"] == 300
+
+
+def test_renew_does_not_reset_the_usage_counters(store):
+    """A capability renewed four times should look like it in the audit log."""
+    token, cap = store.issue(
+        CapabilitySpec(
+            provider="test",
+            hosts=["api.github.com"],
+            secret=SecretRef(service="x"),
+            ttl_seconds=1,
+        )
+    )
+    store.record_usage(cap, 100)
+    store.renew(cap.cap_id, ttl_seconds=3600)
+    assert store.lookup(token).used_requests == 1
+
+
+def test_a_revoked_capability_is_not_renewable(store, github_capability):
+    """Revocation is a decision, not a timeout."""
+    _, cap = github_capability
+    store.revoke(cap.cap_id)
+    with pytest.raises(CapabilityError):
+        store.renew(cap.cap_id, ttl_seconds=3600)
+
+
+def test_a_renewal_is_visible_to_an_already_loaded_store(store):
+    """The broker holds its own CapabilityStore on the same file.
+
+    Renewal is useless if the running broker does not notice it - not needing
+    a restart is the entire point.
+    """
+    token, cap = store.issue(
+        CapabilitySpec(
+            provider="test",
+            hosts=["api.github.com"],
+            secret=SecretRef(service="x"),
+            ttl_seconds=1,
+        )
+    )
+    broker_side = CapabilityStore(store.path, store.session_id)
+    broker_side.lookup(token)  # warm whatever cache it keeps
+    later = time.time() + 5
+    with pytest.raises(PolicyDenied):
+        broker_side.lookup(token).check_alive(now=later)
+
+    store.renew(cap.cap_id, ttl_seconds=3600)
+    broker_side.lookup(token).check_alive(now=later)
+
+
+def test_renewal_is_measured_from_now_not_from_the_old_expiry(store):
+    """A grant that lapsed overnight should come back with a full window."""
+    _, cap = store.issue(
+        CapabilitySpec(
+            provider="test",
+            hosts=["api.github.com"],
+            secret=SecretRef(service="x"),
+            ttl_seconds=1,
+        )
+    )
+    renewed = store.renew(cap.cap_id, ttl_seconds=600)
+    assert renewed.expires_at > time.time() + 550

@@ -142,7 +142,55 @@ def test_revoked_capability_is_refused_immediately(broker, store, github_capabil
     assert broker.handle(make_request(token)).reason == "capability_revoked"
 
 
-def test_request_budget_is_enforced_across_calls(session, store, executor, resolver):
+def test_usage_accumulates_without_ever_blocking(session, store, executor, resolver):
+    """There is no request budget: a long-running agent is not rate-limited
+    by us. Usage is still recorded, because the audit trail wants it."""
+    core = BrokerCore(
+        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+    )
+    token, cap = store.issue(
+        CapabilitySpec(
+            provider="github",
+            hosts=["api.github.com"],
+            secret=SecretRef(service="github-token"),
+        )
+    )
+    for _ in range(50):
+        assert core.handle(make_request(token)).decision == "allow"
+    assert len(executor.calls) == 50
+    assert store.lookup(token).used_requests == 50
+
+
+def test_an_expired_capability_says_which_one_and_how_to_extend_it(
+    session, store, executor, resolver
+):
+    """An expired grant is otherwise indistinguishable from a broken
+    credential - the agent cannot report anything useful, and whoever reads
+    the audit log has to reconstruct the context by hand."""
+    core = BrokerCore(
+        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+    )
+    token, cap = store.issue(
+        CapabilitySpec(
+            provider="github",
+            hosts=["api.github.com"],
+            secret=SecretRef(service="github-token"),
+            ttl_seconds=-1,
+        )
+    )
+    response = core.handle(make_request(token))
+    assert response.reason == "capability_expired"
+
+    body = json.loads(response.body)
+    assert body["capability"] == cap.cap_id
+    assert "cap renew" in body["remedy"]
+    assert cap.cap_id in body["remedy"]
+    assert executor.calls == []
+
+
+def test_a_scope_denial_offers_no_remedy(session, store, executor, resolver):
+    """Telling the guest how to widen its own scope is advice on getting
+    around the policy. Only running out of time earns a remedy."""
     core = BrokerCore(
         session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
     )
@@ -151,14 +199,12 @@ def test_request_budget_is_enforced_across_calls(session, store, executor, resol
             provider="github",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
-            max_requests=2,
+            path_globs=["/user"],
         )
     )
-    assert core.handle(make_request(token)).decision == "allow"
-    assert core.handle(make_request(token)).decision == "allow"
-    third = core.handle(make_request(token))
-    assert third.reason == "request_budget_exhausted"
-    assert len(executor.calls) == 2
+    response = core.handle(make_request(token, target="/admin/keys"))
+    assert response.reason == "path_not_permitted"
+    assert "remedy" not in json.loads(response.body)
 
 
 def test_oversized_response_is_refused_not_truncated(session, store, resolver):
@@ -722,3 +768,28 @@ def test_an_exact_placeholder_password_is_accepted(broker, executor, store):
     assert broker.handle(
         make_request(token, headers=[("Authorization", _basic("developer", token))])
     ).decision == "allow"
+
+
+def test_the_suggested_remedy_is_a_command_that_actually_parses(session, store, resolver):
+    """A remedy that does not run is worse than no remedy: it sends whoever
+    reads it off debugging their shell instead of their sandbox."""
+    import shlex
+
+    from agentsandbox.cli import build_parser
+
+    core = BrokerCore(session.session_id, store, session.policy, resolver)
+    token, cap = store.issue(
+        CapabilitySpec(
+            provider="github",
+            hosts=["api.github.com"],
+            secret=SecretRef(service="github-token"),
+            ttl_seconds=-1,
+        )
+    )
+    remedy = json.loads(core.handle(make_request(token)).body)["remedy"]
+    command = remedy.split(": ", 1)[1].replace("<seconds>", "600")
+
+    args = build_parser().parse_args(shlex.split(command)[1:])
+    assert args.cap_id == cap.cap_id
+    assert args.session == session.session_id
+    assert args.ttl == 600

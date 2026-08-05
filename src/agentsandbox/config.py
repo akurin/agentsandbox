@@ -21,17 +21,14 @@ TUNNEL_DNS_ADDR = "10.0.0.53"
 #: Prefix of the placeholder the guest sees instead of a real credential.
 CAPABILITY_PREFIX = "cap_v1_"
 
-#: Default ceilings applied to a capability when the issuer does not say
-#: otherwise.  ``0`` means no limit.
-#:
-#: Expiry and request budgets default to unlimited because an agent may run
-#: unattended for days, and a capability that dies mid-run fails far from its
-#: cause: the agent sees an HTTP error from a call that worked an hour ago.
-#: What actually contains a capability is its *scope* - the host, path and
-#: method it is bound to, and the credential it can never read - and that
-#: holds however long it lives.  A ceiling is still available per capability
-#: (``--ttl``, ``--max-requests``) when a task genuinely is short.
-DEFAULT_MAX_REQUESTS = 0
+#: Capabilities do not expire by default: an agent may run unattended for
+#: days, and one that dies mid-run fails far from its cause - an HTTP error
+#: from a call that worked an hour ago, with nobody present to spot the
+#: pattern.  What contains a capability is its *scope*: the host, path and
+#: method it is bound to, the session it dies with, and the credential it can
+#: never read.  None of that decays with time.  ``--ttl`` remains available
+#: for the one thing scope cannot express - a grant narrower than the session,
+#: such as thirty minutes of elevated access inside a run lasting days.
 DEFAULT_TTL_SECONDS = 0
 
 #: Not a budget: a single response larger than this is *refused*, not

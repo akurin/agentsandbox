@@ -16,8 +16,7 @@
       "hosts": ["api.openai.com"],
       "methods": ["POST"],
       "paths": ["/*"],
-      "secret": "keychain:asbx-openai:default",
-      "max_requests": 50
+      "secret": "keychain:asbx-openai:default"
     }
   ]
 }

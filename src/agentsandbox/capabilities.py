@@ -10,8 +10,8 @@ file does not yield working placeholders, and the audit log can refer to a
 capability by its short id without ever printing the token.
 
 Every capability is bound to the axes the spec lists: session, provider and
-account, hostnames, resources, methods and semantic operations, an expiry,
-request and byte budgets, and whether a human must approve.
+account, hostnames, resources, methods and semantic operations, an optional
+expiry, and whether a human must approve.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from typing import Any, Iterable
 
 from .config import (
     CAPABILITY_PREFIX,
-    DEFAULT_MAX_REQUESTS,
     DEFAULT_MAX_RESPONSE_BYTES,
     DEFAULT_TTL_SECONDS,
     write_private_file,
@@ -134,9 +133,7 @@ class Capability:
     secret: SecretRef = field(default_factory=SecretRef)
     injection: InjectionSpec = field(default_factory=InjectionSpec)
     expires_at: float = 0.0
-    max_requests: int = DEFAULT_MAX_REQUESTS
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
-    max_total_bytes: int = 0  # 0 = derive from max_requests * max_response_bytes
     approval_required_methods: list[str] = field(default_factory=lambda: list(MUTATING_METHODS))
     revoked: bool = False
     used_requests: int = 0
@@ -150,21 +147,6 @@ class Capability:
     def cap_id(self) -> str:
         return short_id(self.token_hash)
 
-    @property
-    def byte_budget(self) -> int:
-        """Cumulative byte ceiling, or ``0`` for unlimited.
-
-        Derived from the request budget when not set outright, so an unlimited
-        request budget implies an unlimited byte budget - otherwise removing
-        one ceiling would silently leave the other at zero, denying every
-        request.
-        """
-        if self.max_total_bytes:
-            return self.max_total_bytes
-        if not self.max_requests:
-            return 0
-        return self.max_requests * self.max_response_bytes
-
     # -- validation ---------------------------------------------------------
 
     def check_alive(self, now: float | None = None) -> None:
@@ -173,11 +155,6 @@ class Capability:
             raise PolicyDenied("capability_revoked", "capability has been revoked")
         if self.expires_at and now >= self.expires_at:
             raise PolicyDenied("capability_expired", "capability has expired")
-        # 0 means no ceiling; only enforce a budget that was actually asked for.
-        if self.max_requests and self.used_requests >= self.max_requests:
-            raise PolicyDenied("request_budget_exhausted", "capability request budget spent")
-        if self.byte_budget and self.used_bytes >= self.byte_budget:
-            raise PolicyDenied("byte_budget_exhausted", "capability byte budget spent")
 
     def check_session(self, session_id: str) -> None:
         if session_id != self.session_id:
@@ -258,8 +235,8 @@ class Capability:
             "operations": self.operations,
             "expires_at": self.expires_at,
             "expires_in": max(0, int(self.expires_at - time.time())) if self.expires_at else None,
-            "requests": f"{self.used_requests}/{self.max_requests or 'unlimited'}",
-            "bytes": f"{self.used_bytes}/{self.byte_budget or 'unlimited'}",
+            "requests": self.used_requests,
+            "bytes": self.used_bytes,
             "approval_for": self.approval_required_methods,
             "revoked": self.revoked,
         }
@@ -294,9 +271,7 @@ class CapabilitySpec:
     secret: SecretRef = field(default_factory=SecretRef)
     injection: InjectionSpec = field(default_factory=InjectionSpec)
     ttl_seconds: int = DEFAULT_TTL_SECONDS
-    max_requests: int = DEFAULT_MAX_REQUESTS
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
-    max_total_bytes: int = 0
     approval_required_methods: list[str] | None = None
     label: str = ""
     #: Environment variable the placeholder is delivered as inside the guest,
@@ -318,9 +293,7 @@ class CapabilitySpec:
             secret=SecretRef.from_dict(data.get("secret", {})),
             injection=InjectionSpec.from_dict(data.get("injection", {})),
             ttl_seconds=int(data.get("ttl_seconds", DEFAULT_TTL_SECONDS)),
-            max_requests=int(data.get("max_requests", DEFAULT_MAX_REQUESTS)),
             max_response_bytes=int(data.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)),
-            max_total_bytes=int(data.get("max_total_bytes", 0)),
             approval_required_methods=data.get("approval_required_methods"),
             label=data.get("label", ""),
         )
@@ -400,9 +373,7 @@ class CapabilityStore:
             secret=spec.secret,
             injection=spec.injection,
             expires_at=(time.time() + spec.ttl_seconds) if spec.ttl_seconds else 0.0,
-            max_requests=spec.max_requests,
             max_response_bytes=spec.max_response_bytes,
-            max_total_bytes=spec.max_total_bytes,
             approval_required_methods=(
                 list(spec.approval_required_methods)
                 if spec.approval_required_methods is not None
@@ -444,6 +415,35 @@ class CapabilityStore:
                     self._save()
                     return True
             return False
+
+    def renew(self, cap_id: str, *, ttl_seconds: int) -> Capability | None:
+        """Extend a capability that has expired, or push its expiry out.
+
+        ``ttl_seconds`` is measured from now, not from the old expiry: renewing
+        something that lapsed overnight should give a fresh window, not a
+        window that is already half spent.  Zero means it stops expiring.
+
+        The usage counters are deliberately not touched - they are what the
+        audit log is for, and a capability that has been renewed four times
+        should look like it.
+
+        Revoked capabilities are not renewable: revocation is a decision, not
+        a timeout.  Returns the updated capability, or ``None`` if there is no
+        such capability.
+        """
+        with self._lock:
+            self._load()
+            for cap in self._caps.values():
+                if cap.cap_id != cap_id:
+                    continue
+                if cap.revoked:
+                    raise CapabilityError(
+                        f"capability {cap_id} was revoked; issue a new one instead"
+                    )
+                cap.expires_at = (time.time() + ttl_seconds) if ttl_seconds else 0.0
+                self._save()
+                return cap
+            return None
 
     def revoke_all(self) -> int:
         with self._lock:
