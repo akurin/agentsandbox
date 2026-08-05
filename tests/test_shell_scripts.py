@@ -253,3 +253,41 @@ def test_the_wait_online_dropin_is_a_valid_unit_file():
     assert lines[1] == "ExecStart="          # the reset, required before an override
     assert "--timeout=5" in lines[2]
     assert "\\n" not in dropin["content"]    # literal backslash-n means it failed
+
+
+def _prepare_cloud_config():
+    yaml = pytest.importorskip("yaml")
+    text = (REPO / "vm/prepare-image.sh").read_text()
+    heredoc = text[text.index('cat >"$WORK/user-data" <<EOF') : text.index('cat >"$WORK/meta-data"')]
+    work = Path(tempfile.mkdtemp())
+    result = subprocess.run(
+        ["bash", "-c", f'set -euo pipefail\nWORK={work}\nPACKAGES="socat"\n{heredoc}'],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return yaml.safe_load((work / "user-data").read_text().split("\n", 1)[1])
+
+
+def test_netplan_is_removed_so_its_generator_cannot_override_the_timeout():
+    """netplan writes a wait-online drop-in into /run/systemd/generator.late,
+    which is applied after anything in /etc - so it overrode our timeout with
+    `-o routable -i enp0s1`, a state the guest can never reach. Drop-in
+    precedence cannot beat a generator, so netplan stops managing the NIC."""
+    document = _prepare_cloud_config()
+    flat = " ".join(" ".join(c) if isinstance(c, list) else str(c) for c in document["runcmd"])
+    assert "/etc/netplan/" in flat
+    paths = [f["path"] for f in document["write_files"]]
+    assert "/etc/cloud/cloud.cfg.d/99-asbx-disable-network.cfg" in paths
+
+
+def test_the_prepare_boot_keeps_its_own_networking():
+    """Removing netplan leaves the *next* prepare boot with no way to reach the
+    archive. It gets its own DHCP unit, removed again before poweroff so a
+    session guest never finds it - it would sort ahead of 10-asbx.network."""
+    document = _prepare_cloud_config()
+    dhcp = next(f for f in document["write_files"] if "prepare-dhcp" in f["path"])
+    assert "DHCP=yes" in dhcp["content"]
+    assert dhcp["path"] < "/etc/systemd/network/10-asbx.network"  # sorts first, as needed
+
+    flat = " ".join(" ".join(c) if isinstance(c, list) else str(c) for c in document["runcmd"])
+    assert "05-asbx-prepare-dhcp.network" in flat  # and is cleaned up

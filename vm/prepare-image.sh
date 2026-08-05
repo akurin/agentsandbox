@@ -70,6 +70,28 @@ packages:
 $(for pkg in $PACKAGES; do echo "  - $pkg"; done)
 
 write_files:
+  # Networking for *this* boot, which needs NAT to reach the archive. Once
+  # netplan is gone this is the only thing configuring the NIC during a
+  # prepare, so it is written on every prepare boot and removed again before
+  # poweroff - a session guest must not find it, since it would sort ahead of
+  # 10-asbx.network and DHCP an address the design does not want.
+  - path: /etc/systemd/network/05-asbx-prepare-dhcp.network
+    permissions: '0644'
+    content: |
+      [Match]
+      Name=en*
+
+      [Network]
+      DHCP=yes
+
+  # Stop cloud-init regenerating the netplan config we just removed. Session
+  # boots get their network from /etc/systemd/network/10-asbx.network.
+  - path: /etc/cloud/cloud.cfg.d/99-asbx-disable-network.cfg
+    permissions: '0644'
+    content: |
+      network:
+        config: disabled
+
   # Bounding wait-online, delivered as a file rather than built by printf
   # inside this heredoc. The escaping needed to survive the heredoc, YAML and
   # the shell produced a drop-in systemd silently ignored - the unit kept its
@@ -124,6 +146,21 @@ runcmd:
   # that stopped the guest reaching runcmd.
   - [ sh, -c, "systemctl unmask systemd-networkd-wait-online.service || true" ]
   - [ sh, -c, "systemctl unmask systemd-networkd-wait-online@.service || true" ]
+  # Take netplan out of the picture for session boots.
+  #
+  # netplan's systemd generator writes its own drop-in for wait-online into
+  # /run/systemd/generator.late, which is applied *after* anything in /etc -
+  # so our timeout override is overridden right back, with
+  #     ExecStart=... --any --dns -o routable -i enp0s1
+  # waiting for the interface to become routable. It never does: the guest has
+  # no default route by design, and that is the whole two minutes.
+  #
+  # Drop-in precedence cannot win against a generator, so netplan stops
+  # managing the interface instead. A session guest's NIC is configured by the
+  # .network unit cloud-init writes, which is static and deliberate; netplan
+  # was only ever there to DHCP an address we do not want.
+  - [ sh, -c, "rm -f /etc/netplan/*.yaml /etc/netplan/*.yml" ]
+  - [ sh, -c, "rm -f /etc/systemd/network/05-asbx-prepare-dhcp.network" ]
   - [ sh, -c, "systemctl daemon-reload" ]
   - [ sh, -c, "echo \"ASBX-WAITONLINE \$(systemctl show systemd-networkd-wait-online.service -p ExecStart --value | grep -c 'timeout=5')\" > /dev/hvc0" ]
   # Report success where the host can see it.
