@@ -8,6 +8,7 @@ but the surface: what is reachable, and what a user can discover from
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -335,3 +336,36 @@ def test_a_half_written_bootstrap_log_is_not_ready(tmp_path):
         "[asbx-bootstrap] FATAL: no session CA - https would fail for everything\n"
     )
     assert cli._guest_is_ready(logs) is False
+
+
+def test_stop_waits_for_the_supervisor_to_exit():
+    """`asbx stop box && asbx start box` is how anyone restarts a box.
+
+    Returning at the signal made that race the shutdown: start found the
+    session still marked running and refused, naming a session that was in the
+    middle of exiting.
+    """
+    import inspect
+
+    source = inspect.getsource(cli.cmd_box_stop)
+    assert "_await_supervisor_exit" in source
+    assert "args.wait" in source
+
+
+def test_waiting_returns_immediately_once_the_process_is_gone():
+    # A pid that cannot exist: wait should not burn the timeout on it.
+    started = time.monotonic()
+    assert cli._await_supervisor_exit(2**31 - 1, timeout=5.0) is True
+    assert time.monotonic() - started < 1.0
+
+
+def test_waiting_gives_up_rather_than_hanging():
+    started = time.monotonic()
+    assert cli._await_supervisor_exit(os.getpid(), timeout=1.0) is False
+    assert time.monotonic() - started < 10.0
+
+
+def test_no_wait_is_available_for_scripts():
+    args = cli.build_parser().parse_args(["stop", "neo", "--no-wait"])
+    assert args.wait is False
+    assert cli.build_parser().parse_args(["stop", "neo"]).wait is True

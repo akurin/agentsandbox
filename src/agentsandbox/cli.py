@@ -1318,6 +1318,29 @@ def cmd_vsock_proxy(args: argparse.Namespace) -> int:
         sock.close()
 
 
+#: How long to wait for a supervisor to exit. The guest powers itself off,
+#: which takes a few seconds; well under this on any healthy box.
+_STOP_TIMEOUT = 30.0
+
+
+def _await_supervisor_exit(pid: int, timeout: float = _STOP_TIMEOUT) -> bool:
+    """True once the supervisor is gone, False if it outlives the timeout."""
+    deadline = time.monotonic() + timeout
+    announced = False
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return True  # someone else's process now; ours is gone
+        if not announced and time.monotonic() > deadline - timeout + 3:
+            print("waiting for the guest to power off...", file=sys.stderr)
+            announced = True
+        time.sleep(0.25)
+    return False
+
+
 def cmd_box_stop(args: argparse.Namespace) -> int:
     """Stop the run belonging to a box (or the only running one)."""
     from .session import STATE_RUNNING
@@ -1337,13 +1360,29 @@ def cmd_box_stop(args: argparse.Namespace) -> int:
         return EXIT_USAGE
 
     session = running[0]
+    name = session.box_name or session.session_id
     if session.supervisor_pid and session.supervisor_pid != os.getpid():
         try:
             os.kill(session.supervisor_pid, signal.SIGTERM)
-            print(f"asked {session.box_name or session.session_id} to stop")
-            return 0
         except ProcessLookupError:
             pass
+        else:
+            # Wait for it to actually be gone. Returning at the signal made
+            # `asbx stop box && asbx start box` - the obvious way to restart -
+            # race the shutdown and fail with "already running", pointing at a
+            # session that was in the middle of exiting.
+            if args.wait and _await_supervisor_exit(session.supervisor_pid):
+                print(f"stopped {name}")
+                return 0
+            if not args.wait:
+                print(f"asked {name} to stop")
+                return 0
+            print(
+                f"!! {name} did not stop within {_STOP_TIMEOUT:.0f}s "
+                f"(supervisor pid {session.supervisor_pid} still alive)",
+                file=sys.stderr,
+            )
+            return 1
     stop_session_by_id(session.session_id, purge=args.purge)
     print(f"stopped {session.box_name or session.session_id}")
     return 0
@@ -1507,7 +1546,13 @@ def build_parser() -> argparse.ArgumentParser:
     stop_env = sub.add_parser("stop", help="stop a running box")
     stop_env.add_argument("name", nargs="?", help="box name (default: the only running one)")
     stop_env.add_argument("--purge", action="store_true", help="also erase the run's audit trail")
-    stop_env.set_defaults(func=cmd_box_stop)
+    stop_env.add_argument(
+        "--no-wait",
+        dest="wait",
+        action="store_false",
+        help="return as soon as the stop is requested, without waiting for it",
+    )
+    stop_env.set_defaults(func=cmd_box_stop, wait=True)
 
     prune_top = sub.add_parser("prune", help="delete leftover state from finished runs")
     prune_top.add_argument("--older-than", type=int, metavar="DAYS")
