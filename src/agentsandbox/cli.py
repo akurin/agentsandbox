@@ -1493,16 +1493,20 @@ def cmd_web(args: argparse.Namespace) -> int:
     print(reply.get("message", ""))
     if url := reply.get("url"):
         print(f"  {url}")
-    # Say what it cost, rather than leaving it to be noticed. Both directions
-    # restart mitmproxy, so both reset connections in flight.
-    print("  connections in flight were reset")
-    if reply.get("tunnel") == "renegotiated":
-        print("  the guest's tunnel was renegotiated; it is usable now")
-    else:
-        print(
-            "  the guest could not be asked to renegotiate its tunnel - expect\n"
-            "  up to 15s of dropped packets before it re-handshakes on its own"
-        )
+    # Only an actual restart costs anything - "already attached/detached" is
+    # a no-op the mitmproxy process never saw, so nothing was reset and there
+    # is no tunnel to renegotiate. Printing the restart cost anyway would say
+    # a request was dropped and packets are about to be lost when neither
+    # happened.
+    if reply.get("changed"):
+        print("  connections in flight were reset")
+        if reply.get("tunnel") == "renegotiated":
+            print("  the guest's tunnel was renegotiated; it is usable now")
+        else:
+            print(
+                "  the guest could not be asked to renegotiate its tunnel - expect\n"
+                "  up to 15s of dropped packets before it re-handshakes on its own"
+            )
     if attach:
         print()
         print(_mitmweb_warning(), file=sys.stderr)

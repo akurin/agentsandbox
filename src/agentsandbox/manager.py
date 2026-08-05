@@ -300,7 +300,12 @@ class SessionManager:
         the price of not restarting the whole box.
         """
         if self.mitm is not None and self.mitm.web == web:
-            return {"ok": True, "message": f"already {'attached' if web else 'detached'}",
+            # Nothing below this point ran: no restart, no reset connections,
+            # no tunnel renegotiation - there was nothing to renegotiate.
+            # `changed` is how the caller tells this apart from an actual
+            # restart, which costs all three.
+            return {"ok": True, "changed": False,
+                    "message": f"already {'attached' if web else 'detached'}",
                     "url": self.mitm.web_url if web else ""}
 
         previous = self.mitm
@@ -322,6 +327,7 @@ class SessionManager:
         )
         return {
             "ok": True,
+            "changed": True,
             "message": "mitmweb attached" if web else "mitmweb detached",
             "url": self.mitm.web_url if web else "",
             "tunnel": "renegotiated" if tunnel.ok else "waiting for the guest to re-handshake",

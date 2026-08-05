@@ -683,3 +683,39 @@ def test_a_bare_session_id_still_resolves_when_no_box_shares_its_name():
     manager = SessionManager.create(allow_hosts=["example.com"])
     resolved = cli._resolve_session(manager.session.session_id)
     assert resolved.session_id == manager.session.session_id
+
+
+# -- reattaching mitmweb when nothing actually changes ------------------
+
+
+def test_reattaching_to_the_same_mode_is_a_no_op_and_says_so():
+    """"already attached/detached" means the mitmproxy process was never
+    touched: no restart, no reset connections, no tunnel to renegotiate. The
+    reply has to carry that - `changed: False` - or the CLI has no way to
+    tell a no-op apart from a real restart and prints costs that never
+    happened."""
+    from types import SimpleNamespace
+
+    manager = SessionManager.create(allow_hosts=["example.com"])
+    manager.mitm = SimpleNamespace(web=False, web_url=None)
+
+    reply = manager.reattach_proxy(web=False)
+    assert reply == {
+        "ok": True,
+        "changed": False,
+        "message": "already detached",
+        "url": "",
+    }
+
+
+def test_web_prints_restart_costs_only_when_something_actually_restarted():
+    """`connections in flight were reset` and the tunnel-renegotiation line
+    are true only when `reattach_proxy` actually restarted mitmproxy - which
+    is exactly what `reply["changed"]` distinguishes."""
+    import inspect
+
+    source = inspect.getsource(cli.cmd_web)
+    assert 'if reply.get("changed"):' in source
+    gate_index = source.index('if reply.get("changed"):')
+    reset_index = source.index("connections in flight were reset")
+    assert gate_index < reset_index
