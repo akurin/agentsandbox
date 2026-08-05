@@ -183,3 +183,16 @@ def test_the_provisioning_cloud_config_renders_and_parses():
     document = yaml.safe_load(rendered.split("\n", 1)[1])
     assert document["runcmd"]
     assert "wireguard-tools" in document["packages"]
+
+
+def test_the_wait_online_mask_is_verified_not_hoped_for():
+    """It was masked with `2>/dev/null || true`, so a failed mask said nothing
+    and produced a two-minute boot indistinguishable from a slow guest."""
+    text = (REPO / "vm/prepare-image.sh").read_text()
+    mask = next(
+        line for line in text.splitlines()
+        if "systemctl mask systemd-networkd-wait-online.service" in line
+    )
+    assert "|| true" not in mask and "2>/dev/null" not in mask
+    assert "ASBX-WAITONLINE" in text
+    assert "grep -q masked" in text

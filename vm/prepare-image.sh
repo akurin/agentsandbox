@@ -107,8 +107,11 @@ runcmd:
   # what the stall delays, so anything it writes arrives too late to prevent
   # it. RequiredForOnline=no in the .network unit covers later boots; this
   # covers the first one.
-  - [ sh, -c, "systemctl mask systemd-networkd-wait-online.service 2>/dev/null || true" ]
-  - [ sh, -c, "systemctl mask systemd-networkd-wait-online@.service 2>/dev/null || true" ]
+  - [ sh, -c, "systemctl mask systemd-networkd-wait-online.service" ]
+  - [ sh, -c, "systemctl mask systemd-networkd-wait-online@.service || true" ]
+  # Report it, like the console setting. A mask that silently failed produced
+  # a two-minute boot and no way to tell it from a slow guest.
+  - [ sh, -c, "echo \"ASBX-WAITONLINE $(systemctl is-enabled systemd-networkd-wait-online.service 2>&1)\" > /dev/hvc0" ]
   # Report success where the host can see it.
   - [ sh, -c, "modprobe virtiofs 2>/dev/null || true" ]
   - [ mkdir, -p, /mnt/asbxprep ]
@@ -165,12 +168,21 @@ echo ""
 
 console_report="$(grep -a "ASBX-PREPARED" "$WORK/console.log" 2>/dev/null | tail -1 || true)"
 console_verdict="$(grep -a "ASBX-CONSOLE" "$WORK/console.log" 2>/dev/null | tail -1 || true)"
+waitonline_verdict="$(grep -a "ASBX-WAITONLINE" "$WORK/console.log" 2>/dev/null | tail -1 || true)"
 
 if [ -f "$WORK/signal/prepared" ] || [ -n "$console_report" ]; then
     echo "==> provisioning boot finished: $GOLDEN"
     [ -f "$WORK/signal/prepared" ] && sed 's/^/    /' "$WORK/signal/prepared"
     [ -n "$console_report" ] && echo "    $console_report"
     [ -n "$console_verdict" ] && echo "    $console_verdict"
+    [ -n "$waitonline_verdict" ] && echo "    $waitonline_verdict"
+    if [ -n "$waitonline_verdict" ] && ! echo "$waitonline_verdict" | grep -q masked; then
+        echo ""
+        echo "!! systemd-networkd-wait-online is not masked." >&2
+        echo "   Every boot of this image will stall two minutes waiting for a" >&2
+        echo "   default route the guest is designed never to have." >&2
+        exit 1
+    fi
     if echo "$console_verdict" | grep -q MISSING; then
         echo ""
         echo "!! console=hvc0 did not reach the kernel cmdline." >&2
