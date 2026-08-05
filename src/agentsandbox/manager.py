@@ -630,7 +630,7 @@ def check_host() -> list[str]:
     """Preflight: report what is missing before a session is attempted."""
     problems: list[str] = []
     from .proxy.launcher import mitmdump_path
-    from .vm.vfkit import default_golden_image, vfkit_path
+    from .vm.vfkit import list_images, vfkit_path
 
     try:
         mitmdump_path()
@@ -640,10 +640,12 @@ def check_host() -> list[str]:
         vfkit_path()
     except SessionError as exc:
         problems.append(str(exc))
-    if not default_golden_image().exists():
-        problems.append(
-            f"golden image missing at {default_golden_image()} - run ./vm/build-image.sh"
-        )
+    # Whether *some* image exists is a host question. Which one a box needs is
+    # not: this used to check DEFAULT_IMAGE, so deleting an unused debian-13
+    # stopped every box from starting, including ones on another image
+    # entirely. The box's own image is checked where the box is known.
+    if not list_images():
+        problems.append("no base images built - run ./vm/build-image.sh")
     if subprocess.run(["/usr/bin/which", "security"], capture_output=True).returncode != 0:
         problems.append("/usr/bin/security not found: keychain backend unavailable")
     problems.extend(check_ipc())

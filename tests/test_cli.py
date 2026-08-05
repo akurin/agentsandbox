@@ -478,3 +478,43 @@ def test_image_ls_shows_a_name_you_can_actually_type(asbx_home):
     assert entry["name"] == "golden"
     assert DEFAULT_IMAGE in entry["note"]
     assert cli.main(["image", "rm", "golden"]) == 0
+
+
+def test_a_box_starts_on_its_own_image_not_the_default(asbx_home, capsys):
+    """Deleting an unused debian-13 stopped every box from starting.
+
+    The preflight checked DEFAULT_IMAGE rather than the image the box records,
+    so a box on ubuntu-26.04 failed with "golden image missing at
+    .../debian-13.raw" - naming an image it does not use, in a log file, from
+    a supervisor that had already forked.
+    """
+    from agentsandbox.box import Box
+    from agentsandbox.manager import check_host
+    from agentsandbox.vm.vfkit import DEFAULT_IMAGE, image_path
+
+    image_path("ubuntu-26.04").write_bytes(b"x")
+    image_path(DEFAULT_IMAGE).unlink()
+    Box(name="on-ubuntu", image="ubuntu-26.04").save()
+
+    assert not [p for p in check_host() if "image" in p]
+
+
+def test_the_host_check_still_notices_no_images_at_all():
+    from agentsandbox.manager import check_host
+    from agentsandbox.vm.vfkit import DEFAULT_IMAGE, image_path
+
+    image_path(DEFAULT_IMAGE).unlink()
+    assert any("no base images built" in p for p in check_host())
+
+
+def test_a_missing_image_is_reported_before_the_fork(capsys):
+    """It surfaced as three identical lines in boxes/neo.log, from a
+    supervisor that had already detached."""
+    from agentsandbox.box import Box
+
+    Box(name="orphan", image="never-built").save()
+    assert cli.main(["start", "orphan"]) == cli.EXIT_USAGE
+
+    err = capsys.readouterr().err
+    assert "never-built" in err
+    assert "asbx image ls" in err

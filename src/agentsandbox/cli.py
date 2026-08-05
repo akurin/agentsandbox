@@ -116,6 +116,15 @@ def cmd_box_start(args: argparse.Namespace) -> int:
         print(f"   asbx stop {box.name}     stop it first to restart", file=sys.stderr)
         return EXIT_USAGE
 
+    # Before the fork, so a missing image is an error in this terminal rather
+    # than three identical lines in a log file the operator has to be told
+    # about. An image can be deleted after the box was created.
+    if not resolve_image(box.image).exists():
+        print(f"!! {box.name} needs image {box.image!r}, which is not built", file=sys.stderr)
+        print("   asbx image ls                       what is built", file=sys.stderr)
+        print(f"   asbx set {box.name} --image NAME    point it at one of those", file=sys.stderr)
+        return EXIT_USAGE
+
     if args.fresh and box.has_disk:
         box.remove_disk()
         print(f"reset {box.name}'s disk")
