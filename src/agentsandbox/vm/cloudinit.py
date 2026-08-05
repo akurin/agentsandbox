@@ -57,6 +57,19 @@ def render_network(net: dict) -> str:
 [Match]
 Name=en*
 
+# systemd-networkd-wait-online blocks until every managed link is "routable",
+# and a link with no default route never gets there - it stays "degraded". The
+# absence of that route is deliberate (see below), so waiting for it is waiting
+# for something that is never going to happen: the unit times out after two
+# minutes and boot continues anyway.
+#
+# That matters more than a slow boot. Ubuntu orders cloud-init's later stages
+# behind network-online.target, so the two minutes are spent before runcmd -
+# and runcmd is what starts the bootstrap that brings up the tunnel. The guest
+# looks dead for two minutes for no reason.
+[Link]
+RequiredForOnline=no
+
 [Network]
 Address={address}
 DHCP=no

@@ -394,3 +394,21 @@ def test_an_empty_ca_file_is_also_refused(session):
     driver = VfkitDriver(session, VmConfig())
     with pytest.raises(SessionError, match="session CA missing"):
         driver.write_cloud_init()
+
+
+def test_the_guest_link_is_not_required_for_network_online():
+    """The unit installs no default route on purpose - wg0 carries everything.
+
+    systemd-networkd-wait-online only calls a link "routable" once it has one,
+    so without this it waits out its full two-minute timeout. Ubuntu orders
+    cloud-init's later stages behind network-online.target, so that delay lands
+    squarely before runcmd - which is what starts the bootstrap. The guest sits
+    there looking dead, waiting for a route it was designed never to have.
+    """
+    from agentsandbox.vm.cloudinit import render_network
+
+    unit = render_network({"address": "192.168.127.2/24", "gateway": "192.168.127.1"})
+    assert "RequiredForOnline=no" in unit
+    assert "[Link]" in unit
+    # The reason it is safe: still no default route, only the endpoint route.
+    assert "Gateway=" not in unit
