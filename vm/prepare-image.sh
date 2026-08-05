@@ -111,7 +111,7 @@ runcmd:
   - [ sh, -c, "systemctl mask systemd-networkd-wait-online@.service || true" ]
   # Report it, like the console setting. A mask that silently failed produced
   # a two-minute boot and no way to tell it from a slow guest.
-  - [ sh, -c, "echo \"ASBX-WAITONLINE $(systemctl is-enabled systemd-networkd-wait-online.service 2>&1)\" > /dev/hvc0" ]
+  - [ sh, -c, "echo \"ASBX-WAITONLINE \$(systemctl is-enabled systemd-networkd-wait-online.service 2>&1)\" > /dev/hvc0" ]
   # Report success where the host can see it.
   - [ sh, -c, "modprobe virtiofs 2>/dev/null || true" ]
   - [ mkdir, -p, /mnt/asbxprep ]

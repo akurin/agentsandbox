@@ -136,6 +136,30 @@ def test_the_console_setting_is_verified_not_assumed():
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
+def test_guest_commands_do_not_run_on_the_host(script):
+    """`$(...)` inside a cloud-init runcmd entry must be escaped.
+
+    The heredoc is unquoted - it has to expand $IMAGE_NAME - so an unescaped
+    substitution runs where the file is written, on the Mac, instead of in the
+    guest. `$(systemctl is-enabled ...)` did exactly that and reported
+    "systemctl: command not found" from a script that never meant to run it
+    locally.
+
+    Substitutions that build the document itself ($(date), the package loop)
+    are correct and stay; the rule is about commands addressed to the guest,
+    which are the ones inside a runcmd entry.
+    """
+    offenders = []
+    for number, line in _unquoted_heredoc_bodies(script.read_text()):
+        is_guest_command = line.lstrip().startswith("- [") or "sh, -c" in line
+        if is_guest_command and re.search(r"(?<!\\)\$\(", line):
+            offenders.append(f"  {script.name}:{number}: {line.strip()}")
+    assert not offenders, (
+        "unescaped $( in a guest command - it will run on the host:\n" + "\n".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
 def test_unquoted_heredocs_only_reference_variables_the_script_sets(script):
     """`set -u` turns a stray $VAR in an unquoted heredoc into a fatal error.
 
