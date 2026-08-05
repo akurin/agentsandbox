@@ -120,6 +120,12 @@ console_report="$(grep -a "ASBX-PREPARED" "$WORK/console.log" 2>/dev/null | tail
 
 if [ -f "$WORK/signal/prepared" ] || [ -n "$console_report" ]; then
     echo "==> golden image prepared: $GOLDEN"
+    # Flip the flag build-image.sh left false. An unprepared image boots and
+    # then fails at the tunnel, with nothing on the console explaining why -
+    # so it is worth being able to answer "was this ever prepared?" directly.
+    if [ -f "$IMAGES_DIR/golden.json" ]; then
+        sed -i '' 's/"prepared": false/"prepared": true/' "$IMAGES_DIR/golden.json" 2>/dev/null || true
+    fi
     [ -f "$WORK/signal/prepared" ] && sed 's/^/    /' "$WORK/signal/prepared"
     [ -n "$console_report" ] && echo "    $console_report"
     if echo "$console_report" | grep -q MISSING; then

@@ -1150,10 +1150,37 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     problems = check_environment()
     if not problems:
         print("all good: mitmproxy, vfkit and a golden image are present")
+        print(f"  base image  {_golden_description()}")
         return 0
     for problem in problems:
         print(f"!! {problem}")
     return 1
+
+
+def _golden_description() -> str:
+    """What the golden image was built from, for `doctor`.
+
+    Every environment clones the same golden image, so which distro is in play
+    is a property of the host, not of an environment - and without this the
+    only way to answer it is to boot a guest and run `lsb_release`.
+    """
+    import json as _json
+
+    from .vm.vfkit import default_golden_image
+
+    meta_path = default_golden_image().with_name("golden.json")
+    if not meta_path.exists():
+        # Built before this file existed, or by hand. Say so rather than
+        # guessing a distro we have no evidence for.
+        return "unknown (rebuild with ./vm/build-image.sh to record it)"
+    try:
+        meta = _json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        return "unreadable golden.json"
+    distro = meta.get("distro", "?")
+    built = str(meta.get("built_at", "?"))
+    suffix = "" if meta.get("prepared") else "  !! not prepared - run ./vm/prepare-image.sh"
+    return f"{distro}, built {built}{suffix}"
 
 
 # ---------------------------------------------------------------------------
