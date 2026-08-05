@@ -180,53 +180,6 @@ def test_brokered_denials_reach_the_client_as_the_brokers_answer(session):
 # -- responses ---------------------------------------------------------------
 
 
-def test_pass_through_responses_lose_only_gateway_evading_headers(addon):
-    """alt-svc would advertise an HTTP/3 endpoint this gateway does not see;
-    HPKP would pin against a CA it does not control. Both route the guest
-    around the fence, so both go."""
-    flow = http_flow()
-    flow.response = tutils.tresp()
-    flow.response.headers["Alt-Svc"] = 'h3=":443"'
-    flow.response.headers["Public-Key-Pins"] = "pin-sha256=\"x\""
-    flow.response.headers["Content-Type"] = "text/html"
-    addon.response(flow)
-    assert "alt-svc" not in flow.response.headers
-    assert "public-key-pins" not in flow.response.headers
-    assert flow.response.headers["Content-Type"] == "text/html"
-
-
-def test_pass_through_responses_keep_authentication_intact(addon):
-    """Not every credential in the guest is brokered.
-
-    An agent may hold a registry login or a session cookie the broker knows
-    nothing about, and those flows never reach its sanitiser. Stripping their
-    auth headers here broke them silently - and inconsistently, since request
-    headers are untouched on this path: the guest could send a Cookie it was
-    never allowed to receive, and answer a challenge it was never shown.
-    """
-    flow = http_flow()
-    flow.response = tutils.tresp()
-    flow.response.status_code = 401
-    challenge = 'Bearer realm="https://auth.docker.io/token",service="registry.docker.io"'
-    flow.response.headers["WWW-Authenticate"] = challenge
-    flow.response.headers["Set-Cookie"] = "session=abc"
-    addon.response(flow)
-    assert flow.response.headers["WWW-Authenticate"] == challenge
-    assert flow.response.headers["Set-Cookie"] == "session=abc"
-
-
-def test_brokered_responses_are_left_alone(addon):
-    flow = http_flow()
-    flow.response = tutils.tresp()
-    flow.response.headers["X-Asbx-Decision"] = "allow"
-    flow.response.headers["Set-Cookie"] = "kept-by-the-broker"
-    addon.response(flow)
-    assert "set-cookie" in flow.response.headers
-
-
-# -- DNS ---------------------------------------------------------------------
-
-
 def test_dns_for_a_blocked_name_is_refused(addon):
     flow = tflow.tdnsflow()
     flow.request.questions[0].name = "printer.local"
@@ -445,3 +398,54 @@ def test_the_guest_cannot_choose_the_account(addon, broker_stub):
     # The broker injects from the capability's own InjectionSpec, so nothing
     # about "someone-else" travels with the request.
     assert not any("someone-else" in v for _, v in brokered.headers if "auth" in _.lower())
+
+
+def test_the_addon_does_not_touch_pass_through_responses(addon):
+    """Nothing is stripped from an unbrokered response.
+
+    What contains this path is the destination policy, the capability
+    bindings, and raw TCP/UDP being refused - none of which is a header. The
+    scrub that used to be here removed set-cookie, alt-svc and
+    www-authenticate: the first two are covered elsewhere (udp_start kills the
+    HTTP/3 attempt alt-svc advertises), and the last broke credentials the
+    broker knows nothing about.
+    """
+    flow = http_flow()
+    flow.response = tutils.tresp()
+    original = {
+        "WWW-Authenticate": 'Bearer realm="https://auth.docker.io/token"',
+        "Set-Cookie": "session=abc",
+        "Alt-Svc": 'h3=":443"',
+        "Content-Type": "text/html",
+    }
+    for name, value in original.items():
+        flow.response.headers[name] = value
+
+    assert not hasattr(addon, "response")
+    for name, value in original.items():
+        assert flow.response.headers[name] == value
+
+
+def test_brokered_responses_are_still_sanitised():
+    """The exception, and the reason `response` could go.
+
+    On a brokered flow the broker authenticated with a real credential. A
+    session cookie coming back is bearer-equivalent: the guest could spend it
+    on any path or method, outside everything the capability restricts. That
+    one is an escalation, not an inconvenience.
+    """
+    from agentsandbox.broker.upstream import sanitize_response_headers
+
+    kept = sanitize_response_headers(
+        [
+            ("Set-Cookie", "session=abc"),
+            ("Authentication-Info", "nextnonce=x"),
+            ("WWW-Authenticate", 'Bearer realm="https://auth.example.com/token"'),
+            ("Content-Type", "application/json"),
+        ]
+    )
+    names = {k.lower() for k, _ in kept}
+    assert "set-cookie" not in names
+    assert "authentication-info" not in names
+    assert "www-authenticate" in names  # a challenge, not a credential
+    assert "content-type" in names

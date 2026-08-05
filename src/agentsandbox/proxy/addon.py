@@ -125,31 +125,29 @@ class SandboxAddon:
 
         self._broker(flow, dest, placeholder)
 
-    def response(self, flow: http.HTTPFlow) -> None:
-        """Last-chance scrub on pass-through traffic.
-
-        Only headers that would route the guest *around* this gateway are
-        removed. Authentication is deliberately left alone.
-
-        Not every credential in the guest is brokered - an agent may hold a
-        registry login, a token the operator put there, or a session cookie -
-        and those flows never reach the broker's sanitiser. Stripping their
-        auth headers here broke them silently, and inconsistently: request
-        headers are untouched on this path (STRIP_REQUEST_HEADERS applies to
-        brokered requests only), so the guest could send a Cookie it was never
-        allowed to receive, and answer a challenge it was never shown.
-
-        None of it was protecting a secret either. WWW-Authenticate carries a
-        challenge, not a credential, and what the guest holds for brokered
-        providers is a placeholder the broker will not exchange outside its
-        capability's bound host, path and method. The containment is the
-        capability, not the header list.
-        """
-        if flow.response is None or flow.response.headers.get("X-Asbx-Decision"):
-            return
-        for header in ("alt-svc", "public-key-pins"):
-            if header in flow.response.headers:
-                del flow.response.headers[header]
+    # There is deliberately no `response` hook on the pass-through path.
+    #
+    # It used to scrub set-cookie, alt-svc and www-authenticate from every
+    # unbrokered response, and none of that was holding anything up:
+    #
+    # * alt-svc advertises an HTTP/3 endpoint, and `udp_start` below already
+    #   kills raw UDP - allow_raw_udp defaults to False - so the attempt dies
+    #   at the policy whether or not the guest ever sees the header;
+    # * public-key-pins is ignored by everything current, and a client that did
+    #   honour it would fail against our CA - stripping it helped the guest, it
+    #   did not protect the host;
+    # * the auth headers broke credentials the broker knows nothing about, and
+    #   did so inconsistently, since requests on this path are not filtered at
+    #   all.
+    #
+    # What contains this path is the destination policy, the capability
+    # bindings, and the fact that raw TCP and UDP are refused. None of that is
+    # a header.
+    #
+    # Brokered responses are a different case and are still sanitised, in
+    # `broker.upstream`: there the broker authenticated with a real credential,
+    # and a session cookie coming back would be one the guest could spend on
+    # any path or method - outside everything the capability restricts.
 
     # -- non-HTTP -----------------------------------------------------------
 
