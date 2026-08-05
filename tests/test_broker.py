@@ -275,7 +275,6 @@ def test_credential_bearing_response_headers_are_stripped(session, store, resolv
     )
     names = {k.lower() for k, _ in core.handle(make_request(token)).headers}
     assert "set-cookie" not in names
-    assert "www-authenticate" not in names
     assert "alt-svc" not in names
     assert "x-echo" not in names  # dropped: its value contained the credential
     assert "content-type" in names

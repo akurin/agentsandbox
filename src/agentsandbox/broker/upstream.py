@@ -44,12 +44,20 @@ HOP_BY_HOP = frozenset(
 
 #: Response headers that would hand the guest credential material or a way
 #: around the gateway.
+#:
+#: WWW-Authenticate is not one of them, though it used to be listed here. It
+#: carries a challenge, not a credential - the realm and scheme a client should
+#: use - and the guest cannot act on it with anything but a placeholder, which
+#: the broker refuses to inject outside the capability's bound host, path and
+#: method. Removing it broke auth negotiation wholesale: a registry replies to
+#: /v2/ with 401 and the realm to get a token from, so a client that never sees
+#: it cannot proceed and reports "authentication required" against a registry
+#: that is answering correctly.
 STRIP_RESPONSE_HEADERS = frozenset(
     {
         "set-cookie",
         "set-cookie2",
-        "www-authenticate",
-        "proxy-authenticate",
+        "proxy-authenticate",  # about *this* hop; the guest must not answer it
         "authentication-info",
         "alt-svc",  # would advertise an HTTP/3 endpoint we do not control
         "public-key-pins",

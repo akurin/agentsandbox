@@ -128,13 +128,26 @@ class SandboxAddon:
     def response(self, flow: http.HTTPFlow) -> None:
         """Last-chance scrub on pass-through traffic.
 
-        Brokered responses are already sanitised by the broker; this covers the
-        unauthenticated path, where an upstream could still try to plant a
-        cookie or advertise an HTTP/3 endpoint that bypasses this gateway.
+        Only headers that would route the guest *around* this gateway are
+        removed. Authentication is deliberately left alone.
+
+        Not every credential in the guest is brokered - an agent may hold a
+        registry login, a token the operator put there, or a session cookie -
+        and those flows never reach the broker's sanitiser. Stripping their
+        auth headers here broke them silently, and inconsistently: request
+        headers are untouched on this path (STRIP_REQUEST_HEADERS applies to
+        brokered requests only), so the guest could send a Cookie it was never
+        allowed to receive, and answer a challenge it was never shown.
+
+        None of it was protecting a secret either. WWW-Authenticate carries a
+        challenge, not a credential, and what the guest holds for brokered
+        providers is a placeholder the broker will not exchange outside its
+        capability's bound host, path and method. The containment is the
+        capability, not the header list.
         """
         if flow.response is None or flow.response.headers.get("X-Asbx-Decision"):
             return
-        for header in ("set-cookie", "set-cookie2", "alt-svc", "www-authenticate"):
+        for header in ("alt-svc", "public-key-pins"):
             if header in flow.response.headers:
                 del flow.response.headers[header]
 

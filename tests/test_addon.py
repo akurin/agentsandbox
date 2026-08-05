@@ -180,16 +180,39 @@ def test_brokered_denials_reach_the_client_as_the_brokers_answer(session):
 # -- responses ---------------------------------------------------------------
 
 
-def test_pass_through_responses_lose_cookies_and_alt_svc(addon):
+def test_pass_through_responses_lose_only_gateway_evading_headers(addon):
+    """alt-svc would advertise an HTTP/3 endpoint this gateway does not see;
+    HPKP would pin against a CA it does not control. Both route the guest
+    around the fence, so both go."""
     flow = http_flow()
     flow.response = tutils.tresp()
-    flow.response.headers["Set-Cookie"] = "a=b"
     flow.response.headers["Alt-Svc"] = 'h3=":443"'
+    flow.response.headers["Public-Key-Pins"] = "pin-sha256=\"x\""
     flow.response.headers["Content-Type"] = "text/html"
     addon.response(flow)
-    assert "set-cookie" not in flow.response.headers
     assert "alt-svc" not in flow.response.headers
+    assert "public-key-pins" not in flow.response.headers
     assert flow.response.headers["Content-Type"] == "text/html"
+
+
+def test_pass_through_responses_keep_authentication_intact(addon):
+    """Not every credential in the guest is brokered.
+
+    An agent may hold a registry login or a session cookie the broker knows
+    nothing about, and those flows never reach its sanitiser. Stripping their
+    auth headers here broke them silently - and inconsistently, since request
+    headers are untouched on this path: the guest could send a Cookie it was
+    never allowed to receive, and answer a challenge it was never shown.
+    """
+    flow = http_flow()
+    flow.response = tutils.tresp()
+    flow.response.status_code = 401
+    challenge = 'Bearer realm="https://auth.docker.io/token",service="registry.docker.io"'
+    flow.response.headers["WWW-Authenticate"] = challenge
+    flow.response.headers["Set-Cookie"] = "session=abc"
+    addon.response(flow)
+    assert flow.response.headers["WWW-Authenticate"] == challenge
+    assert flow.response.headers["Set-Cookie"] == "session=abc"
 
 
 def test_brokered_responses_are_left_alone(addon):

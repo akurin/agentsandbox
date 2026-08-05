@@ -175,9 +175,26 @@ def test_response_sanitisation_drops_gateway_evading_headers():
         [
             ("Set-Cookie", "a=b"),
             ("Alt-Svc", 'h3=":443"'),
-            ("WWW-Authenticate", "Basic"),
             ("Public-Key-Pins", "x"),
             ("Content-Type", "application/json"),
         ]
     )
     assert kept == [("Content-Type", "application/json")]
+
+
+def test_an_auth_challenge_reaches_the_guest():
+    """WWW-Authenticate is a challenge, not a credential.
+
+    It was stripped alongside alt-svc and public-key-pins, which really do let
+    a guest route around the gateway. This one only says how to authenticate,
+    and the guest can act on it with nothing but a placeholder the broker
+    refuses to inject outside a capability's bound host, path and method.
+
+    Removing it broke auth negotiation wholesale. A container registry answers
+    /v2/ with 401 plus the realm to fetch a token from; a client that never
+    sees the realm cannot proceed, and reports "authentication required"
+    against a registry that is answering perfectly well.
+    """
+    challenge = 'Bearer realm="https://auth.docker.io/token",service="registry.docker.io"'
+    kept = sanitize_response_headers([("WWW-Authenticate", challenge)])
+    assert kept == [("WWW-Authenticate", challenge)]
