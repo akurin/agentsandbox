@@ -414,3 +414,53 @@ def test_the_web_port_moved_to_the_command_that_starts_it():
     args = cli.build_parser().parse_args(["web", "attach", "--port", "8081"])
     assert args.action == "attach"
     assert args.port == 8081
+
+
+def test_removing_an_image_a_box_uses_is_refused():
+    """A box that names a deleted image fails at its next reset, which is a
+    long way from the command that caused it."""
+    from agentsandbox.box import Box
+    from agentsandbox.vm.vfkit import DEFAULT_IMAGE, image_path
+
+    Box(name="uses-it", image=DEFAULT_IMAGE).save()
+    assert cli.main(["image", "rm", DEFAULT_IMAGE]) == cli.EXIT_USAGE
+    assert image_path(DEFAULT_IMAGE).exists()
+
+
+def test_an_unused_image_is_removed_with_its_metadata():
+    from agentsandbox.vm.vfkit import image_metadata_path, image_path
+
+    image_path("spare").write_bytes(b"x" * 1024)
+    image_metadata_path("spare").write_text('{"name": "spare"}')
+
+    assert cli.main(["image", "rm", "spare"]) == 0
+    assert not image_path("spare").exists()
+    assert not image_metadata_path("spare").exists()
+
+
+def test_force_removes_an_image_still_named(capsys):
+    from agentsandbox.box import Box
+    from agentsandbox.vm.vfkit import image_path
+
+    image_path("doomed").write_bytes(b"x")
+    Box(name="clinger", image="doomed").save()
+
+    assert cli.main(["image", "rm", "doomed", "--force"]) == 0
+    assert not image_path("doomed").exists()
+    assert "clinger" in capsys.readouterr().out  # says who it just broke
+
+
+def test_gc_collects_downloads_but_not_the_images_built_from_them(asbx_home):
+    """The .qcow2 is only useful for rebuilding the .raw, which is rare - and
+    it costs most of a gigabyte until someone notices."""
+    from agentsandbox.vm.vfkit import DEFAULT_IMAGE, image_path, images_dir
+
+    (images_dir() / "debian-13-genericcloud-arm64.qcow2").write_bytes(b"x" * 2048)
+    (images_dir() / "noble-server-cloudimg-arm64.img").write_bytes(b"x" * 2048)
+
+    assert cli.main(["image", "gc", "--dry-run"]) == 0
+    assert (images_dir() / "noble-server-cloudimg-arm64.img").exists()
+
+    assert cli.main(["image", "gc"]) == 0
+    assert not (images_dir() / "noble-server-cloudimg-arm64.img").exists()
+    assert image_path(DEFAULT_IMAGE).exists()  # the built image is untouched

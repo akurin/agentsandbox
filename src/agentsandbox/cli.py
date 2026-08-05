@@ -1481,6 +1481,67 @@ def cmd_web(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_image_rm(args: argparse.Namespace) -> int:
+    """Delete a built image, unless a box still names it.
+
+    Images are the largest thing this tool keeps - a 20 GiB sparse file each -
+    and nothing removed them, so every distro ever tried stayed forever. A box
+    that names a deleted image would fail at its next reset, so that is refused
+    rather than discovered later.
+    """
+    from .box import list_boxes
+    from .vm.vfkit import image_metadata_path, image_path
+
+    raw = image_path(args.name)
+    if not raw.exists():
+        print(f"!! no image named {args.name!r}", file=sys.stderr)
+        return EXIT_USAGE
+
+    users = [box.name for box in list_boxes() if box.image == args.name]
+    if users and not args.force:
+        print(f"!! {args.name} is in use by: {', '.join(sorted(users))}", file=sys.stderr)
+        print("   point them elsewhere with `asbx set NAME --image ...`, or --force", file=sys.stderr)
+        return EXIT_USAGE
+
+    used = raw.stat().st_blocks * 512
+    raw.unlink()
+    image_metadata_path(args.name).unlink(missing_ok=True)
+    print(f"removed {args.name} ({used / 1024**3:.1f} GiB reclaimed)")
+    if users:
+        print(f"!! still named by: {', '.join(sorted(users))} - they will fail to reset")
+    return 0
+
+
+def cmd_image_gc(args: argparse.Namespace) -> int:
+    """Delete the downloaded cloud images kept after conversion.
+
+    build-image.sh converts a .qcow2/.img into the raw file boxes clone, then
+    leaves the download in place - useful only if the same image is rebuilt,
+    which is rare, and costing most of a gigabyte each in the meantime.
+    """
+    from .vm.vfkit import images_dir
+
+    downloads = sorted(
+        path
+        for suffix in ("*.qcow2", "*.img")
+        for path in images_dir().glob(suffix)
+    )
+    if not downloads:
+        print("nothing to collect")
+        return 0
+
+    total = 0
+    for path in downloads:
+        size = path.stat().st_blocks * 512
+        total += size
+        print(f"  {path.name}  {size / 1024**2:.0f} MiB")
+        if not args.dry_run:
+            path.unlink()
+    verb = "would reclaim" if args.dry_run else "reclaimed"
+    print(f"{verb} {total / 1024**3:.1f} GiB (re-downloaded automatically on the next build)")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     problems = check_host()
     if not problems:
@@ -1619,6 +1680,13 @@ def build_parser() -> argparse.ArgumentParser:
     image_sub = image_parser.add_subparsers(dest="subcommand", required=True)
     image_ls = image_sub.add_parser("ls", help="list built images")
     image_ls.set_defaults(func=cmd_image_list)
+    image_rm = image_sub.add_parser("rm", help="delete a built image")
+    image_rm.add_argument("name")
+    image_rm.add_argument("--force", action="store_true", help="even if a box names it")
+    image_rm.set_defaults(func=cmd_image_rm)
+    image_gc = image_sub.add_parser("gc", help="delete downloads kept after conversion")
+    image_gc.add_argument("--dry-run", action="store_true")
+    image_gc.set_defaults(func=cmd_image_gc)
 
     reset = sub.add_parser("reset", help="discard a box's disk, keeping its config")
     reset.add_argument("name")
