@@ -231,3 +231,26 @@ def test_the_wait_message_says_how_long_it_will_wait(tmp_path, capsys):
     cli._wait_for_sshd(tmp_path / "none.sock", timeout=3.0)
     err = capsys.readouterr().err
     assert "up to 3s" in err
+
+
+def test_diag_falls_back_to_the_most_recent_stopped_session():
+    """A guest that fails hard powers itself off, so by the time anyone runs
+    diag there is nothing running by definition. Refusing to look is refusing
+    exactly when the logs matter most."""
+    from agentsandbox.session import STATE_STOPPED, Session
+
+    older = Session(session_id="s-older", state=STATE_STOPPED, created_at=100.0)
+    older.save()
+    newer = Session(session_id="s-newer", state=STATE_STOPPED, created_at=200.0)
+    newer.save()
+
+    assert cli._diag_session(None).session_id == "s-newer"
+
+
+def test_diag_still_prefers_a_running_session():
+    from agentsandbox.session import STATE_RUNNING, STATE_STOPPED, Session
+
+    Session(session_id="s-dead", state=STATE_STOPPED, created_at=300.0).save()
+    Session(session_id="s-live", state=STATE_RUNNING, created_at=100.0).save()
+
+    assert cli._diag_session(None).session_id == "s-live"

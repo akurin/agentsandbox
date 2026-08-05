@@ -893,13 +893,39 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diag_session(explicit: str | None) -> Session:
+    """The session to explain - falling back to the most recent stopped one.
+
+    Ordinary commands refuse when nothing is running, which is right: acting on
+    a dead session is a mistake. Diagnosis is the opposite case. A guest that
+    fails hard powers itself off, so by the time anyone runs `asbx diag` there
+    is nothing running *by definition* - and refusing to look is refusing
+    exactly when the logs matter most.
+    """
+    if explicit:
+        return Session.load(explicit)
+    try:
+        return _resolve_session(None)
+    except SandboxError:
+        stopped = sorted(list_sessions(), key=lambda s: s.created_at)
+        if not stopped:
+            raise
+        newest = stopped[-1]
+        print(
+            f"# nothing running; showing the most recent session "
+            f"({newest.session_id}, {newest.state})",
+            file=sys.stderr,
+        )
+        return newest
+
+
 def cmd_diag(args: argparse.Namespace) -> int:
     """Everything needed to explain a misbehaving session, in one output.
 
     Ordered by how often it is the answer: what the gateway saw, what the guest
     said on its way up, then the proxy and the audit trail.
     """
-    session = _resolve_session(args.session)
+    session = _diag_session(args.session)
     paths = session.paths
     manager = SessionManager(session)
     status = manager.status()
