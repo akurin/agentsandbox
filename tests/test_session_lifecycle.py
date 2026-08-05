@@ -384,6 +384,7 @@ def test_ambiguous_session_is_an_error_not_a_guess(monkeypatch):
     for label in ("frontend", "backend"):
         m = SessionManager.create(allow_hosts=["example.com"], label=label)
         m.session.state = STATE_RUNNING
+        m.session.supervisor_pid = os.getpid()
         m.session.save()
 
     with pytest.raises(SessionError) as exc:
@@ -399,6 +400,7 @@ def test_a_single_running_session_needs_no_flag(monkeypatch):
     monkeypatch.delenv("ASBX_SESSION", raising=False)
     manager = SessionManager.create(allow_hosts=["example.com"])
     manager.session.state = STATE_RUNNING
+    manager.session.supervisor_pid = os.getpid()
     manager.session.save()
     assert resolve_session_id(None) == manager.session.session_id
 
@@ -411,6 +413,7 @@ def test_explicit_session_wins_over_ambiguity(monkeypatch):
     second = SessionManager.create(allow_hosts=["example.com"], label="b")
     for m in (first, second):
         m.session.state = STATE_RUNNING
+        m.session.supervisor_pid = os.getpid()
         m.session.save()
     assert resolve_session_id(second.session.session_id) == second.session.session_id
 
@@ -452,6 +455,9 @@ def test_prune_removes_only_stopped_sessions(monkeypatch):
     dead.stop()
     alive = SessionManager.create(allow_hosts=["example.com"], label="alive")
     alive.session.state = STATE_RUNNING
+    # A session is running only if something holds it up; without a live pid
+    # it is reconciled to stopped, and prune would rightly take it.
+    alive.session.supervisor_pid = os.getpid()
     alive.session.save()
 
     assert cli.main(["session", "prune"]) == 0
@@ -518,3 +524,29 @@ def test_a_failing_command_is_reported_not_fatal(session, broker, tmp_path):
         assert "would not start" in reply["error"]
     finally:
         server.server_close()
+
+
+def test_a_session_whose_supervisor_died_is_not_running(monkeypatch):
+    """Three failed starts left three sessions marked running with nothing
+    behind them, and `asbx web attach` refused with "3 sessions are running -
+    name one". The state on disk is written by a supervisor that may not have
+    survived to write STOPPED."""
+    from agentsandbox.session import STATE_RUNNING, STATE_STOPPED, Session, list_sessions
+
+    monkeypatch.delenv("ASBX_SESSION", raising=False)
+    for name in ("ghost-a", "ghost-b", "ghost-c"):
+        Session(session_id=name, state=STATE_RUNNING, supervisor_pid=999_999_999).save()
+
+    assert all(s.state == STATE_STOPPED for s in list_sessions())
+    # ...and the correction is written back, so it is paid for once.
+    assert Session.load("ghost-a").state == STATE_STOPPED
+
+
+def test_a_live_guest_keeps_a_session_running_without_its_supervisor(monkeypatch):
+    """The vm pid counts too: a supervisor restarted under a live guest must
+    not have its session declared dead out from under it."""
+    from agentsandbox.session import STATE_RUNNING, Session, list_sessions
+
+    monkeypatch.delenv("ASBX_SESSION", raising=False)
+    Session(session_id="has-guest", state=STATE_RUNNING, vm_pid=os.getpid()).save()
+    assert [s.state for s in list_sessions()] == [STATE_RUNNING]

@@ -253,7 +253,9 @@ def test_diag_still_prefers_a_running_session():
     from agentsandbox.session import STATE_RUNNING, STATE_STOPPED, Session
 
     Session(session_id="s-dead", state=STATE_STOPPED, created_at=300.0).save()
-    Session(session_id="s-live", state=STATE_RUNNING, created_at=100.0).save()
+    Session(
+        session_id="s-live", state=STATE_RUNNING, created_at=100.0, supervisor_pid=os.getpid()
+    ).save()
 
     assert cli._diag_session(None).session_id == "s-live"
 

@@ -106,6 +106,11 @@ class Session:
         self.paths.create()
         write_private_file(self.paths.session_file, json.dumps(self.to_dict(), indent=2))
 
+    @property
+    def is_alive(self) -> bool:
+        """Is anything actually holding this session up?"""
+        return pid_is_alive(self.supervisor_pid) or pid_is_alive(self.vm_pid)
+
     @classmethod
     def load(cls, session_id: str) -> Session:
         path = SessionPaths(session_id).session_file
@@ -131,16 +136,53 @@ class Session:
         }
 
 
+def pid_is_alive(pid: int) -> bool:
+    """Whether a recorded pid is still running.
+
+    Guarding pid <= 0 matters: ``os.kill(0, sig)`` addresses the caller's whole
+    process group, so an unset pid would report "alive".
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # someone else's now, but it exists
+    return True
+
+
 def list_sessions() -> list[Session]:
+    """Every session, with RUNNING reconciled against reality.
+
+    The state on disk is written by a supervisor that may have died without
+    getting to write STOPPED - a crash, a SIGKILL, a failed start. Trusting the
+    field left sessions marked running forever: they accumulated, `asbx web`
+    and `asbx diag` refused with "3 sessions are running - name one", and the
+    guard against starting a box twice had to duplicate this check to work at
+    all.
+
+    So a session claiming RUNNING with no live supervisor and no live guest is
+    corrected here, once, and written back. Reading is the only moment anyone
+    is looking.
+    """
     out = []
     root = sessions_root()
     for entry in sorted(root.iterdir()):
         if not entry.is_dir():
             continue
         try:
-            out.append(Session.load(entry.name))
+            session = Session.load(entry.name)
         except (SessionError, json.JSONDecodeError):
             continue
+        if session.state == STATE_RUNNING and not session.is_alive:
+            session.state = STATE_STOPPED
+            try:
+                session.save()
+            except OSError:
+                pass  # read-only or being torn down; the value is still right
+        out.append(session)
     return out
 
 
