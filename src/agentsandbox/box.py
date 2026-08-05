@@ -2,7 +2,7 @@
 
 A *session* is one boot — it owns the tunnel identity, the CA and the
 capabilities, and all three die when it stops.  An *box* is what you
-come back to: a named disk with your packages on it, a project mount, and the
+come back to: a named disk with your packages on it, its mounts, and the
 profile that says which credentials the work needs.
 
 The split follows what is actually sensitive.  Nothing secret has ever lived on
@@ -24,10 +24,10 @@ from pathlib import Path
 
 from .config import ensure_private_dir, home, write_private_file
 from .errors import SessionError
-from .session import Share
+from .session import Mount
 from .vm.vfkit import DEFAULT_IMAGE
 
-#: Names are used as filenames and virtio-fs mount tags, so keep them boring.
+#: Names are used as filenames and ssh Host aliases, so keep them boring.
 _NAME_OK = set("abcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
@@ -55,14 +55,13 @@ class Box:
     created_at: float = field(default_factory=time.time)
     last_started: float = 0.0
 
-    #: Host directory mounted into the guest, at the same absolute path.
-    project_path: str = ""
-    project_mount: str = ""
     #: Capability profile issued afresh on every start.
     profile: str = ""
     #: Egress policy. ``["*"]`` is any public host; the hard blocks are separate.
     allow_hosts: list[str] = field(default_factory=lambda: ["*"])
-    shares: list[Share] = field(default_factory=list)
+    #: Host directories exposed to the guest. No mount is privileged over
+    #: another - see `agentsandbox.session.Mount`.
+    mounts: list[Mount] = field(default_factory=list)
 
     cpus: int = 2
     memory_mib: int = 2048
@@ -96,13 +95,13 @@ class Box:
 
     def to_dict(self) -> dict:
         data = asdict(self)
-        data["shares"] = [s.to_dict() for s in self.shares]
+        data["mounts"] = [m.to_dict() for m in self.mounts]
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> Box:
         data = dict(data)
-        data["shares"] = [Share(**s) for s in data.get("shares", [])]
+        data["mounts"] = [Mount(**m) for m in data.get("mounts", [])]
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})
 
@@ -152,11 +151,9 @@ class Box:
     def public_view(self) -> dict:
         return {
             "name": self.name,
-            "project": self.project_path,
-            "mount": self.project_mount or self.project_path,
             "profile": self.profile,
             "allow_hosts": self.allow_hosts,
-            "shares": [f"{s.path}:{'ro' if s.read_only else 'rw'}" for s in self.shares],
+            "mounts": [f"{m.host}:{m.guest}:{'ro' if m.read_only else 'rw'}" for m in self.mounts],
             "cpus": self.cpus,
             "memory_mib": self.memory_mib,
             "image": self.image,

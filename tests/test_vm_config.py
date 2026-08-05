@@ -14,7 +14,7 @@ import pytest
 
 FAKE_CA = "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
 
-from agentsandbox.session import Share
+from agentsandbox.session import Mount
 from agentsandbox.vm.cloudinit import render_network, render_user_data
 from agentsandbox.vm.gateway import GatewayConfig, guest_network_facts
 from agentsandbox.vm.vfkit import VfkitDriver, VmConfig
@@ -55,26 +55,26 @@ def test_vsock_previews_are_host_dials_in_only(session, driver):
     assert "listen" not in spec
 
 
-def test_read_only_shares_are_marked_read_only(session, driver, tmp_path):
+def test_read_only_mounts_are_marked_read_only(session, driver, tmp_path):
     shared = tmp_path / "docs"
     shared.mkdir()
-    driver.vm.shares = [
-        Share(path=str(shared), tag="docs", read_only=True),
-        Share(path=str(shared), tag="scratch", read_only=False),
+    driver.vm.mounts = [
+        Mount(host=str(shared), guest="/mnt/docs", read_only=True),
+        Mount(host=str(shared), guest="/mnt/scratch", read_only=False),
     ]
     specs = [a for a in driver.build_argv() if a.startswith("virtio-fs")]
-    assert any("mountTag=docs" in s and s.endswith(",readOnly") for s in specs)
-    assert any("mountTag=scratch" in s and not s.endswith(",readOnly") for s in specs)
+    # Tags are positional (m0, m1, ...), not derived from the mount itself.
+    assert any("mountTag=m0" in s and s.endswith(",readOnly") for s in specs)
+    assert any("mountTag=m1" in s and not s.endswith(",readOnly") for s in specs)
 
 
-def test_project_is_a_direct_virtio_fs_share(session, driver):
-    """`--project` is a direct share, not a copy."""
-    driver.vm.shares = [session.shares[0]] if session.shares else []
-    session.project_path = "/Users/someone/real-project"
-    # With no shares, only the log share exists
+def test_a_mount_is_a_direct_virtio_fs_share(session, driver):
+    """A mount is a direct share, not a copy."""
+    driver.vm.mounts = [Mount(host="/Users/someone/real-project", guest="/Users/someone/real-project")]
     specs = [a for a in driver.build_argv() if a.startswith("virtio-fs")]
+    assert any("sharedDir=/Users/someone/real-project" in s and "mountTag=m0" in s for s in specs)
+    # The log share is always present alongside whatever was declared.
     assert any("mountTag=asbxlog" in s for s in specs)
-    # The log share is always present; project is a share added by SessionManager.create
 
 
 def test_disk_is_per_session(driver, session):
@@ -157,14 +157,15 @@ def test_the_static_network_has_no_default_route():
     assert "Scope=link" in config
 
 
-def test_shares_are_mounted_with_the_mode_they_were_granted(session, driver, tmp_path):
+def test_mounts_are_mounted_with_the_mode_they_were_granted(session, driver, tmp_path):
     shared = tmp_path / "docs"
     shared.mkdir()
     rendered = user_data(
-        session, shares=[Share(path=str(shared), tag="docs", read_only=True)]
+        session, mounts=[Mount(host=str(shared), guest="/mnt/docs", read_only=True)]
     )
     payload = json.loads(rendered.split("\n", 1)[1])
-    docs = next(m for m in payload["mounts"] if m[0] == "docs")
+    docs = next(m for m in payload["mounts"] if m[0] == "m0")
+    assert docs[1] == "/mnt/docs"
     assert "ro" in docs[3]
 
 
@@ -230,39 +231,16 @@ def test_netcheck_asks_where_packets_would_actually_go(session, driver):
     assert "wg show wg0 peers" in netcheck
 
 
-def test_project_mounts_at_the_host_path_by_default(session, tmp_path):
-    """`--project ~/work` appears at /Users/you/work inside the guest.
-
-    Mirroring the host path means absolute references inside the project - a
-    virtualenv's shebangs, a config file with an absolute path - keep working
-    without rewriting.
-    """
-    from agentsandbox.manager import SessionManager
-
-    project = tmp_path / "work"
-    project.mkdir()
-    manager = SessionManager.create(allow_hosts=["example.com"], project=project)
-
-    rendered = render_user_data(
-        session=manager.session,
-        wg_config=manager.session.paths.guest_wireguard_conf.read_text(),
-        ca_cert=FAKE_CA,
-        net=guest_network_facts(GatewayConfig()),
-        shares=list(manager.session.shares),
-    )
-    payload = json.loads(rendered.split("\n", 1)[1])
-    project_mount = next(m for m in payload["mounts"] if m[0] == "project")
-    assert project_mount[1] == str(project)
-
-
-def test_project_mount_point_is_adjustable(session, tmp_path):
-    """`--mount-path` overrides where the project lands in the guest."""
+def test_a_mounts_guest_path_is_exactly_what_was_given(session, tmp_path):
+    """`--mount HOST:GUEST` lands at GUEST inside the guest - no implicit
+    mirroring of the host path, since both sides are always explicit now."""
     from agentsandbox.manager import SessionManager
 
     project = tmp_path / "work"
     project.mkdir()
     manager = SessionManager.create(
-        allow_hosts=["example.com"], project=project, project_mount="/srv/app"
+        allow_hosts=["example.com"],
+        mounts=[Mount(host=str(project), guest="/srv/app")],
     )
 
     rendered = render_user_data(
@@ -270,13 +248,13 @@ def test_project_mount_point_is_adjustable(session, tmp_path):
         wg_config=manager.session.paths.guest_wireguard_conf.read_text(),
         ca_cert=FAKE_CA,
         net=guest_network_facts(GatewayConfig()),
-        shares=list(manager.session.shares),
+        mounts=list(manager.session.mounts),
     )
     payload = json.loads(rendered.split("\n", 1)[1])
-    project_mount = next(m for m in payload["mounts"] if m[0] == "project")
-    assert project_mount[1] == "/srv/app"
+    mount = next(m for m in payload["mounts"] if m[0] == "m0")
+    assert mount[1] == "/srv/app"
     # The host side still points at the real directory.
-    assert any(s.path == str(project) for s in manager.session.shares)
+    assert any(m.host == str(project) for m in manager.session.mounts)
 
 
 def test_capability_placeholders_are_delivered_as_guest_environment(session, driver):
@@ -325,12 +303,14 @@ def test_no_capabilities_means_an_empty_env_file(session, driver):
 
 
 def test_writable_mounts_are_handed_to_the_agent(session, tmp_path):
-    """The agent must be able to write the project it was given."""
+    """The agent must be able to write a mount it was given as read-write."""
     from agentsandbox.manager import SessionManager
 
     project = tmp_path / "work"
     project.mkdir()
-    manager = SessionManager.create(allow_hosts=["example.com"], project=project)
+    manager = SessionManager.create(
+        allow_hosts=["example.com"], mounts=[Mount(host=str(project), guest=str(project))]
+    )
 
     payload = json.loads(
         render_user_data(
@@ -338,13 +318,13 @@ def test_writable_mounts_are_handed_to_the_agent(session, tmp_path):
             wg_config=manager.session.paths.guest_wireguard_conf.read_text(),
             ca_cert=FAKE_CA,
             net=guest_network_facts(GatewayConfig()),
-            shares=list(manager.session.shares),
+            mounts=list(manager.session.mounts),
         ).split("\n", 1)[1]
     )
     assert ["chown", "agent:agent", str(project)] in payload["runcmd"]
 
 
-def test_read_only_shares_are_not_chowned(session, driver, tmp_path):
+def test_read_only_mounts_are_not_chowned(session, driver, tmp_path):
     docs = tmp_path / "docs"
     docs.mkdir()
     payload = json.loads(
@@ -353,21 +333,23 @@ def test_read_only_shares_are_not_chowned(session, driver, tmp_path):
             wg_config=session.paths.guest_wireguard_conf.read_text(),
             ca_cert=FAKE_CA,
             net=guest_network_facts(GatewayConfig()),
-            shares=[Share(path=str(docs), tag="docs", read_only=True)],
+            mounts=[Mount(host=str(docs), guest="/mnt/docs", read_only=True)],
         ).split("\n", 1)[1]
     )
     assert not any(c[:2] == ["chown", "agent:agent"] and "docs" in c[-1] for c in payload["runcmd"])
 
 
-def test_the_project_mounts_read_write_by_default(tmp_path):
-    """`--project` is for editing; the read-only default is for `--share`."""
+def test_mounts_are_read_write_by_default(tmp_path):
+    """Matches Docker/Podman's own -v: an unmarked mount is writable, :ro is
+    what restricts it - there is no separate read-only-by-default share."""
     from agentsandbox.manager import SessionManager
 
     project = tmp_path / "work"
     project.mkdir()
-    manager = SessionManager.create(allow_hosts=["example.com"], project=project)
-    share = next(s for s in manager.session.shares if s.tag == "project")
-    assert share.read_only is False
+    manager = SessionManager.create(
+        allow_hosts=["example.com"], mounts=[Mount(host=str(project), guest=str(project))]
+    )
+    assert manager.session.mounts[0].read_only is False
 
 
 def test_booting_without_a_ca_is_refused(session, tmp_path):

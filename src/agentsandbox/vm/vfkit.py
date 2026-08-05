@@ -25,7 +25,7 @@ from pathlib import Path
 from ..audit import AuditLog, NullAuditLog
 from ..config import home, write_private_file
 from ..errors import SessionError
-from ..session import Session, Share
+from ..session import Mount, Session, mount_tag
 from .gateway import GatewayConfig, GatewayRunner, guest_network_facts
 
 VFKIT_CANDIDATES = (
@@ -128,8 +128,9 @@ class VmConfig:
     cpus: int = 2
     memory_mib: int = 2048
     golden_image: Path = field(default_factory=default_golden_image)
-    #: Extra host directories to expose read-only/read-write over virtio-fs.
-    shares: list[Share] = field(default_factory=list)
+    #: Host directories to expose over virtio-fs. Each gets a tag derived
+    #: from its position (``m0``, ``m1``, ...) - see `agentsandbox.session.Mount`.
+    mounts: list[Mount] = field(default_factory=list)
     #: Guest vsock ports to bridge for forwards: {guest_port: unix socket path}
     vsock_ports: dict[int, Path] = field(default_factory=dict)
     #: ``{ENV_VAR: placeholder}`` delivered to the agent as environment variables.
@@ -169,7 +170,7 @@ class VfkitDriver:
         audit: AuditLog | None = None,
     ) -> None:
         self.session = session
-        self.vm = vm_config or VmConfig(shares=list(session.shares))
+        self.vm = vm_config or VmConfig(mounts=list(session.mounts))
         self.gateway_config = gateway_config or GatewayConfig(
             wg_host=session.wg_listen_host, wg_port=session.wg_listen_port
         )
@@ -277,7 +278,7 @@ class VfkitDriver:
             ca_cert=ca_cert.read_text(),
             net=guest_network_facts(self.gateway_config),
             vsock_ports=dict(self.vm.vsock_ports),
-            shares=list(self.vm.shares),
+            mounts=list(self.vm.mounts),
             netcheck=self.vm.netcheck,
             capability_env=dict(self.vm.capability_env),
             ssh_host_key=self.vm.ssh_host_key,
@@ -334,9 +335,9 @@ class VfkitDriver:
             f"virtio-fs,sharedDir={self.session.paths.guest_logs},mountTag=asbxlog",
         ]
 
-        for share in self.vm.shares:
-            spec = f"virtio-fs,sharedDir={share.path},mountTag={share.tag}"
-            if share.read_only:
+        for index, mount in enumerate(self.vm.mounts):
+            spec = f"virtio-fs,sharedDir={mount.host},mountTag={mount_tag(index)}"
+            if mount.read_only:
                 spec += ",readOnly"
             argv += ["--device", spec]
 
@@ -408,7 +409,7 @@ class VfkitDriver:
             pid=self.process.pid,
             cpus=self.vm.cpus,
             memory_mib=self.vm.memory_mib,
-            shares=[f"{s.path}:{'ro' if s.read_only else 'rw'}" for s in self.vm.shares],
+            mounts=[f"{m.host}:{m.guest}:{'ro' if m.read_only else 'rw'}" for m in self.vm.mounts],
             vsock_ports=sorted(self.vm.vsock_ports),
         )
         return self.process

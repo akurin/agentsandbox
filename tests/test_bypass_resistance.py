@@ -17,6 +17,7 @@ from agentsandbox.broker.upstream import UpstreamResponse
 from agentsandbox.capabilities import CapabilitySpec, SecretRef
 from agentsandbox.manager import SessionManager
 from agentsandbox.netpolicy import Destination
+from agentsandbox.session import Mount
 from agentsandbox.proxy.addon import SandboxAddon
 from agentsandbox.proxy.launcher import build_argv
 from agentsandbox.audit import NullAuditLog
@@ -300,12 +301,14 @@ def test_the_guest_gets_the_real_project(tmp_path):
     project.mkdir()
     (project / "app.py").write_text("print(1)\n")
 
-    manager = SessionManager.create(allow_hosts=["example.com"], project=project)
-    driver = VfkitDriver(manager.session, VmConfig(shares=list(manager.session.shares)))
-    shares = [a for a in driver.build_argv() if a.startswith("virtio-fs")]
+    manager = SessionManager.create(
+        allow_hosts=["example.com"], mounts=[Mount(host=str(project), guest=str(project))]
+    )
+    driver = VfkitDriver(manager.session, VmConfig(mounts=list(manager.session.mounts)))
+    mounts = [a for a in driver.build_argv() if a.startswith("virtio-fs")]
 
-    assert any(str(project) in s for s in shares)
-    assert any("mountTag=project" in s for s in shares)
+    assert any(str(project) in s for s in mounts)
+    assert any("mountTag=m0" in s for s in mounts)
 
 
 # §7.10 ----------------------------------------------------------------------

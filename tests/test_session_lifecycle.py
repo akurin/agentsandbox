@@ -19,7 +19,7 @@ from agentsandbox.broker.server import (
 from agentsandbox.capabilities import CapabilityStore
 from agentsandbox.errors import BrokerError
 from agentsandbox.manager import SessionManager
-from agentsandbox.session import STATE_STOPPED
+from agentsandbox.session import STATE_STOPPED, Mount
 
 # -- creation ----------------------------------------------------------------
 
@@ -29,15 +29,17 @@ def test_create_makes_a_complete_private_session(tmp_path):
     project.mkdir()
     (project / "main.py").write_text("x = 1\n")
 
-    manager = SessionManager.create(allow_hosts=["api.github.com"], project=project)
+    manager = SessionManager.create(
+        allow_hosts=["api.github.com"], mounts=[Mount(host=str(project), guest=str(project))]
+    )
     paths = manager.session.paths
 
     assert paths.root.stat().st_mode & 0o077 == 0
     assert paths.wireguard_conf.exists()
     assert paths.guest_wireguard_conf.exists()
     assert paths.broker_token.exists()
-    # The project is a direct share, not a copy
-    assert any(s.path == str(project) for s in manager.session.shares)
+    # The project is a direct mount, not a copy
+    assert any(m.host == str(project) for m in manager.session.mounts)
     for secret_file in (paths.wireguard_conf, paths.guest_wireguard_conf, paths.broker_token):
         assert secret_file.stat().st_mode & 0o077 == 0, secret_file
 
@@ -228,17 +230,18 @@ def test_cli_session_list_and_status(capsys, monkeypatch):
     assert status["allow_hosts"] == ["example.com"]
 
 
-def test_cli_session_with_project_adds_a_share(capsys):
-    """`--project` mounts the directory directly, no copy step."""
+def test_cli_session_with_a_mount_adds_it_directly(capsys):
+    """`--mount` mounts the directory directly, no copy step."""
     manager = SessionManager.create(allow_hosts=["example.com"])
-    assert manager.session.project_path == ""
-    assert not any(s.tag == "project" for s in manager.session.shares)
-    # With --project, a share is added
+    assert manager.session.mounts == []
+
     from pathlib import Path
 
     proj = Path(__file__).parent
-    manager2 = SessionManager.create(allow_hosts=["example.com"], project=proj)
-    assert any(s.tag == "project" for s in manager2.session.shares)
+    manager2 = SessionManager.create(
+        allow_hosts=["example.com"], mounts=[Mount(host=str(proj), guest=str(proj))]
+    )
+    assert any(m.host == str(proj) for m in manager2.session.mounts)
 
 
 def test_cli_audit_shows_events(capsys, monkeypatch):
@@ -254,15 +257,21 @@ def test_cli_reports_a_missing_session_without_a_traceback(capsys, monkeypatch):
     assert "no such session" in capsys.readouterr().err
 
 
-def test_share_argument_parsing(tmp_path):
+def test_mount_argument_parsing(tmp_path):
+    import argparse
+
     directory = tmp_path / "docs"
     directory.mkdir()
-    assert cli._parse_share(f"{directory}:ro").read_only is True
-    assert cli._parse_share(f"{directory}:rw").read_only is False
-    assert cli._parse_share(str(directory)).read_only is True  # default is read-only
+    assert cli._parse_mount(f"{directory}:/mnt/docs:ro").read_only is True
+    assert cli._parse_mount(f"{directory}:/mnt/docs:rw").read_only is False
+    assert cli._parse_mount(f"{directory}:/mnt/docs").read_only is False  # default is read-write
 
-    with pytest.raises(Exception):
-        cli._parse_share(f"{directory}:write")
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli._parse_mount(f"{directory}:/mnt/docs:write")
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli._parse_mount(str(directory))  # no guest side at all
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli._parse_mount(f"{directory}:relative/path")  # guest side must be absolute
 
 
 def test_secret_reference_parsing():

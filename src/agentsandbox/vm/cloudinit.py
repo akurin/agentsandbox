@@ -22,7 +22,7 @@ import base64
 import json
 from pathlib import Path
 
-from ..session import Session, Share
+from ..session import Mount, Session, mount_tag
 
 GUEST_DIR = Path(__file__).with_name("guest")
 
@@ -92,7 +92,7 @@ def render_user_data(
     ca_cert: str,
     net: dict,
     vsock_ports: dict[int, Path] | None = None,
-    shares: list[Share] | None = None,
+    mounts: list[Mount] | None = None,
     netcheck: str = "halt",
     capability_env: dict[str, str] | None = None,
     ssh_host_key: str = "",
@@ -112,7 +112,7 @@ def render_user_data(
         )
 
     vsock_ports = vsock_ports or {}
-    shares = shares or []
+    mounts_in = mounts or []
 
     write_files = [
         _write_file("/etc/wireguard/wg0.conf", wg_config, "0600"),
@@ -180,9 +180,14 @@ def render_user_data(
             json.dumps(
                 {
                     "session": session.session_id,
-                    "shares": [
-                        {"tag": s.tag, "read_only": s.read_only, "host_path": s.path}
-                        for s in shares
+                    "mounts": [
+                        {
+                            "tag": mount_tag(i),
+                            "host_path": m.host,
+                            "guest_path": m.guest,
+                            "read_only": m.read_only,
+                        }
+                        for i, m in enumerate(mounts_in)
                     ],
                     "forward_ports": sorted(vsock_ports),
                 },
@@ -217,14 +222,10 @@ def render_user_data(
 
     # Guest diagnostics go to the host, so a guest that powers itself off still
     # leaves an explanation behind.
-    mounts = [["asbxlog", "/var/log/asbx", "virtiofs", "rw,nofail", "0", "0"]]
-    for share in shares:
-        options = "ro,nofail" if share.read_only else "rw,nofail"
-        if share.tag == "project":
-            mount_point = session.project_mount or session.project_path or "/workspace"
-        else:
-            mount_point = f"/mnt/{share.tag}"
-        mounts.append([share.tag, mount_point, "virtiofs", options, "0", "0"])
+    fstab_entries = [["asbxlog", "/var/log/asbx", "virtiofs", "rw,nofail", "0", "0"]]
+    for index, mount in enumerate(mounts_in):
+        options = "ro,nofail" if mount.read_only else "rw,nofail"
+        fstab_entries.append([mount_tag(index), mount.guest, "virtiofs", options, "0", "0"])
 
     runcmd = [
         ["systemctl", "daemon-reload"],
@@ -252,7 +253,7 @@ def render_user_data(
     runcmd.append(["/usr/local/bin/asbx-bootstrap"])
     # Hand writable mounts to the agent. The mount points are known here, so
     # the guest does not have to work them out for itself.
-    for tag, mount_point, _fs, options, *_ in mounts:
+    for tag, mount_point, _fs, options, *_ in fstab_entries:
         if tag != "asbxlog" and "ro," not in options:
             runcmd.append(["chown", "agent:agent", mount_point])
     for guest_port in sorted(vsock_ports):
@@ -283,7 +284,7 @@ def render_user_data(
             },
         ],
         "write_files": write_files,
-        "mounts": mounts,
+        "mounts": fstab_entries,
         "runcmd": runcmd,
     }
     if ssh_host_key and ssh_host_pub:

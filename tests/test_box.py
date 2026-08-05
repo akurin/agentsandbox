@@ -14,7 +14,7 @@ import pytest
 from agentsandbox import cli
 from agentsandbox.box import Box, default_box_name, list_boxes, validate_name
 from agentsandbox.errors import SessionError
-from agentsandbox.session import Share
+from agentsandbox.session import Mount
 
 
 @pytest.fixture
@@ -31,20 +31,23 @@ def project(tmp_path):
 def test_a_box_round_trips(project):
     box = Box(
         name="neo",
-        project_path=str(project),
         profile="myprofile",
         allow_hosts=["api.github.com"],
-        shares=[Share(path=str(project), tag="extra", read_only=True)],
+        mounts=[
+            Mount(host=str(project), guest="/home/agent/neo"),
+            Mount(host=str(project), guest="/mnt/extra", read_only=True),
+        ],
         cpus=4,
     )
     box.save()
 
     loaded = Box.load("neo")
-    assert loaded.project_path == str(project)
+    assert loaded.mounts[0].host == str(project)
     assert loaded.profile == "myprofile"
     assert loaded.allow_hosts == ["api.github.com"]
     assert loaded.cpus == 4
-    assert loaded.shares[0].tag == "extra"
+    assert loaded.mounts[1].guest == "/mnt/extra"
+    assert loaded.mounts[1].read_only is True
 
 
 def test_box_names_are_constrained():
@@ -69,7 +72,7 @@ def test_default_name_comes_from_the_directory(tmp_path):
 
 
 def test_rm_takes_the_disk_with_it(project):
-    box = Box(name="neo", project_path=str(project))
+    box = Box(name="neo", mounts=[Mount(host=str(project), guest=str(project))])
     box.save()
     box.disk_path.write_bytes(b"disk")
     assert box.has_disk
@@ -91,13 +94,13 @@ def test_rm_can_keep_the_disk(project):
 
 
 def test_reset_drops_the_disk_but_keeps_the_config(project):
-    box = Box(name="neo", project_path=str(project))
+    box = Box(name="neo", mounts=[Mount(host=str(project), guest=str(project))])
     box.save()
     box.disk_path.write_bytes(b"disk")
 
     box.remove_disk()
     assert not box.has_disk
-    assert Box.load("neo").project_path == str(project)
+    assert Box.load("neo").mounts[0].host == str(project)
 
 
 # -- what persists, and what must not ----------------------------------------
@@ -108,11 +111,12 @@ def test_the_disk_survives_a_session_but_the_identity_does_not(project, monkeypa
     from agentsandbox.manager import SessionManager
     from agentsandbox.vm.vfkit import VfkitDriver, VmConfig
 
-    box = Box(name="neo", project_path=str(project))
+    box = Box(name="neo", mounts=[Mount(host=str(project), guest=str(project))])
     box.save()
     box.disk_path.write_bytes(b"pretend this is a built disk")
 
-    first = SessionManager.create(allow_hosts=["*"], project=project, box_name="neo")
+    mounts = [Mount(host=str(project), guest=str(project))]
+    first = SessionManager.create(allow_hosts=["*"], mounts=mounts, box_name="neo")
     driver = VfkitDriver(
         first.session,
         VmConfig(disk_override=box.disk_path, efi_override=box.efi_store, persist_disk=True),
@@ -123,7 +127,7 @@ def test_the_disk_survives_a_session_but_the_identity_does_not(project, monkeypa
     assert box.disk_path.read_bytes() == b"pretend this is a built disk"
 
     # ...but a second run gets a different tunnel identity.
-    second = SessionManager.create(allow_hosts=["*"], project=project, box_name="neo")
+    second = SessionManager.create(allow_hosts=["*"], mounts=mounts, box_name="neo")
     assert (
         first.session.paths.wireguard_conf.read_text()
         != second.session.paths.wireguard_conf.read_text()
@@ -161,7 +165,7 @@ def test_a_persistent_disk_is_not_reclaimed_from_golden(session, tmp_path):
 
 
 def test_cli_create_inspect_and_rm(project, capsys):
-    assert cli.main(["box", "create", "neo", "--project", str(project), "--profile", "p"]) == 0
+    assert cli.main(["box", "create", "neo", "--mount", f"{project}:{project}", "--profile", "p"]) == 0
     assert "created" in capsys.readouterr().out
 
     assert cli.main(["box", "inspect", "neo"]) == 0
@@ -169,7 +173,7 @@ def test_cli_create_inspect_and_rm(project, capsys):
 
     view = json.loads(capsys.readouterr().out)
     assert view["name"] == "neo"
-    assert view["project"] == str(project)
+    assert view["mounts"] == [f"{project}:{project}:rw"]
     assert view["disk"] == "(not built yet)"
 
     assert cli.main(["box", "rm", "neo"]) == 0
@@ -178,17 +182,17 @@ def test_cli_create_inspect_and_rm(project, capsys):
 
 
 def test_cli_create_refuses_to_clobber(project, capsys):
-    assert cli.main(["box", "create", "neo", "--project", str(project)]) == 0
+    assert cli.main(["box", "create", "neo", "--mount", f"{project}:{project}"]) == 0
     capsys.readouterr()
 
-    assert cli.main(["box", "create", "neo", "--project", str(project)]) == cli.EXIT_USAGE
+    assert cli.main(["box", "create", "neo", "--mount", f"{project}:{project}"]) == cli.EXIT_USAGE
     assert "already exists" in capsys.readouterr().err
 
-    assert cli.main(["box", "create", "neo", "--project", str(project), "--force"]) == 0
+    assert cli.main(["box", "create", "neo", "--mount", f"{project}:{project}", "--force"]) == 0
 
 
 def test_cli_ls_reports_build_state(project, capsys):
-    cli.main(["box", "create", "neo", "--project", str(project)])
+    cli.main(["box", "create", "neo", "--mount", f"{project}:{project}"])
     capsys.readouterr()
 
     assert cli.main(["box", "ls"]) == 0
@@ -391,7 +395,7 @@ def test_starting_an_already_running_box_is_refused(project, capsys, monkeypatch
     from agentsandbox.manager import SessionManager
     from agentsandbox.session import STATE_RUNNING
 
-    cli.main(["box", "create", "neo", "--project", str(project)])
+    cli.main(["box", "create", "neo", "--mount", f"{project}:{project}"])
     capsys.readouterr()
 
     manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
@@ -411,7 +415,7 @@ def test_a_crashed_supervisor_does_not_block_the_box(project, capsys):
     from agentsandbox.manager import SessionManager
     from agentsandbox.session import STATE_RUNNING, Session
 
-    cli.main(["box", "create", "neo", "--project", str(project)])
+    cli.main(["box", "create", "neo", "--mount", f"{project}:{project}"])
     capsys.readouterr()
 
     manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
@@ -452,7 +456,7 @@ def test_the_rest_of_the_configuration_survives_a_resize():
         name="keep-config",
         profile="wiremock",
         allow_hosts=["example.com"],
-        project_path="/some/project",
+        mounts=[Mount(host="/some/project", guest="/some/project")],
     )
     box.save()
 
@@ -463,4 +467,4 @@ def test_the_rest_of_the_configuration_survives_a_resize():
     reloaded = Box.load("keep-config")
     assert reloaded.profile == "wiremock"
     assert reloaded.allow_hosts == ["example.com"]
-    assert reloaded.project_path == "/some/project"
+    assert reloaded.mounts == [Mount(host="/some/project", guest="/some/project")]

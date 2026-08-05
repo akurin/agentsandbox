@@ -37,8 +37,8 @@ from .proxy.launcher import MitmproxyProcess
 from .session import (
     STATE_RUNNING,
     STATE_STOPPED,
+    Mount,
     Session,
-    Share,
     new_session_id,
     purge_session_dir,
 )
@@ -112,32 +112,30 @@ class SessionManager:
         cls,
         *,
         allow_hosts: list[str] | None = None,
-        project: Path | None = None,
-        project_mount: str = "",
-        shares: list[Share] | None = None,
+        mounts: list[Mount] | None = None,
         wg_listen_host: str = "127.0.0.1",
         wg_listen_port: int | None = None,
         box_name: str = "",
     ) -> SessionManager:
-        """Mint a session: fresh identity, fresh CA, direct project mount."""
-        project_shares = list(shares or [])
-        if project:
-            resolved = project.expanduser().resolve()
-            if not resolved.is_dir():
-                raise SessionError(f"{resolved} is not a directory")
-            # Read-write: the agent is meant to edit the project, and the
-            # Share default (read-only) is for `--share` extras.
-            project_shares.append(Share(path=str(resolved), tag="project", read_only=False))
+        """Mint a session: fresh identity, fresh CA, whatever mounts it was given.
+
+        No special "the project" mount here - every mount names its own host
+        and guest path, and none is privileged over another. The CLI's
+        ``--mount`` parsing already validates each host path; this checks
+        again, since this is a public entry point other callers can reach
+        directly.
+        """
+        for mount in mounts or []:
+            if not Path(mount.host).is_dir():
+                raise SessionError(f"{mount.host} is not a directory")
 
         session = Session(
             session_id=new_session_id(),
             box_name=box_name,
             policy=DestinationPolicy(allow_hosts=list(allow_hosts or ["*"])),
-            shares=project_shares,
+            mounts=list(mounts or []),
             wg_listen_host=wg_listen_host,
             wg_listen_port=wg_listen_port or _free_udp_port(wg_listen_host),
-            project_path=str(project.expanduser().resolve()) if project else "",
-            project_mount=project_mount or (str(project.expanduser().resolve()) if project else ""),
         )
         # Recorded now, not when `start()` finishes: this call already runs
         # inside the process that owns the session for its whole life - the
@@ -165,7 +163,7 @@ class SessionManager:
             "session.created",
             box_name=box_name,
             allow_hosts=session.policy.allow_hosts,
-            project=session.project_path,
+            mounts=[m.guest for m in session.mounts],
             wg_port=session.wg_listen_port,
         )
         return manager
@@ -227,7 +225,7 @@ class SessionManager:
         self.start_proxy(web=web, web_port=web_port)
         self.start_forwards(forward_ports or [], dev_targets=dev_targets)
         if with_vm:
-            config = vm_config or VmConfig(shares=list(self.session.shares))
+            config = vm_config or VmConfig(mounts=list(self.session.mounts))
             if self.forwards is not None:
                 # The guest's vsock devices have to exist before it boots.
                 config.vsock_ports.update(self.forwards.socket_paths())
@@ -458,7 +456,7 @@ class SessionManager:
         return urls
 
     def start_vm(self, vm_config: VmConfig | None = None) -> VfkitDriver:
-        config = vm_config or VmConfig(shares=list(self.session.shares))
+        config = vm_config or VmConfig(mounts=list(self.session.mounts))
         driver = VfkitDriver(
             self.session,
             config,

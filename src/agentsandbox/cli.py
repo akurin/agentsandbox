@@ -25,7 +25,7 @@ from .config import DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
 from .errors import SandboxError
 from .keychain import KeychainProvider
 from .manager import SessionManager, check_host, stop_session_by_id
-from .session import STATE_STOPPED, Session, Share, list_sessions, resolve_session_id
+from .session import STATE_STOPPED, Mount, Session, list_sessions, resolve_session_id
 from .vm.vfkit import DEFAULT_IMAGE, VmConfig, default_golden_image, resolve_image
 
 EXIT_USAGE = 2
@@ -68,18 +68,42 @@ def _print(data) -> None:
         print(data)
 
 
-def _parse_share(value: str) -> Share:
-    """``/path/to/dir:ro`` or ``/path/to/dir:rw`` (read-only is the default)."""
-    path, _, mode = value.rpartition(":")
-    if not path:  # no colon at all
-        path, mode = value, "ro"
+def _parse_mount(value: str) -> Mount:
+    """``/host/path:/guest/path[:ro|rw]`` - both sides are always required.
+
+    Read-write by default, matching Docker/Podman's own ``-v``: an unmarked
+    mount is writable, ``:ro`` is what restricts it.
+    """
+    parts = value.split(":", 2)
+    if len(parts) < 2:
+        raise argparse.ArgumentTypeError(
+            f"--mount needs both sides: HOST:GUEST[:ro|rw], got {value!r}"
+        )
+    host, guest, *rest = parts
+    mode = rest[0] if rest else "rw"
     if mode not in ("ro", "rw"):
-        raise argparse.ArgumentTypeError(f"share mode must be ro or rw, got {mode!r}")
-    resolved = Path(path).expanduser().resolve()
+        raise argparse.ArgumentTypeError(f"mount mode must be ro or rw, got {mode!r}")
+    if not guest.startswith("/"):
+        raise argparse.ArgumentTypeError(f"guest path must be absolute, got {guest!r}")
+    resolved = Path(host).expanduser().resolve()
     if not resolved.is_dir():
         raise argparse.ArgumentTypeError(f"{resolved} is not a directory")
-    tag = resolved.name.replace(" ", "_")[:32] or "share"
-    return Share(path=str(resolved), tag=tag, read_only=(mode == "ro"))
+    return Mount(host=str(resolved), guest=guest, read_only=(mode == "ro"))
+
+
+def _mount_collision(mounts: list[Mount]) -> str | None:
+    """Two mounts landing on the same guest path is never useful - one would
+    just shadow the other, silently, depending on device order. Returns an
+    error message naming the conflict, or None if there is none."""
+    seen: dict[str, str] = {}
+    for mount in mounts:
+        if mount.guest in seen:
+            return (
+                f"two --mount entries target the same guest path {mount.guest!r}: "
+                f"{seen[mount.guest]!r} and {mount.host!r}"
+            )
+        seen[mount.guest] = mount.host
+    return None
 
 
 def _parse_forward(value: str) -> tuple[int, int]:
@@ -152,9 +176,7 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     # Everything the box holds becomes this run's session, except the
     # things that must be new every time: keys, CA, capabilities.
     args.allow = box.allow_hosts
-    args.project = box.project_path or None
-    args.mount_path = box.project_mount
-    args.share = list(box.shares)
+    args.mount = list(box.mounts)
     args.profile = box.profile or None
     args.cpus = box.cpus
     args.memory = box.memory_mib
@@ -313,9 +335,7 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
 
     manager = SessionManager.create(
         allow_hosts=args.allow,
-        project=Path(args.project) if args.project else None,
-        project_mount=args.mount_path or "",
-        shares=args.share or [],
+        mounts=args.mount or [],
         box_name=box.name if box else "",
     )
     session = manager.session
@@ -328,11 +348,9 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         print("  any public host is reachable (restrict with --allow HOST)")
     else:
         print(f"  allowed hosts: {', '.join(session.policy.allow_hosts)}")
-    for share in session.shares:
-        if share.tag == "project":
-            continue  # printed below, with its mount point
-        mode = "read-only" if share.read_only else "read-write"
-        print(f"  share      {share.path} -> guest:/mnt/{share.tag} ({mode})")
+    for mount in session.mounts:
+        mode = "read-only" if mount.read_only else "read-write"
+        print(f"  mount      {mount.host} -> guest:{mount.guest} ({mode})")
 
     # Capabilities are minted before the guest boots so their placeholders can
     # be delivered as environment variables in cloud-init, rather than pasted by hand.
@@ -357,7 +375,7 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
     vm_config = VmConfig(
         cpus=args.cpus,
         memory_mib=args.memory,
-        shares=list(session.shares),
+        mounts=list(session.mounts),
         console="stdio" if args.console else "log",
         netcheck=args.netcheck,
         capability_env=capability_env,
@@ -393,9 +411,6 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
     print(f"  wireguard  {session.wg_listen_host}:{session.wg_listen_port}")
     print(f"  ca         {session.paths.ca_cert}")
     print(f"  broker     {session.paths.broker_socket}")
-    if session.project_path:
-        mount = session.project_mount or session.project_path
-        print(f"  project    {session.project_path} -> guest:{mount} (read-write)")
     for port, info in session.forwards.items():
         print(f"  forward    guest:{port} -> {info['url']}")
     if not args.vm:
@@ -492,7 +507,7 @@ def cmd_system_sessions(args: argparse.Namespace) -> int:
         age = _human_age(view["age_s"])
         if session.state == STATE_STOPPED:
             stopped += 1
-        detail = session.box_name or session.project_path or ""
+        detail = session.box_name or ""
         print(f"{view['session']}  {view['state']:<8} {age:>6}  {detail}")
 
     if stopped:
@@ -578,7 +593,7 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
 
     # Say which session this landed in. It is resolved implicitly when only one
     # is running, and "it worked but where?" is a fair thing to wonder.
-    where = session.box_name or session.project_path or "no box"
+    where = session.box_name or "no box"
     print(f"capability {cap.cap_id} issued for {spec.provider}")
     print(f"  in session {session.session_id} ({where})")
     lifetime = f"expires in {args.ttl}s, and is" if args.ttl else "does not expire, but is"
@@ -984,9 +999,9 @@ def cmd_box_create(args: argparse.Namespace) -> int:
         print(f"!! box {name!r} already exists (--force to redefine)", file=sys.stderr)
         return EXIT_USAGE
 
-    project = Path(args.project).expanduser().resolve() if args.project else None
-    if project and not project.is_dir():
-        print(f"!! {project} is not a directory", file=sys.stderr)
+    mounts = args.mount or []
+    if conflict := _mount_collision(mounts):
+        print(f"!! {conflict}", file=sys.stderr)
         return EXIT_USAGE
 
     from .vm.vfkit import image_path, resolve_image as _resolve_image
@@ -1001,11 +1016,9 @@ def cmd_box_create(args: argparse.Namespace) -> int:
 
     box = Box(
         name=name,
-        project_path=str(project) if project else "",
-        project_mount=args.mount_path or "",
         profile=args.profile or "",
         allow_hosts=list(args.allow or ["*"]),
-        shares=args.share or [],
+        mounts=mounts,
         cpus=args.cpus,
         memory_mib=args.memory,
         image=args.image,
@@ -1015,8 +1028,9 @@ def cmd_box_create(args: argparse.Namespace) -> int:
     SshIdentity(box.ssh_dir).generate(name)
     box.save()
     print(f"box {name} created")
-    if project:
-        print(f"  project  {project} -> guest:{box.project_mount or project}")
+    for mount in box.mounts:
+        mode = "read-only" if mount.read_only else "read-write"
+        print(f"  mount    {mount.host} -> guest:{mount.guest} ({mode})")
     if box.profile:
         print(f"  profile  {box.profile}")
     print(f"  image    {box.image}")
@@ -1054,9 +1068,19 @@ def cmd_box_set(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         changes.append(f"image   {box.image} -> {args.image}")
         box.image = args.image
+    if args.mount is not None:
+        # Replaces the whole list, the same way --image replaces the whole
+        # value rather than editing it in place - there is no --unmount to
+        # pair with an additive --mount, so "these are the mounts now" is the
+        # only shape that does not need one.
+        if conflict := _mount_collision(args.mount):
+            print(f"!! {conflict}", file=sys.stderr)
+            return EXIT_USAGE
+        changes.append(f"mounts  {len(box.mounts)} -> {len(args.mount)}")
+        box.mounts = args.mount
 
     if not changes:
-        print("nothing to change: pass --memory, --cpus or --image", file=sys.stderr)
+        print("nothing to change: pass --memory, --cpus, --image or --mount", file=sys.stderr)
         return EXIT_USAGE
 
     box.save()
@@ -1085,14 +1109,20 @@ def cmd_box_list(args: argparse.Namespace) -> int:
 
     boxes = list_boxes()
     if not boxes:
-        print("no boxes; create one with `asbx box create NAME --project DIR`")
+        print("no boxes; create one with `asbx box create NAME --mount HOST:GUEST`")
         return 0
 
     running = {s.box_name for s in list_sessions() if s.state == STATE_RUNNING and s.box_name}
     for box in boxes:
         state = "running" if box.name in running else ("stopped" if box.has_disk else "not built")
         size = f"{box.disk_size() / 1e9:.1f}G" if box.has_disk else "-"
-        print(f"{box.name:<20} {state:<10} {size:>6}  {box.project_path}")
+        if not box.mounts:
+            mounts = "-"
+        elif len(box.mounts) == 1:
+            mounts = box.mounts[0].host
+        else:
+            mounts = f"{len(box.mounts)} mounts"
+        print(f"{box.name:<20} {state:<10} {size:>6}  {mounts}")
     return 0
 
 
@@ -1619,13 +1649,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     create = box_sub.add_parser("create", help="define a box (does not boot it)")
     create.add_argument("name")
-    create.add_argument("--project", help="host directory to mount in the guest")
-    create.add_argument("--mount-path", help="where it mounts inside (default: same as host)")
+    create.add_argument(
+        "--mount",
+        action="append",
+        type=_parse_mount,
+        metavar="HOST:GUEST[:ro|rw]",
+        help="expose a host directory to the guest (repeatable; read-write unless :ro)",
+    )
     create.add_argument("--profile", help="capability profile to issue on every start")
     create.add_argument("--allow", action="append", default=[], metavar="HOST",
                         help="restrict egress to these hosts (default: all public)")
-    create.add_argument("--share", action="append", type=_parse_share, metavar="PATH:ro|rw",
-                        help="extra host directory at /mnt/<name>")
     create.add_argument("--cpus", type=int, default=2)
     create.add_argument("--memory", type=int, default=2048, help="guest RAM in MiB")
     create.add_argument(
@@ -1688,11 +1721,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stop_env.set_defaults(func=cmd_box_stop, wait=True)
 
-    set_cmd = box_sub.add_parser("set", help="change a box's cpus or memory")
+    set_cmd = box_sub.add_parser("set", help="change a box's cpus, memory, image or mounts")
     set_cmd.add_argument("name")
     set_cmd.add_argument("--memory", type=int, metavar="MIB", help="guest RAM in MiB")
     set_cmd.add_argument("--cpus", type=int)
     set_cmd.add_argument("--image", help="base image; takes effect on the next `asbx box reset`")
+    set_cmd.add_argument(
+        "--mount",
+        action="append",
+        type=_parse_mount,
+        metavar="HOST:GUEST[:ro|rw]",
+        help="replace the box's whole mount list (repeatable; takes effect on the next start)",
+    )
     set_cmd.set_defaults(func=cmd_box_set)
 
     reset = box_sub.add_parser("reset", help="discard a box's disk, keeping its config")

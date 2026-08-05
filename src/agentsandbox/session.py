@@ -31,15 +31,38 @@ def new_session_id() -> str:
 
 
 @dataclass
-class Share:
-    """An opt-in host directory exposed to the guest over virtio-fs."""
+class Mount:
+    """A host directory exposed to the guest over virtio-fs.
 
-    path: str
-    tag: str
-    read_only: bool = True
+    Read-write by default - matching Docker/Podman's own ``-v``, where an
+    unmarked mount is writable and ``:ro`` is what restricts it. There is no
+    special "the project" mount anymore: every mount names its own host and
+    guest path explicitly, and none is privileged over another.
+
+    No ``tag`` field: the virtio-fs mount tag each one gets (``m0``, ``m1``,
+    ...) is derived from its position in the list at VM-build time, in
+    :mod:`agentsandbox.vm.vfkit` and :mod:`agentsandbox.vm.cloudinit` - both
+    read the same list in the same order, so the tags agree without either
+    one having to be told what the other picked. Storing it here would just
+    be one more thing that could drift out of sync with the list itself.
+    """
+
+    host: str
+    guest: str
+    read_only: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def mount_tag(index: int) -> str:
+    """The virtio-fs tag for the mount at this position in the list.
+
+    One function, so vfkit's ``--device`` list and cloud-init's ``mounts:``
+    block - built in different modules, from what has to be the same list in
+    the same order - can never disagree about what a given mount is called.
+    """
+    return f"m{index}"
 
 
 @dataclass
@@ -58,14 +81,10 @@ class Session:
 
     #: Box this run belongs to, if any. Anonymous sessions have none.
     box_name: str = ""
-    #: Host directory mounted into the guest, if any.
-    project_path: str = ""
-    #: Where the project share mounts inside the guest. Defaults to the host
-    #: path so absolute references (virtualenvs, configs) work unchanged.
-    project_mount: str = ""
 
-    #: Opt-in virtio-fs shares (the spec's default is *no* mount at all).
-    shares: list[Share] = field(default_factory=list)
+    #: Host directories exposed to the guest (the spec's default is *no*
+    #: mount at all). No mount is privileged over another.
+    mounts: list[Mount] = field(default_factory=list)
 
     #: Preview gateway: guest port -> {"url":..., "vsock_port":..., "token":...}
     forwards: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -88,14 +107,14 @@ class Session:
     def to_dict(self) -> dict:
         data = asdict(self)
         data["policy"] = self.policy.to_dict()
-        data["shares"] = [s.to_dict() for s in self.shares]
+        data["mounts"] = [m.to_dict() for m in self.mounts]
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> Session:
         data = dict(data)
         data["policy"] = DestinationPolicy.from_dict(data.get("policy", {}))
-        data["shares"] = [Share(**s) for s in data.get("shares", [])]
+        data["mounts"] = [Mount(**m) for m in data.get("mounts", [])]
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})
 
@@ -124,8 +143,7 @@ class Session:
             "box_name": self.box_name,
             "age_s": int(time.time() - self.created_at),
             "allow_hosts": self.policy.allow_hosts,
-            "project": self.project_path,
-            "shares": [f"{s.path}:{'ro' if s.read_only else 'rw'}" for s in self.shares],
+            "mounts": [f"{m.host}:{m.guest}:{'ro' if m.read_only else 'rw'}" for m in self.mounts],
             "forwards": {port: p.get("url", "") for port, p in self.forwards.items()},
             "wireguard": f"{self.wg_listen_host}:{self.wg_listen_port}",
             "driver": self.vm_driver,
@@ -218,7 +236,7 @@ def resolve_session_id(explicit: str | None = None) -> str:
         return running[0].session_id
     if len(running) > 1:
         listed = "\n".join(
-            f"  {s.session_id}  {s.box_name or s.project_path or '(no box)'}" for s in running
+            f"  {s.session_id}  {s.box_name or '(no box)'}" for s in running
         )
         raise SessionError(
             f"{len(running)} sessions are running - name the box:\n{listed}"
