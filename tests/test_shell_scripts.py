@@ -226,3 +226,30 @@ def test_wait_online_is_bounded_rather_than_masked():
     assert "ASBX-WAITONLINE" in text
 
 
+
+
+def test_the_wait_online_dropin_is_a_valid_unit_file():
+    """Built by printf inside a heredoc, it came out as one line with literal
+    \\n, which systemd ignores - the unit kept its default two-minute timeout
+    and nothing reported a problem. Delivered as a YAML file it cannot happen.
+    """
+    yaml = pytest.importorskip("yaml")
+
+    text = (REPO / "vm/prepare-image.sh").read_text()
+    heredoc = text[text.index('cat >"$WORK/user-data" <<EOF') : text.index('cat >"$WORK/meta-data"')]
+    work = Path(tempfile.mkdtemp())
+    result = subprocess.run(
+        ["bash", "-c", f'set -euo pipefail\nWORK={work}\nPACKAGES="socat"\n{heredoc}'],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    document = yaml.safe_load((work / "user-data").read_text().split("\n", 1)[1])
+    dropin = next(
+        f for f in document["write_files"] if "wait-online" in f["path"]
+    )
+    lines = dropin["content"].strip().splitlines()
+    assert lines[0] == "[Service]"
+    assert lines[1] == "ExecStart="          # the reset, required before an override
+    assert "--timeout=5" in lines[2]
+    assert "\\n" not in dropin["content"]    # literal backslash-n means it failed

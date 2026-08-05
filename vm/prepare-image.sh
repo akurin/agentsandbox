@@ -69,6 +69,19 @@ package_upgrade: false
 packages:
 $(for pkg in $PACKAGES; do echo "  - $pkg"; done)
 
+write_files:
+  # Bounding wait-online, delivered as a file rather than built by printf
+  # inside this heredoc. The escaping needed to survive the heredoc, YAML and
+  # the shell produced a drop-in systemd silently ignored - the unit kept its
+  # default two-minute timeout and nothing said why.
+  - path: /etc/systemd/system/systemd-networkd-wait-online.service.d/10-asbx-timeout.conf
+    permissions: '0644'
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any --timeout=5
+      SuccessExitStatus=0 1 2
+
 runcmd:
   # Report straight to the virtio console. The getty banner proves hvc0 exists
   # and reaches the host log, and writing to the device works no matter what
@@ -111,10 +124,8 @@ runcmd:
   # that stopped the guest reaching runcmd.
   - [ sh, -c, "systemctl unmask systemd-networkd-wait-online.service || true" ]
   - [ sh, -c, "systemctl unmask systemd-networkd-wait-online@.service || true" ]
-  - [ mkdir, -p, /etc/systemd/system/systemd-networkd-wait-online.service.d ]
-  - [ sh, -c, "printf '[Service]\\nExecStart=\\nExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any --timeout=5\\nSuccessExitStatus=0 1 2\\n' > /etc/systemd/system/systemd-networkd-wait-online.service.d/10-asbx-timeout.conf" ]
   - [ sh, -c, "systemctl daemon-reload" ]
-  - [ sh, -c, "echo \"ASBX-WAITONLINE \$(systemctl cat systemd-networkd-wait-online.service | grep -c 'timeout=5')\" > /dev/hvc0" ]
+  - [ sh, -c, "echo \"ASBX-WAITONLINE \$(systemctl show systemd-networkd-wait-online.service -p ExecStart --value | grep -c 'timeout=5')\" > /dev/hvc0" ]
   # Report success where the host can see it.
   - [ sh, -c, "modprobe virtiofs 2>/dev/null || true" ]
   - [ mkdir, -p, /mnt/asbxprep ]
