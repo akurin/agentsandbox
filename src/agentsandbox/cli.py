@@ -910,6 +910,13 @@ def cmd_diag(args: argparse.Namespace) -> int:
                 print("  " + line)
 
     for name, path in (
+        # The console comes first among the logs, and before the guest's own
+        # files, because it is the only one that exists when the guest fails
+        # early. bootstrap.log and netcheck.log are written *by* the bootstrap
+        # into a virtio-fs share - if cloud-init never ran, or the share never
+        # mounted, they are simply absent, and their absence is the symptom
+        # rather than the explanation. The console says why.
+        ("guest console", paths.vm / "console.log"),
         ("guest bootstrap", paths.guest_logs / "bootstrap.log"),
         ("guest netcheck", paths.guest_logs / "netcheck.log"),
         ("mitmproxy", paths.root / "mitmproxy.log"),

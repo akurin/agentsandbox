@@ -126,3 +126,19 @@ def test_an_environment_created_before_images_were_named_still_starts(asbx_home)
     box = Box.from_dict({"name": "old"})  # no image key at all
     assert box.image == DEFAULT_IMAGE
     assert resolve_image(box.image) == legacy
+
+
+def test_diag_collects_the_guest_console():
+    """The console is the only log that exists when a guest fails early.
+
+    bootstrap.log and netcheck.log are written by the bootstrap into a
+    virtio-fs share; if cloud-init never ran or the share never mounted they
+    are absent, and their absence is the symptom, not the explanation. diag
+    omitted the console, so a guest that died before bootstrap produced a
+    report full of "(missing:" and nothing that said why.
+    """
+    import inspect
+
+    source = inspect.getsource(cli.cmd_diag)
+    assert 'paths.vm / "console.log"' in source
+    assert source.index('"guest console"') < source.index('"guest bootstrap"')
