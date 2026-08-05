@@ -6,6 +6,7 @@ import json
 import os
 
 import pytest
+from helpers import make_request, unix_sockets_available
 
 from agentsandbox import cli
 from agentsandbox.broker.server import (
@@ -19,11 +20,6 @@ from agentsandbox.capabilities import CapabilityStore
 from agentsandbox.errors import BrokerError
 from agentsandbox.manager import SessionManager
 from agentsandbox.session import STATE_STOPPED
-
-from helpers import make_request, unix_sockets_available
-
-
-
 
 # -- creation ----------------------------------------------------------------
 
@@ -291,10 +287,41 @@ def test_status_reports_liveness_from_pids_in_another_process():
     status = manager.status()
     assert status["proxy_running"] is False
     assert status["vm_running"] is False
-    assert status["supervisor_running"] is False
+    # Recorded at `create()`, not at the end of `start()`: this process is the
+    # session's owner from the moment it exists, and is genuinely running.
+    assert status["supervisor_running"] is True
 
     manager.session.mitm_pid = os.getpid()
     assert manager.status()["proxy_running"] is True
+
+
+def test_a_session_that_dies_before_running_is_not_running_forever(monkeypatch):
+    """The gap this closes: `SessionManager.create()` writes CREATED to disk
+    before any of the fallible steps that turn it into RUNNING. A supervisor
+    that dies in between - a profile that fails to load, a port `start_proxy`
+    never gets - used to leave that session claiming CREATED with a pid nothing
+    reconciled, because only RUNNING was ever checked. It looked exactly like a
+    session still in the middle of a slow boot, forever."""
+    from agentsandbox.session import (
+        STATE_CREATED,
+        STATE_STOPPED,
+        Session,
+        list_sessions,
+    )
+
+    monkeypatch.delenv("ASBX_SESSION", raising=False)
+    manager = SessionManager.create(allow_hosts=["example.com"])
+    assert manager.session.state == STATE_CREATED
+    assert manager.session.supervisor_pid != 0
+
+    # The owning process is gone, and startup never got as far as RUNNING.
+    manager.session.supervisor_pid = 999_999_999
+    manager.session.save()
+
+    assert [s.state for s in list_sessions() if s.session_id == manager.session.session_id] == [
+        STATE_STOPPED
+    ]
+    assert Session.load(manager.session.session_id).state == STATE_STOPPED
 
 
 def test_cap_try_reports_a_denial_without_calling_upstream(capsys, monkeypatch, tmp_path):
@@ -531,7 +558,12 @@ def test_a_session_whose_supervisor_died_is_not_running(monkeypatch):
     behind them, and `asbx web attach` refused with "3 sessions are running -
     name one". The state on disk is written by a supervisor that may not have
     survived to write STOPPED."""
-    from agentsandbox.session import STATE_RUNNING, STATE_STOPPED, Session, list_sessions
+    from agentsandbox.session import (
+        STATE_RUNNING,
+        STATE_STOPPED,
+        Session,
+        list_sessions,
+    )
 
     monkeypatch.delenv("ASBX_SESSION", raising=False)
     for name in ("ghost-a", "ghost-b", "ghost-c"):
@@ -609,3 +641,44 @@ def test_renegotiating_the_tunnel_is_skipped_when_there_is_no_guest_to_ask():
     assert [e["event"] for e in manager.audit.read() if e["event"].startswith("tunnel.")] == [
         "tunnel.renegotiate_skipped"
     ]
+
+
+# -- resolving a session by box name -------------------------------------
+
+
+def test_a_command_can_name_the_box_instead_of_the_session_id(monkeypatch):
+    """`asbx --session neo web attach` should work: a box has at most one
+    running session, so its name is never ambiguous where a bare session id
+    would have been the only option."""
+    from agentsandbox.box import Box
+    from agentsandbox.session import STATE_RUNNING
+
+    monkeypatch.delenv("ASBX_SESSION", raising=False)
+    Box(name="neo").save()
+    manager = SessionManager.create(allow_hosts=["example.com"], box_name="neo")
+    manager.session.state = STATE_RUNNING
+    manager.session.supervisor_pid = os.getpid()
+    manager.session.save()
+
+    resolved = cli._resolve_session("neo")
+    assert resolved.session_id == manager.session.session_id
+
+
+def test_naming_a_box_that_is_not_running_says_so(monkeypatch):
+    from agentsandbox.box import Box
+    from agentsandbox.errors import SessionError
+
+    monkeypatch.delenv("ASBX_SESSION", raising=False)
+    Box(name="idle").save()
+
+    with pytest.raises(SessionError, match="idle is not running"):
+        cli._resolve_session("idle")
+
+
+def test_a_bare_session_id_still_resolves_when_no_box_shares_its_name():
+    """The fallback that made `--session` useful before box names ever
+    worked with it - and still the only way to reach a stopped session, whose
+    box has since moved on to a different run."""
+    manager = SessionManager.create(allow_hosts=["example.com"])
+    resolved = cli._resolve_session(manager.session.session_id)
+    assert resolved.session_id == manager.session.session_id

@@ -144,6 +144,15 @@ class SessionManager:
             project_path=str(project.expanduser().resolve()) if project else "",
             project_mount=project_mount or (str(project.expanduser().resolve()) if project else ""),
         )
+        # Recorded now, not when `start()` finishes: this call already runs
+        # inside the process that owns the session for its whole life - the
+        # double-forked supervisor, or the CLI itself in `--attach` mode. Not
+        # recording it until success meant a session that died on the way to
+        # RUNNING (a profile that failed to load, a port `start_proxy` never
+        # got) had no pid on file, so `is_alive` read it as dead-and-therefore-
+        # startable to check, but `list_sessions()` only ever reconciled
+        # STATE_RUNNING - a crashed CREATED session stayed "running" forever.
+        session.supervisor_pid = os.getpid()
         session.save()
 
         identity = WireGuardIdentity.generate(session.wg_listen_host, session.wg_listen_port)

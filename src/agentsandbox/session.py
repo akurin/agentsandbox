@@ -154,7 +154,7 @@ def pid_is_alive(pid: int) -> bool:
 
 
 def list_sessions() -> list[Session]:
-    """Every session, with RUNNING reconciled against reality.
+    """Every session, with RUNNING and CREATED reconciled against reality.
 
     The state on disk is written by a supervisor that may have died without
     getting to write STOPPED - a crash, a SIGKILL, a failed start. Trusting the
@@ -163,9 +163,17 @@ def list_sessions() -> list[Session]:
     guard against starting a box twice had to duplicate this check to work at
     all.
 
-    So a session claiming RUNNING with no live supervisor and no live guest is
-    corrected here, once, and written back. Reading is the only moment anyone
-    is looking.
+    CREATED needs the same treatment as RUNNING, not just STOPPED-on-success:
+    `SessionManager.create()` writes the session file, with a real supervisor
+    pid on it, before any of the fallible steps that turn CREATED into RUNNING
+    - a profile that fails to load, a port `start_proxy` never gets. A
+    supervisor that dies partway through leaves exactly that state on disk,
+    and it looked identical to one still in the middle of a slow boot until the
+    pid was recorded early enough to tell them apart.
+
+    So a session claiming RUNNING or CREATED with no live supervisor and no
+    live guest is corrected here, once, and written back. Reading is the only
+    moment anyone is looking.
     """
     out = []
     root = sessions_root()
@@ -176,7 +184,7 @@ def list_sessions() -> list[Session]:
             session = Session.load(entry.name)
         except (SessionError, json.JSONDecodeError):
             continue
-        if session.state == STATE_RUNNING and not session.is_alive:
+        if session.state in (STATE_RUNNING, STATE_CREATED) and not session.is_alive:
             session.state = STATE_STOPPED
             try:
                 session.save()

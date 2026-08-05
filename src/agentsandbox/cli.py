@@ -37,8 +37,28 @@ EXIT_DENIED = 3
 # helpers
 
 
-def _resolve_session(session_id: str | None) -> Session:
-    return Session.load(resolve_session_id(session_id))
+def _resolve_session(session_arg: str | None) -> Session:
+    """Which session a command acts on.
+
+    ``session_arg`` may be a session id, or - since that is what everyone
+    actually names things by - a box name. A box can have at most one running
+    session (`cmd_box_start` already refuses to start a second), so naming the
+    box is never ambiguous where naming the session id would have been; it
+    just fails with "not running" instead of guessing.
+
+    A bare session id still works, and still has to for a stopped session:
+    `asbx --session ID diag` is the only way to look at one after its box has
+    moved on to a different run.
+    """
+    from .box import Box
+    from .errors import SessionError
+
+    if session_arg and Box.exists(session_arg):
+        session = _running_session_for(session_arg)
+        if session is None:
+            raise SessionError(f"{session_arg} is not running; start it with `asbx start`")
+        return session
+    return Session.load(resolve_session_id(session_arg))
 
 
 def _print(data) -> None:
@@ -1608,7 +1628,9 @@ def _hidden_parser(sub, name: str) -> argparse.ArgumentParser:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asbx", description=__doc__)
-    parser.add_argument("--session", help="session id (default: the newest running session)")
+    parser.add_argument(
+        "--session", help="box name or session id (default: the only session running)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # -- boxes (the everyday path) -----------------------------------
