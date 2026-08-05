@@ -107,9 +107,12 @@ def list_images() -> list[dict]:
                 entry["distro"] = "unreadable metadata"
         # After the merge: the file's own "name" must not decide what this is
         # called on disk, which is the only identity boxes refer to.
+        # The name is what the file is called, always: it is what `asbx image
+        # rm` takes and what a box records. Showing the legacy image as
+        # "debian-13 (unnamed legacy image)" was a name nobody could type.
         entry["name"] = name
         if name == Path(LEGACY_IMAGE).stem:
-            entry["name"] = f"{DEFAULT_IMAGE} (unnamed legacy image)"
+            entry["note"] = f"legacy image, resolves as {DEFAULT_IMAGE}"
         found.append(entry)
     return found
 

@@ -464,3 +464,17 @@ def test_gc_collects_downloads_but_not_the_images_built_from_them(asbx_home):
     assert cli.main(["image", "gc"]) == 0
     assert not (images_dir() / "noble-server-cloudimg-arm64.img").exists()
     assert image_path(DEFAULT_IMAGE).exists()  # the built image is untouched
+
+
+def test_image_ls_shows_a_name_you_can_actually_type(asbx_home):
+    """It displayed the legacy image as "debian-13 (unnamed legacy image)",
+    which is not a name `asbx image rm` accepts - the file is golden.raw."""
+    from agentsandbox.vm.vfkit import DEFAULT_IMAGE, image_path, list_images
+
+    image_path(DEFAULT_IMAGE).unlink()
+    (asbx_home / "images" / "golden.raw").write_bytes(b"x")
+
+    entry = next(i for i in list_images() if "golden" in i["name"])
+    assert entry["name"] == "golden"
+    assert DEFAULT_IMAGE in entry["note"]
+    assert cli.main(["image", "rm", "golden"]) == 0
