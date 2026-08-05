@@ -216,11 +216,43 @@ class SessionManager:
             read_token(self.session.paths.broker_token),
             audit=self.audit,
         )
+        server.commands["web-attach"] = lambda: self.reattach_proxy(web=True)
+        server.commands["web-detach"] = lambda: self.reattach_proxy(web=False)
         server.serve_in_thread()
         self.broker_server = server
         self.session.broker_pid = os.getpid()
         self.audit.emit("broker.started", socket=str(self.session.paths.broker_socket))
         return server
+
+    def reattach_proxy(self, *, web: bool, web_port: int = 0) -> dict:
+        """Restart mitmproxy in the other mode, keeping the session's identity.
+
+        Everything the guest depends on lives outside the process: the
+        WireGuard keys are a file (``paths.wireguard_conf``), the listen port
+        is on the session record, and the CA is in a per-session confdir. So a
+        replacement listens on the same port with the same keys and the same
+        certificate authority - the guest re-handshakes on its next keepalive
+        and its trust store still matches.
+
+        What does not survive is connections in flight. They are reset, and
+        anything mid-download in the guest sees a broken pipe and has to retry.
+        That is the price of not restarting the whole box, and it is worth
+        stating rather than discovering.
+        """
+        if self.mitm is not None and self.mitm.web == web:
+            return {"ok": True, "message": f"already {'attached' if web else 'detached'}",
+                    "url": self.mitm.web_url if web else ""}
+
+        previous = self.mitm
+        if previous is not None:
+            previous.stop()
+        self.start_proxy(web=web, web_port=web_port)
+        self.audit.emit("proxy.reattached", web=web, url=self.mitm.web_url if web else "")
+        return {
+            "ok": True,
+            "message": "mitmweb attached" if web else "mitmweb detached",
+            "url": self.mitm.web_url if web else "",
+        }
 
     def start_proxy(self, wait: float = 20.0, *, web: bool = False, web_port: int = 0) -> MitmproxyProcess:
         """Start mitmproxy and wait for it to mint this session's CA.

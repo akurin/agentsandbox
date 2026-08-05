@@ -381,6 +381,7 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         print(f"  forward    guest:{port} -> {info['url']}")
     if manager.mitm is not None and manager.mitm.web:
         print(f"  mitmweb    {manager.mitm.web_url}")
+        print(_mitmweb_warning(), file=sys.stderr)
     if not args.vm:
         print("\nNo guest started (--no-vm). Point a WireGuard peer at the endpoint above:")
         print(f"  {session.paths.guest_wireguard_conf}")
@@ -1437,6 +1438,54 @@ def cmd_image_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mitmweb_warning() -> str:
+    return (
+        "!! mitmweb keeps every flow it sees - headers and bodies - in memory.\n"
+        "   Nothing else in this sandbox stores traffic, and the UI is readable\n"
+        "   by anything on this Mac. It is capped at 2000 flows, but detach it\n"
+        "   when you are done rather than leaving it attached for a long run:\n"
+        "       asbx web detach"
+    )
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    """Attach or detach mitmweb without restarting the box.
+
+    Everything the guest depends on outlives the proxy process - the WireGuard
+    keys are a file, the port is on the session record, the CA is in a
+    per-session confdir - so a replacement listens on the same port with the
+    same identity and the guest re-handshakes on its next keepalive.
+    """
+    from .broker.server import read_token, send_command
+
+    session = _resolve_session(args.session)
+    attach = args.action == "attach"
+    try:
+        reply = send_command(
+            session.paths.broker_socket,
+            read_token(session.paths.broker_token),
+            "web-attach" if attach else "web-detach",
+        )
+    except SandboxError as exc:
+        print(f"!! {exc}", file=sys.stderr)
+        return 1
+
+    if not reply.get("ok"):
+        print(f"!! {reply.get('error', 'unknown error')}", file=sys.stderr)
+        return 1
+
+    print(reply.get("message", ""))
+    if url := reply.get("url"):
+        print(f"  {url}")
+    if attach:
+        print()
+        print(_mitmweb_warning(), file=sys.stderr)
+    else:
+        # Say what it cost, rather than leaving it to be noticed.
+        print("  connections in flight were reset; the tunnel re-handshakes itself")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     problems = check_host()
     if not problems:
@@ -1565,6 +1614,10 @@ def build_parser() -> argparse.ArgumentParser:
     set_cmd.add_argument("--cpus", type=int)
     set_cmd.add_argument("--image", help="base image; takes effect on the next `asbx reset`")
     set_cmd.set_defaults(func=cmd_box_set)
+
+    web = sub.add_parser("web", help="attach or detach the mitmweb traffic inspector")
+    web.add_argument("action", choices=["attach", "detach"])
+    web.set_defaults(func=cmd_web)
 
     image_parser = sub.add_parser("image", help="base images boxes clone from")
     image_sub = image_parser.add_subparsers(dest="subcommand", required=True)

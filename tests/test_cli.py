@@ -369,3 +369,29 @@ def test_no_wait_is_available_for_scripts():
     args = cli.build_parser().parse_args(["stop", "neo", "--no-wait"])
     assert args.wait is False
     assert cli.build_parser().parse_args(["stop", "neo"]).wait is True
+
+
+def test_the_flow_cap_is_loaded_only_in_web_mode():
+    """mitmdump keeps no flow list, so it needs no cap. mitmweb keeps every
+    flow with its bodies, and left attached for weeks that is unbounded."""
+    from agentsandbox.proxy.launcher import VIEWCAP_PATH, build_argv
+    from agentsandbox.session import Session
+
+    session = Session(session_id="cap-test")
+    assert str(VIEWCAP_PATH) in build_argv(session, web=True)
+    assert str(VIEWCAP_PATH) not in build_argv(session, web=False)
+
+
+def test_attaching_mitmweb_warns_that_it_retains_traffic():
+    """Nothing else in the sandbox stores traffic; this mode does, in memory,
+    behind a loopback UI anything on the Mac can read."""
+    warning = cli._mitmweb_warning()
+    assert "memory" in warning
+    assert "asbx web detach" in warning
+
+
+def test_web_attach_and_detach_are_reachable():
+    for action in ("attach", "detach"):
+        args = cli.build_parser().parse_args(["web", action])
+        assert args.func is cli.cmd_web
+        assert args.action == action

@@ -22,6 +22,7 @@ from ..config import home
 from ..errors import SessionError
 from ..session import Session
 
+VIEWCAP_PATH = Path(__file__).with_name("viewcap.py")
 ADDON_PATH = Path(__file__).with_name("addon.py")
 
 
@@ -60,6 +61,9 @@ def build_argv(session: Session, addon_path: Path = ADDON_PATH, *, web: bool = F
             "--flow-detail",
             "0",
         ]
+    else:
+        # Only mitmweb keeps a flow list, and only mitmweb needs it bounded.
+        argv += ["--scripts", str(VIEWCAP_PATH)]
     argv += [
         "--set",
         "save_stream_file=",

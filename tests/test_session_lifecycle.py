@@ -481,3 +481,39 @@ def test_session_list_explains_that_stopped_means_gone(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "cannot be resumed" in out
     assert "prune" in out
+
+
+def test_the_control_socket_takes_registered_commands(session, broker, tmp_path):
+    """The broker runs inside the supervisor, so its socket is the only
+    authenticated way a CLI process can reach a running session. That is what
+    lets mitmweb be attached without restarting the box."""
+    from agentsandbox.broker.server import BrokerServer
+
+    server = BrokerServer(broker, tmp_path / "b.sock", "tok")
+    try:
+        calls = []
+        server.commands["web-attach"] = lambda: (calls.append(1), {"ok": True, "url": "u"})[1]
+
+        assert json.loads(server.handle_command("web-attach")) == {"ok": True, "url": "u"}
+        assert calls == [1]
+        assert json.loads(server.handle_command("nope"))["ok"] is False
+    finally:
+        server.server_close()
+
+
+def test_a_failing_command_is_reported_not_fatal(session, broker, tmp_path):
+    """A handler that raises must not take the supervisor down with it - the
+    supervisor is holding the guest, the gateway and the broker."""
+    from agentsandbox.broker.server import BrokerServer
+
+    server = BrokerServer(broker, tmp_path / "b2.sock", "tok")
+    try:
+        def _boom():
+            raise RuntimeError("mitmproxy would not start")
+
+        server.commands["web-attach"] = _boom
+        reply = json.loads(server.handle_command("web-attach"))
+        assert reply["ok"] is False
+        assert "would not start" in reply["error"]
+    finally:
+        server.server_close()

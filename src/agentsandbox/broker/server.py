@@ -20,6 +20,7 @@ import socketserver
 import struct
 import threading
 from pathlib import Path
+from typing import Callable
 
 from ..audit import AuditLog, NullAuditLog
 from ..config import write_private_file
@@ -135,6 +136,11 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
         self.token = token
         self.audit = audit or NullAuditLog(core.session_id)
         self.socket_path = socket_path
+        #: Extra operator commands, registered by whoever owns the thing they
+        #: act on. The broker runs inside the supervisor, so this socket is the
+        #: only authenticated way for a CLI process to reach the running
+        #: session - which is what lets mitmweb be attached without a restart.
+        self.commands: dict[str, "Callable[[], dict]"] = {}
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(socket_path.parent, 0o700)
         if socket_path.exists():
@@ -154,6 +160,12 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
         again; this is what lets a rotated credential land without restarting
         a box that has been running for days.
         """
+        if handler := self.commands.get(command):
+            try:
+                return json.dumps(handler())
+            except Exception as exc:  # noqa: BLE001 - reported, never fatal
+                self.audit.emit("command.failed", command=command, error=str(exc))
+                return json.dumps({"ok": False, "error": str(exc)})
         if command == "refresh-secrets":
             resolver = getattr(self.core, "resolver", None)
             if resolver is None or not hasattr(resolver, "clear_cache"):
