@@ -25,6 +25,7 @@ from pathlib import Path
 from .config import ensure_private_dir, home, write_private_file
 from .errors import SessionError
 from .session import Share
+from .vm.vfkit import DEFAULT_IMAGE
 
 #: Names are used as filenames and virtio-fs mount tags, so keep them boring.
 _NAME_OK = set("abcdefghijklmnopqrstuvwxyz0123456789-_")
@@ -66,6 +67,11 @@ class Environment:
 
     cpus: int = 2
     memory_mib: int = 2048
+    #: Which built image this environment's disk is cloned from. Recorded per
+    #: environment rather than read from a single host-wide file, so `asbx
+    #: reset` rebuilds from the same base the environment was created with -
+    #: and so two environments can run different distros.
+    image: str = DEFAULT_IMAGE
 
     # -- paths --------------------------------------------------------------
 
@@ -154,6 +160,7 @@ class Environment:
             "shares": [f"{s.path}:{'ro' if s.read_only else 'rw'}" for s in self.shares],
             "cpus": self.cpus,
             "memory_mib": self.memory_mib,
+            "image": self.image,
             "disk": str(self.disk_path) if self.has_disk else "(not built yet)",
             "disk_bytes": self.disk_size(),
             "created_at": self.created_at,

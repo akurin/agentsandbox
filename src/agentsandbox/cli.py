@@ -27,7 +27,7 @@ from .errors import SandboxError
 from .keychain import KeychainProvider
 from .manager import SessionManager, check_environment, stop_session_by_id
 from .session import STATE_STOPPED, Session, Share, list_sessions, resolve_session_id
-from .vm.vfkit import VmConfig
+from .vm.vfkit import DEFAULT_IMAGE, VmConfig, default_golden_image, resolve_image
 
 EXIT_USAGE = 2
 EXIT_DENIED = 3
@@ -345,6 +345,10 @@ def _start_session(args: argparse.Namespace, env=None, resolver=None) -> int:
         disk_override=env.disk_path if env else None,
         efi_override=env.efi_store if env else None,
         persist_disk=bool(env),
+        # The environment names its own base image, so `asbx reset` rebuilds
+        # from what it was created with rather than from whatever was built
+        # on this host most recently.
+        golden_image=resolve_image(env.image) if env else default_golden_image(),
         # sshd only exists in an environment, where `asbx shell` needs it. A
         # one-off session keeps the smaller surface of console-only access.
         **_ssh_vm_config(env, session),
@@ -913,6 +917,16 @@ def cmd_env_create(args: argparse.Namespace) -> int:
         print(f"!! {project} is not a directory", file=sys.stderr)
         return EXIT_USAGE
 
+    from .vm.vfkit import image_path, resolve_image as _resolve_image
+
+    if not _resolve_image(args.image).exists():
+        # Creating an environment on an image that does not exist would look
+        # fine until the first start, which fails inside vfkit.
+        print(f"!! no image named {args.image!r} at {image_path(args.image)}", file=sys.stderr)
+        print("   asbx image ls                       what is built", file=sys.stderr)
+        print("   ASBX_DISTRO=ubuntu ./vm/build-image.sh   build another", file=sys.stderr)
+        return EXIT_USAGE
+
     env = Environment(
         name=name,
         project_path=str(project) if project else "",
@@ -923,6 +937,7 @@ def cmd_env_create(args: argparse.Namespace) -> int:
         approval_mode=args.approvals,
         cpus=args.cpus,
         memory_mib=args.memory,
+        image=args.image,
     )
     from .env import SshIdentity
 
@@ -933,6 +948,7 @@ def cmd_env_create(args: argparse.Namespace) -> int:
         print(f"  project  {project} -> guest:{env.project_mount or project}")
     if env.profile:
         print(f"  profile  {env.profile}")
+    print(f"  image    {env.image}")
     print(f"  disk     {env.disk_path} (built on first start)")
     print(f"\nStart it with:  asbx start {name}")
     return 0
@@ -961,9 +977,15 @@ def cmd_env_set(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         changes.append(f"cpus    {env.cpus} -> {args.cpus}")
         env.cpus = args.cpus
+    if args.image is not None:
+        if not resolve_image(args.image).exists():
+            print(f"!! no image named {args.image!r} - see `asbx image ls`", file=sys.stderr)
+            return EXIT_USAGE
+        changes.append(f"image   {env.image} -> {args.image}")
+        env.image = args.image
 
     if not changes:
-        print("nothing to change: pass --memory, --cpus, or both", file=sys.stderr)
+        print("nothing to change: pass --memory, --cpus or --image", file=sys.stderr)
         return EXIT_USAGE
 
     env.save()
@@ -971,6 +993,12 @@ def cmd_env_set(args: argparse.Namespace) -> int:
     for line in changes:
         print(f"  {line}")
     print(f"  disk    {env.disk_path} (untouched)")
+
+    if args.image is not None and env.has_disk:
+        # Changing the image does not re-clone: the environment already has a
+        # disk, and start boots that. Saying nothing here would leave the
+        # config claiming a distro the guest is not running.
+        print(f"\n  the disk still holds the old image; `asbx reset {env.name}` re-clones")
 
     if _running_session_for(env.name):
         # Silently writing config a running guest is not using would look like
@@ -1146,41 +1174,63 @@ def cmd_env_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_image_list(args: argparse.Namespace) -> int:
+    from .vm.vfkit import images_dir, list_images
+
+    images = list_images()
+    if not images:
+        print(f"no images built in {images_dir()}")
+        print("  ./vm/build-image.sh                     debian (the default)")
+        print("  ASBX_DISTRO=ubuntu ./vm/build-image.sh  ubuntu")
+        return 0
+
+    for image in images:
+        size = image["bytes"] / (1024**3)
+        line = f"{image['name']:<28} {size:>6.1f} GiB"
+        if image.get("built_at"):
+            line += f"  built {image['built_at']}"
+        if image.get("prepared") is False:
+            line += "  !! not prepared"
+        print(line)
+
+    used = {}
+    from .env import list_environments
+
+    for env in list_environments():
+        used.setdefault(env.image, []).append(env.name)
+    if used:
+        print("\nin use by:")
+        for name, envs in sorted(used.items()):
+            print(f"  {name:<28} {', '.join(sorted(envs))}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     problems = check_environment()
     if not problems:
         print("all good: mitmproxy, vfkit and a golden image are present")
-        print(f"  base image  {_golden_description()}")
+        for line in _describe_images():
+            print(f"  image  {line}")
         return 0
     for problem in problems:
         print(f"!! {problem}")
     return 1
 
 
-def _golden_description() -> str:
-    """What the golden image was built from, for `doctor`.
+def _describe_images() -> list[str]:
+    """One line per built image, for `doctor`.
 
-    Every environment clones the same golden image, so which distro is in play
-    is a property of the host, not of an environment - and without this the
-    only way to answer it is to boot a guest and run `lsb_release`.
+    Which distro an environment runs is a property of the image it names, so
+    this lists what exists rather than asserting a single answer.
     """
-    import json as _json
+    from .vm.vfkit import list_images
 
-    from .vm.vfkit import default_golden_image
-
-    meta_path = default_golden_image().with_name("golden.json")
-    if not meta_path.exists():
-        # Built before this file existed, or by hand. Say so rather than
-        # guessing a distro we have no evidence for.
-        return "unknown (rebuild with ./vm/build-image.sh to record it)"
-    try:
-        meta = _json.loads(meta_path.read_text())
-    except (OSError, ValueError):
-        return "unreadable golden.json"
-    distro = meta.get("distro", "?")
-    built = str(meta.get("built_at", "?"))
-    suffix = "" if meta.get("prepared") else "  !! not prepared - run ./vm/prepare-image.sh"
-    return f"{distro}, built {built}{suffix}"
+    lines = []
+    for image in list_images():
+        distro = image.get("distro", "unknown distro")
+        note = "" if image.get("prepared") is not False else "  !! not prepared"
+        lines.append(f"{image['name']} ({distro}){note}")
+    return lines or ["none built - run ./vm/build-image.sh"]
 
 
 # ---------------------------------------------------------------------------
@@ -1218,6 +1268,11 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--approvals", choices=["deny", "file", "allow"], default="deny")
     create.add_argument("--cpus", type=int, default=2)
     create.add_argument("--memory", type=int, default=2048, help="guest RAM in MiB")
+    create.add_argument(
+        "--image",
+        default=DEFAULT_IMAGE,
+        help=f"base image to clone the disk from (default: {DEFAULT_IMAGE}); see `asbx image ls`",
+    )
     create.add_argument("--force", action="store_true", help="redefine an existing environment")
     create.set_defaults(func=cmd_env_create)
 
@@ -1270,7 +1325,13 @@ def build_parser() -> argparse.ArgumentParser:
     set_cmd.add_argument("name")
     set_cmd.add_argument("--memory", type=int, metavar="MIB", help="guest RAM in MiB")
     set_cmd.add_argument("--cpus", type=int)
+    set_cmd.add_argument("--image", help="base image; takes effect on the next `asbx reset`")
     set_cmd.set_defaults(func=cmd_env_set)
+
+    image_parser = sub.add_parser("image", help="base images environments clone from")
+    image_sub = image_parser.add_subparsers(dest="subcommand", required=True)
+    image_ls = image_sub.add_parser("ls", help="list built images")
+    image_ls.set_defaults(func=cmd_image_list)
 
     reset = sub.add_parser("reset", help="discard an environment's disk, keeping its config")
     reset.add_argument("name")

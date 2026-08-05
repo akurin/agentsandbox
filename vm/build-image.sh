@@ -1,10 +1,13 @@
 #!/bin/bash
-# Build the golden disk image every session clones from.
+# Build a base disk image that environments clone from.
 #
 # Apple's Virtualization framework boots raw disks only, so this fetches a
 # cloud image, verifies it, converts it to raw and grows it. The result lands
-# in ~/.agentsandbox/images/golden.raw and is treated as read-only from then
-# on: `asbx session start` makes an APFS copy-on-write clone per session.
+# in ~/.agentsandbox/images/<name>.raw and is read-only from then on: an
+# environment's disk is an APFS copy-on-write clone of it.
+#
+# Images are named, and each environment records the one it was created with,
+# so building a new image never changes what an existing environment resets to.
 #
 #   ./vm/build-image.sh                       # debian 13 arm64, the default
 #   ASBX_DISTRO=ubuntu ./vm/build-image.sh    # ubuntu 24.04 LTS arm64
@@ -18,7 +21,6 @@ set -euo pipefail
 
 IMAGES_DIR="${ASBX_HOME:-$HOME/.agentsandbox}/images"
 IMAGE_SIZE="${ASBX_IMAGE_SIZE:-20G}"
-GOLDEN="$IMAGES_DIR/golden.raw"
 DISTRO="${ASBX_DISTRO:-debian}"
 
 # Both are "generic cloud" images: cloud-init built in, small, and carrying
@@ -33,16 +35,18 @@ case "$DISTRO" in
         DEFAULT_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2"
         DEFAULT_SHA_URL="https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
         DEFAULT_ALGO=512
+        DEFAULT_NAME=debian-13
         ;;
     ubuntu)
         DEFAULT_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img"
         DEFAULT_SHA_URL="https://cloud-images.ubuntu.com/noble/current/SHA256SUMS"
         DEFAULT_ALGO=256
+        DEFAULT_NAME=ubuntu-24.04
         ;;
     *)
         echo "!! unknown ASBX_DISTRO=$DISTRO (expected 'debian' or 'ubuntu')" >&2
         echo "   for anything else set ASBX_IMAGE_URL, ASBX_IMAGE_SHA_URL and" >&2
-        echo "   ASBX_IMAGE_SHA_ALGO explicitly" >&2
+        echo "   ASBX_IMAGE_SHA_ALGO and ASBX_IMAGE_NAME explicitly" >&2
         exit 2
         ;;
 esac
@@ -50,6 +54,11 @@ esac
 IMAGE_URL="${ASBX_IMAGE_URL:-$DEFAULT_URL}"
 IMAGE_SHA_URL="${ASBX_IMAGE_SHA_URL:-$DEFAULT_SHA_URL}"
 IMAGE_SHA_ALGO="${ASBX_IMAGE_SHA_ALGO:-$DEFAULT_ALGO}"
+
+# Images are named, and environments record which one they were built from, so
+# rebuilding one distro cannot silently rebase environments on another.
+IMAGE_NAME="${ASBX_IMAGE_NAME:-${DEFAULT_NAME:-$DISTRO}}"
+GOLDEN="$IMAGES_DIR/$IMAGE_NAME.raw"
 
 mkdir -p "$IMAGES_DIR"
 cd "$IMAGES_DIR"
@@ -102,11 +111,10 @@ qemu-img resize -f raw "$GOLDEN.tmp" "$IMAGE_SIZE"
 mv "$GOLDEN.tmp" "$GOLDEN"
 chmod 0600 "$GOLDEN"
 
-# Record what this was built from. There is one golden image for every
-# environment, so "which distro am I on?" is otherwise only answerable by
-# booting a guest and looking.
-cat >"$IMAGES_DIR/golden.json" <<EOF
+# Record what this was built from, next to the image it describes.
+cat >"$IMAGES_DIR/$IMAGE_NAME.json" <<EOF
 {
+  "name": "$IMAGE_NAME",
   "distro": "$DISTRO",
   "image_url": "$IMAGE_URL",
   "size": "$IMAGE_SIZE",
@@ -117,24 +125,27 @@ EOF
 
 cat <<EOF
 
-==> golden image ready: $GOLDEN ($DISTRO, $IMAGE_SIZE)
+==> image ready: $IMAGE_NAME ($DISTRO, $IMAGE_SIZE)
+    $GOLDEN
 
-    Sessions clone it with \`cp -c\` (APFS copy-on-write), so this file is
-    never written to and each session starts from the same known state.
-
-    This is the base for *every* environment, not just new ones. Existing
-    environments keep running their current disk until you reset them:
-
-        asbx stop NAME && asbx reset NAME && asbx start NAME
-
-    That discards the environment's disk and re-clones from this image, so
-    anything living only inside the guest goes with it.
+    Environments clone it with \`cp -c\` (APFS copy-on-write), so this file is
+    never written to and every clone starts from the same known state.
 
     NEXT, and not optional:
 
-        ./vm/prepare-image.sh
+        ASBX_IMAGE_NAME=$IMAGE_NAME ./vm/prepare-image.sh
 
-    That boots the image once with ordinary networking to install
+    Then use it:
+
+        asbx create NAME --project DIR --image $IMAGE_NAME   for a new one
+        asbx set NAME --image $IMAGE_NAME && asbx reset NAME  for an existing one
+
+    Only environments naming this image are affected. Existing environments
+    keep the image they were created with until you change it - `asbx reset`
+    re-clones from whatever the environment names, not from whatever was
+    built most recently.
+
+    prepare-image.sh boots the image once with ordinary networking to install
     wireguard-tools, nftables and socat. A session's guest can only reach the
     WireGuard endpoint, so it cannot install those for itself.
 EOF

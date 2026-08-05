@@ -56,8 +56,63 @@ def images_dir() -> Path:
     return path
 
 
+#: What `asbx create` uses when the caller does not name an image.
+DEFAULT_IMAGE = "debian-13"
+
+#: Where images lived before they were named. A single mutable file meant
+#: rebuilding it silently rebased every environment, and `asbx reset` gave you
+#: whatever distro had been built most recently rather than the one the
+#: environment was created with. Named images fix that; this constant only
+#: exists so hosts built before the change keep working.
+LEGACY_IMAGE = "golden.raw"
+
+
+def image_path(name: str) -> Path:
+    return images_dir() / f"{name}.raw"
+
+
+def image_metadata_path(name: str) -> Path:
+    return images_dir() / f"{name}.json"
+
+
+def resolve_image(name: str) -> Path:
+    """Find the disk image an environment names.
+
+    Falls back to the legacy unnamed image for the default name, so an
+    environment created before images were named still starts. The fallback is
+    read-only - nothing is moved or rewritten behind the operator's back.
+    """
+    path = image_path(name)
+    if path.exists():
+        return path
+    legacy = images_dir() / LEGACY_IMAGE
+    if name == DEFAULT_IMAGE and legacy.exists():
+        return legacy
+    return path  # caller reports the miss, with the name it asked for
+
+
+def list_images() -> list[dict]:
+    """Every built image, newest metadata first. For `asbx image ls`."""
+    import json
+
+    found: list[dict] = []
+    for raw in sorted(images_dir().glob("*.raw")):
+        name = raw.stem
+        entry = {"name": name, "path": raw, "bytes": raw.stat().st_size, "prepared": None}
+        if name == Path(LEGACY_IMAGE).stem:
+            entry["name"] = f"{DEFAULT_IMAGE} (unnamed legacy image)"
+        meta = image_metadata_path(name)
+        if meta.exists():
+            try:
+                entry.update(json.loads(meta.read_text()))
+            except (OSError, ValueError):
+                entry["distro"] = "unreadable metadata"
+        found.append(entry)
+    return found
+
+
 def default_golden_image() -> Path:
-    return images_dir() / "golden.raw"
+    return resolve_image(DEFAULT_IMAGE)
 
 
 @dataclass

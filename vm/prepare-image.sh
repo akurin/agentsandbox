@@ -18,15 +18,37 @@
 set -euo pipefail
 
 IMAGES_DIR="${ASBX_HOME:-$HOME/.agentsandbox}/images"
-GOLDEN="$IMAGES_DIR/golden.raw"
+
+# Which built image to prepare. Named images mean this has to be told - except
+# when there is exactly one, where guessing is unambiguous.
+IMAGE_NAME="${ASBX_IMAGE_NAME:-${1:-}}"
+if [ -z "$IMAGE_NAME" ]; then
+    candidates=()
+    for f in "$IMAGES_DIR"/*.raw; do
+        [ -e "$f" ] || continue
+        candidates+=("$(basename "$f" .raw)")
+    done
+    case "${#candidates[@]}" in
+        0) echo "!! no images built - run ./vm/build-image.sh first" >&2; exit 1 ;;
+        1) IMAGE_NAME="${candidates[0]}" ;;
+        *)
+            echo "!! several images are built; name the one to prepare:" >&2
+            printf '     ASBX_IMAGE_NAME=%s ./vm/prepare-image.sh\n' "${candidates[@]}" >&2
+            exit 2
+            ;;
+    esac
+fi
+GOLDEN="$IMAGES_DIR/$IMAGE_NAME.raw"
 VFKIT="${ASBX_VFKIT:-$(command -v vfkit || echo /opt/podman/bin/vfkit)}"
 PACKAGES="${ASBX_PACKAGES:-wireguard-tools nftables socat ca-certificates curl git python3 python3-venv}"
 TIMEOUT="${ASBX_PREPARE_TIMEOUT:-900}"
 
 if [ ! -f "$GOLDEN" ]; then
-    echo "!! no golden image at $GOLDEN - run ./vm/build-image.sh first" >&2
+    echo "!! no image named '$IMAGE_NAME' at $GOLDEN" >&2
+    echo "   asbx image ls   shows what is built" >&2
     exit 1
 fi
+echo "==> preparing image: $IMAGE_NAME"
 if [ ! -x "$VFKIT" ]; then
     echo "!! vfkit not found (set ASBX_VFKIT)" >&2
     exit 1
@@ -123,8 +145,8 @@ if [ -f "$WORK/signal/prepared" ] || [ -n "$console_report" ]; then
     # Flip the flag build-image.sh left false. An unprepared image boots and
     # then fails at the tunnel, with nothing on the console explaining why -
     # so it is worth being able to answer "was this ever prepared?" directly.
-    if [ -f "$IMAGES_DIR/golden.json" ]; then
-        sed -i '' 's/"prepared": false/"prepared": true/' "$IMAGES_DIR/golden.json" 2>/dev/null || true
+    if [ -f "$IMAGES_DIR/$IMAGE_NAME.json" ]; then
+        sed -i '' 's/"prepared": false/"prepared": true/' "$IMAGES_DIR/$IMAGE_NAME.json" 2>/dev/null || true
     fi
     [ -f "$WORK/signal/prepared" ] && sed 's/^/    /' "$WORK/signal/prepared"
     [ -n "$console_report" ] && echo "    $console_report"

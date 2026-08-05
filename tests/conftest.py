@@ -41,6 +41,19 @@ def asbx_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("ASBX_HOME", str(home))
     monkeypatch.delenv("ASBX_SESSION", raising=False)
+
+    # A built default image, because that is the state of a host where anything
+    # can be created: `asbx create` refuses an image that does not exist rather
+    # than deferring the failure to the first boot. Tests that care about the
+    # empty case delete it.
+    from agentsandbox.vm.vfkit import DEFAULT_IMAGE
+
+    images = home / "images"
+    images.mkdir(parents=True, exist_ok=True)
+    (images / f"{DEFAULT_IMAGE}.raw").write_bytes(b"not a real disk")
+    (images / f"{DEFAULT_IMAGE}.json").write_text(
+        '{"name": "%s", "distro": "debian", "prepared": true}' % DEFAULT_IMAGE
+    )
     yield home
 
 
