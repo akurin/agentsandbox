@@ -109,3 +109,26 @@ def test_the_bootstrap_mirrors_its_log_to_the_console():
 def test_the_bootstrap_does_not_swallow_the_mount_failure():
     text = (REPO / "src/agentsandbox/vm/guest/bootstrap.sh").read_text()
     assert "mountpoint -q /var/log/asbx || mount" not in text
+
+
+def test_hvc0_is_the_last_console_on_the_cmdline():
+    """The last console= becomes /dev/console, and vfkit captures hvc0 only.
+
+    With `console=hvc0 console=ttyS0` the primary console was ttyS0, which
+    nothing reads - so console.log held kernel messages and then stopped dead
+    the moment systemd started writing to /dev/console. A guest that failed
+    after that point left no trace at all.
+    """
+    text = (REPO / "vm/prepare-image.sh").read_text()
+    cmdline = next(line for line in text.splitlines() if "GRUB_CMDLINE_LINUX_DEFAULT=" in line)
+    assert cmdline.index("console=hvc0") > cmdline.index("console=ttyS0")
+
+
+def test_the_console_setting_is_verified_not_assumed():
+    """An uncaptured console makes every later failure invisible, so a prepare
+    that silently failed to set it is worse than one that fails."""
+    text = (REPO / "vm/prepare-image.sh").read_text()
+    assert "ASBX-CONSOLE" in text
+    assert "console=hvc0' /boot/grub/grub.cfg" in text
+    grub_update = next(line for line in text.splitlines() if "update-grub" in line)
+    assert "|| true" not in grub_update

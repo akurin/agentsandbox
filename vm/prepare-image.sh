@@ -74,9 +74,21 @@ runcmd:
   # and reaches the host log, and writing to the device works no matter what
   # the kernel cmdline says about consoles.
   - [ sh, -c, "echo 'ASBX-RUNCMD-START' > /dev/hvc0 || true" ]
-  # Apple's virtio console is hvc0; without this, later boots log nothing.
-  - [ sh, -c, "sed -i 's/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"console=hvc0 console=ttyS0,115200n8\"/' /etc/default/grub || true" ]
-  - [ sh, -c, "update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg || true" ]
+  # Apple's virtio console is hvc0, and the LAST console= on the cmdline wins:
+  # it becomes /dev/console, which is where userspace writes. Putting hvc0
+  # first meant ttyS0 won, and vfkit does not capture ttyS0 - so the host saw
+  # kernel messages and then silence from the moment systemd started.
+  #
+  # A drop-in rather than sed on /etc/default/grub: GRUB emits
+  # $GRUB_CMDLINE_LINUX then $GRUB_CMDLINE_LINUX_DEFAULT, so the image's own
+  # console= settings in the second variable would override anything written
+  # to the first. Drop-ins are sourced last and both distros support them.
+  - [ mkdir, -p, /etc/default/grub.d ]
+  - [ sh, -c, "printf 'GRUB_CMDLINE_LINUX=\"\"\\nGRUB_CMDLINE_LINUX_DEFAULT=\"console=ttyS0,115200n8 console=hvc0\"\\nGRUB_TERMINAL=console\\n' > /etc/default/grub.d/99-asbx-console.cfg" ]
+  - [ sh, -c, "update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg" ]
+  # Verify it landed. A console that is not captured makes every later failure
+  # invisible, so this is worth failing the prepare over.
+  - [ sh, -c, "grep -q 'console=hvc0' /boot/grub/grub.cfg && echo 'ASBX-CONSOLE ok' > /dev/hvc0 || echo 'ASBX-CONSOLE MISSING' > /dev/hvc0" ]
   # Nothing should be listening in a session guest.
   # sshd stays installed but does not listen on any network interface. The
   # session bootstrap binds it to loopback and bridges it to a vsock port, so
@@ -139,11 +151,20 @@ done
 echo ""
 
 console_report="$(grep -a "ASBX-PREPARED" "$WORK/console.log" 2>/dev/null | tail -1 || true)"
+console_verdict="$(grep -a "ASBX-CONSOLE" "$WORK/console.log" 2>/dev/null | tail -1 || true)"
 
 if [ -f "$WORK/signal/prepared" ] || [ -n "$console_report" ]; then
     echo "==> provisioning boot finished: $GOLDEN"
     [ -f "$WORK/signal/prepared" ] && sed 's/^/    /' "$WORK/signal/prepared"
     [ -n "$console_report" ] && echo "    $console_report"
+    [ -n "$console_verdict" ] && echo "    $console_verdict"
+    if echo "$console_verdict" | grep -q MISSING; then
+        echo ""
+        echo "!! console=hvc0 did not reach the kernel cmdline." >&2
+        echo "   Session guests will boot, but the host will see nothing after" >&2
+        echo "   systemd starts - every later failure becomes invisible." >&2
+        exit 1
+    fi
 
     # Nothing above this line may mark the image prepared. An earlier version
     # set the flag here and checked for MISSING afterwards, so an image whose

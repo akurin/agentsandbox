@@ -955,7 +955,10 @@ def cmd_diag(args: argparse.Namespace) -> int:
             print(f"(missing: {path})")
             continue
         text = path.read_text(errors="replace").strip()
-        print("\n".join(text.splitlines()[-args.tail :]) if text else "(empty)")
+        # The console gets a longer tail than the rest: it carries an entire
+        # boot, and the interesting part is rarely in the last 25 lines.
+        lines = max(args.tail, 200) if path.name == "console.log" else args.tail
+        print("\n".join(text.splitlines()[-lines:]) if text else "(empty)")
 
     section(f"audit (last {args.tail})")
     for record in AuditLog(paths.audit_log, session.session_id).read()[-args.tail :]:
