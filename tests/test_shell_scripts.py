@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -132,3 +133,53 @@ def test_the_console_setting_is_verified_not_assumed():
     assert "console=hvc0' /boot/grub/grub.cfg" in text
     grub_update = next(line for line in text.splitlines() if "update-grub" in line)
     assert "|| true" not in grub_update
+
+
+@pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
+def test_unquoted_heredocs_only_reference_variables_the_script_sets(script):
+    """`set -u` turns a stray $VAR in an unquoted heredoc into a fatal error.
+
+    A comment explaining GRUB's $GRUB_CMDLINE_LINUX did exactly that: the
+    heredoc expanded it, the variable was never set, and the script died at
+    the `cat` line with "unbound variable" - pointing at the heredoc rather
+    than at the prose inside it. Backticks in the same position were already
+    covered; this is the other half of the same hazard.
+    """
+    text = script.read_text()
+    assigned = set(re.findall(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=", text, re.M))
+    assigned |= set(re.findall(r"for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in", text))
+    assigned |= {"HOME", "PATH", "PWD", "USER", "SHELL", "TMPDIR", "1", "@"}
+
+    unknown = []
+    for number, line in _unquoted_heredoc_bodies(text):
+        for name in re.findall(r"(?<!\\)\$\{?([A-Za-z_][A-Za-z0-9_]*)", line):
+            if name not in assigned:
+                unknown.append(f"  {script.name}:{number}: ${name}")
+    assert not unknown, (
+        "unquoted heredoc references variables this script never sets;\n"
+        "escape them (\\$) or reword:\n" + "\n".join(unknown)
+    )
+
+
+def test_the_provisioning_cloud_config_renders_and_parses():
+    """Render the user-data heredoc the way the script does, then parse it.
+
+    A malformed cloud-config does not fail loudly: the guest boots, cloud-init
+    logs an error nobody reads, and the image comes out looking prepared. This
+    catches it on the host, where the message goes to a person.
+    """
+    yaml = pytest.importorskip("yaml")
+
+    text = (REPO / "vm/prepare-image.sh").read_text()
+    heredoc = text[text.index('cat >"$WORK/user-data" <<EOF') : text.index('cat >"$WORK/meta-data"')]
+
+    work = Path(tempfile.mkdtemp())
+    script = f'set -euo pipefail\nWORK={work}\nPACKAGES="wireguard-tools socat"\n{heredoc}'
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    rendered = (work / "user-data").read_text()
+    assert rendered.startswith("#cloud-config")
+    document = yaml.safe_load(rendered.split("\n", 1)[1])
+    assert document["runcmd"]
+    assert "wireguard-tools" in document["packages"]

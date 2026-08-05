@@ -79,10 +79,10 @@ runcmd:
   # first meant ttyS0 won, and vfkit does not capture ttyS0 - so the host saw
   # kernel messages and then silence from the moment systemd started.
   #
-  # A drop-in rather than sed on /etc/default/grub: GRUB emits
-  # $GRUB_CMDLINE_LINUX then $GRUB_CMDLINE_LINUX_DEFAULT, so the image's own
-  # console= settings in the second variable would override anything written
-  # to the first. Drop-ins are sourced last and both distros support them.
+  # A drop-in rather than sed on /etc/default/grub: GRUB emits the LINUX
+  # variable first and the LINUX_DEFAULT one after it, so the image's own
+  # console= settings in the second would override anything written to the
+  # first. Drop-ins are sourced last and both distros support them.
   - [ mkdir, -p, /etc/default/grub.d ]
   - [ sh, -c, "printf 'GRUB_CMDLINE_LINUX=\"\"\\nGRUB_CMDLINE_LINUX_DEFAULT=\"console=ttyS0,115200n8 console=hvc0\"\\nGRUB_TERMINAL=console\\n' > /etc/default/grub.d/99-asbx-console.cfg" ]
   - [ sh, -c, "update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg" ]
