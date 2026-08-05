@@ -529,12 +529,15 @@ class GatewayRunner:
             self._net.bind(str(self.socket_path))
         finally:
             os.umask(old_umask)
-        self._net.settimeout(0.5)
+        # Non-blocking, not a timeout: the drain loop below stops when a socket
+        # is empty, and with a timeout "empty" costs half a second of blocking
+        # in which the *other* socket goes unread. select() does the waiting.
+        self._net.setblocking(False)
         _widen_buffers(self._net)
 
         self._wg = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._wg.bind(("127.0.0.1", 0))
-        self._wg.settimeout(0.5)
+        self._wg.setblocking(False)
         _widen_buffers(self._wg)
         self._running = True
 

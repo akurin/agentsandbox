@@ -373,3 +373,29 @@ def test_a_wakeup_drains_more_than_one_frame():
     assert _DRAIN_BATCH > 1
     assert "_DRAIN_BATCH" in inspect.getsource(GatewayRunner._on_guest_frame)
     assert "_DRAIN_BATCH" in inspect.getsource(GatewayRunner._on_wireguard_reply)
+
+
+def test_draining_an_empty_socket_does_not_block(tmp_path):
+    """Emptying a socket must cost nothing, or the other one goes unread.
+
+    The drain loop stops when a recvfrom raises. On a socket with a timeout,
+    that raise arrives half a second later - and for that half second the
+    reply waiting on the *other* socket is not looked at. Every hop through
+    the relay then cost 0.5s, which a guest sees as a curl taking seconds
+    while a bulk download - where neither socket is ever empty - stays fast.
+    """
+    import time
+
+    from agentsandbox.vm.gateway import GatewayRunner
+
+    runner = GatewayRunner(GatewayConfig(), tmp_path / "n.sock")
+    runner.start()
+    try:
+        assert runner._net.gettimeout() == 0.0  # non-blocking, not 0.5s
+        assert runner._wg.gettimeout() == 0.0
+        started = time.perf_counter()
+        runner._on_guest_frame()
+        runner._on_wireguard_reply()
+        assert time.perf_counter() - started < 0.1
+    finally:
+        runner.stop()
