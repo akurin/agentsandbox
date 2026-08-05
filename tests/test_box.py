@@ -490,6 +490,20 @@ def test_box_set_mount_add_and_rm_are_incremental(project, tmp_path, capsys):
     assert [m.guest for m in box.mounts] == ["/mnt/extra"]
 
 
+def test_box_set_mount_rm_ignores_a_trailing_slash(project, capsys):
+    """A guest path is normalized at parse time, so --mount added as
+    .../neo/ and --mount-rm given .../neo (or vice versa) refer to the same
+    entry rather than silently failing to match."""
+    cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo/"])
+    capsys.readouterr()
+
+    box = Box.load("neo")
+    assert box.mounts[0].guest == "/home/agent/neo"
+
+    assert cli.main(["box", "set", "neo", "--mount-rm", "/home/agent/neo/"]) == 0
+    assert Box.load("neo").mounts == []
+
+
 def test_box_set_mount_rm_unknown_guest_is_an_error(project, capsys):
     cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo"])
     capsys.readouterr()

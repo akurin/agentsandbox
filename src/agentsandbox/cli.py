@@ -11,6 +11,7 @@ import argparse
 import getpass
 import json
 import os
+import posixpath
 import shlex
 import signal
 import sys
@@ -68,6 +69,20 @@ def _print(data) -> None:
         print(data)
 
 
+def _normalize_guest_path(value: str) -> str:
+    """Collapse a guest path to one canonical form (no trailing slash, no
+    ``..``/``.`` segments), so ``/home/agent/neo`` and ``/home/agent/neo/``
+    can never be treated as different mounts by collision checks or by
+    ``--mount-rm`` matching what ``--mount``/``--mount-add`` recorded.
+
+    ``posixpath``, not ``Path``: the guest is always Linux, regardless of
+    what OS the CLI runs on.
+    """
+    if not value.startswith("/"):
+        raise argparse.ArgumentTypeError(f"guest path must be absolute, got {value!r}")
+    return posixpath.normpath(value)
+
+
 def _parse_mount(value: str) -> Mount:
     """``/host/path:/guest/path[:ro|rw]`` - both sides are always required.
 
@@ -83,8 +98,7 @@ def _parse_mount(value: str) -> Mount:
     mode = rest[0] if rest else "rw"
     if mode not in ("ro", "rw"):
         raise argparse.ArgumentTypeError(f"mount mode must be ro or rw, got {mode!r}")
-    if not guest.startswith("/"):
-        raise argparse.ArgumentTypeError(f"guest path must be absolute, got {guest!r}")
+    guest = _normalize_guest_path(guest)
     resolved = Path(host).expanduser().resolve()
     if not resolved.is_dir():
         raise argparse.ArgumentTypeError(f"{resolved} is not a directory")
@@ -1749,6 +1763,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mount-rm",
         action="append",
         dest="mount_rm",
+        type=_normalize_guest_path,
         metavar="GUEST",
         help="remove the mount at this guest path (repeatable; takes effect on the next start)",
     )
