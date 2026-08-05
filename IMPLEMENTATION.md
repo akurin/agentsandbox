@@ -72,8 +72,7 @@ make vm-image                  # one-time: fetch + convert the guest disk (needs
 .venv/bin/asbx session start \
     --allow api.github.com \
     --project ~/code/my-project \
-    --preview 3000 \
-    --approvals file
+    --preview 3000
 
 # in another terminal: mint a placeholder for the agent
 .venv/bin/asbx cap issue \
@@ -121,10 +120,6 @@ socket to the address it validated while TLS still verifies the hostname.
 **Redirects lose the credential the moment the origin changes**, and never get
 it back even if a later hop returns to the original origin.
 
-**Approvals default to `deny`.** A session without an approval channel cannot
-perform any mutating method. `--approvals file` queues requests for
-`asbx approve`; an unanswered request times out as a denial.
-
 **The workspace is a copy.** The guest mounts the *session's* workspace over
 virtio-fs, never the Mac project. Export diffs it and blocks escaping symlinks,
 setuid bits, path traversal and oversized change sets outright, and flags git
@@ -152,8 +147,8 @@ credential-shaped strings are caught even if never registered. No flow dumps:
   expiry, request and byte budgets, revocation, unsupported injections
 - broker: credential injection shapes, guest auth headers stripped, placeholder
   leak detection, response scrubbing of echoed credentials and cookie headers,
-  oversized responses refused, approval gates, audit containing neither the
-  secret nor the placeholder
+  oversized responses refused, audit containing neither the secret nor the
+  placeholder
 - redirects: same-origin keeps, cross-origin drops, return-to-origin does not
   re-attach, forbidden targets refused, scheme downgrade refused, chain bounded
 - L2 gateway: every non-WireGuard frame dropped with a reason (TCP, ICMP, IPv6,

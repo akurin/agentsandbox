@@ -99,12 +99,11 @@ def test_purge_erases_all_session_state():
 
 def test_a_stopped_session_brokers_nothing(session, store, executor, resolver):
     """Revocation is what makes teardown safe, so check it end to end."""
-    from agentsandbox.broker.approvals import AllowAll
     from agentsandbox.broker.core import BrokerCore
     from agentsandbox.capabilities import CapabilitySpec, SecretRef
 
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     token, _ = store.issue(
         CapabilitySpec(

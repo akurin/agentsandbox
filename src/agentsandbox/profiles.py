@@ -159,7 +159,6 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
         injection=injection,
         ttl_seconds=int(entry.get("ttl", DEFAULT_TTL_SECONDS)),
         max_response_bytes=int(entry.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)),
-        approval_required_methods=entry.get("approve_methods"),
         label=str(entry.get("label", "")),
         env_var=str(entry.get("env", "")),
     )

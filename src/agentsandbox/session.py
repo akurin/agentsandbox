@@ -71,9 +71,6 @@ class Session:
     #: Preview gateway: guest port -> {"url":..., "vsock_port":..., "token":...}
     forwards: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    #: "deny" (default), "file" (operator answers via CLI), "allow" (unattended)
-    approval_mode: str = "deny"
-
     vm_pid: int = 0
     mitm_pid: int = 0
     broker_pid: int = 0
@@ -131,7 +128,6 @@ class Session:
             "project": self.project_path,
             "shares": [f"{s.path}:{'ro' if s.read_only else 'rw'}" for s in self.shares],
             "forwards": {port: p.get("url", "") for port, p in self.forwards.items()},
-            "approval_mode": self.approval_mode,
             "wireguard": f"{self.wg_listen_host}:{self.wg_listen_port}",
             "driver": self.vm_driver,
         }

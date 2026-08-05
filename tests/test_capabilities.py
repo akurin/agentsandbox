@@ -148,19 +148,6 @@ def test_public_view_never_contains_the_token(store, github_capability):
     assert token not in json.dumps(cap.public_view())
 
 
-def test_mutating_methods_need_approval_by_default(store):
-    _, cap = store.issue(
-        CapabilitySpec(
-            provider="test",
-            hosts=["api.github.com"],
-            methods=["GET", "POST"],
-            secret=SecretRef(service="x"),
-        )
-    )
-    assert cap.needs_approval("POST")
-    assert not cap.needs_approval("GET")
-
-
 def test_store_is_reloaded_when_another_process_writes_it(session, store):
     other = CapabilityStore(session.paths.capabilities, session.session_id)
     token, cap = other.issue(

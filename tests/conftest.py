@@ -108,14 +108,11 @@ def resolver() -> StaticResolver:
 
 @pytest.fixture
 def broker(session, store, executor, resolver) -> BrokerCore:
-    from agentsandbox.broker.approvals import AllowAll
-
     return BrokerCore(
         session.session_id,
         store,
         session.policy,
         resolver,
-        approvals=AllowAll(),
         executor=executor,
     )
 

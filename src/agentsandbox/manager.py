@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .audit import AuditLog, redactor
-from .broker.approvals import AllowAll, ApprovalGate, DenyAll, FileApprovalGate
 from .broker.core import BrokerCore
 from .broker.server import BrokerServer, issue_token
 from .broker.upstream import UpstreamExecutor
@@ -116,7 +115,6 @@ class SessionManager:
         project: Path | None = None,
         project_mount: str = "",
         label: str = "",
-        approval_mode: str = "deny",
         shares: list[Share] | None = None,
         wg_listen_host: str = "127.0.0.1",
         wg_listen_port: int | None = None,
@@ -137,7 +135,6 @@ class SessionManager:
             box_name=box_name,
             label=label,
             policy=DestinationPolicy(allow_hosts=list(allow_hosts or ["*"])),
-            approval_mode=approval_mode,
             shares=project_shares,
             wg_listen_host=wg_listen_host,
             wg_listen_port=wg_listen_port or _free_udp_port(wg_listen_host),
@@ -181,14 +178,6 @@ class SessionManager:
     def store(self) -> CapabilityStore:
         return CapabilityStore(self.session.paths.capabilities, self.session.session_id)
 
-    def approval_gate(self) -> ApprovalGate:
-        mode = self.session.approval_mode
-        if mode == "allow":
-            return AllowAll()
-        if mode == "file":
-            return FileApprovalGate(self.session.paths.root / "approvals")
-        return DenyAll()
-
     def build_broker(self, resolver: SecretResolver | None = None) -> BrokerCore:
         return BrokerCore(
             self.session.session_id,
@@ -196,7 +185,6 @@ class SessionManager:
             self.session.policy,
             resolver or SecretResolver(),
             audit=self.audit,
-            approvals=self.approval_gate(),
             executor=UpstreamExecutor(self.session.policy),
         )
 

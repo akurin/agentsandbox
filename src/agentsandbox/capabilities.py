@@ -10,8 +10,8 @@ file does not yield working placeholders, and the audit log can refer to a
 capability by its short id without ever printing the token.
 
 Every capability is bound to the axes the spec lists: session, provider and
-account, hostnames, resources, methods and semantic operations, an optional
-expiry, and whether a human must approve.
+account, hostnames, resources, methods and semantic operations, and an
+optional expiry.
 """
 
 from __future__ import annotations
@@ -40,9 +40,6 @@ from .netpolicy import Destination, any_host_matches
 #: is refused rather than approximated - "deny unsupported authenticated
 #: protocols by default".
 SUPPORTED_INJECTIONS = frozenset({"bearer", "header", "basic"})
-
-#: Methods that change state and therefore need explicit approval by default.
-MUTATING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 
 def new_placeholder() -> str:
@@ -134,7 +131,6 @@ class Capability:
     injection: InjectionSpec = field(default_factory=InjectionSpec)
     expires_at: float = 0.0
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
-    approval_required_methods: list[str] = field(default_factory=lambda: list(MUTATING_METHODS))
     revoked: bool = False
     used_requests: int = 0
     used_bytes: int = 0
@@ -182,9 +178,6 @@ class Capability:
             raise PolicyDenied("resource_not_permitted", "path is outside the bound resources")
         if self.operations and operation is not None and operation not in self.operations:
             raise PolicyDenied("operation_not_permitted", f"operation {operation} is not permitted")
-
-    def needs_approval(self, method: str) -> bool:
-        return method.upper() in {m.upper() for m in self.approval_required_methods}
 
     def validate(
         self,
@@ -237,7 +230,6 @@ class Capability:
             "expires_in": max(0, int(self.expires_at - time.time())) if self.expires_at else None,
             "requests": self.used_requests,
             "bytes": self.used_bytes,
-            "approval_for": self.approval_required_methods,
             "revoked": self.revoked,
         }
 
@@ -272,7 +264,6 @@ class CapabilitySpec:
     injection: InjectionSpec = field(default_factory=InjectionSpec)
     ttl_seconds: int = DEFAULT_TTL_SECONDS
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
-    approval_required_methods: list[str] | None = None
     label: str = ""
     #: Box variable the placeholder is delivered as inside the guest,
     #: e.g. ``GITHUB_TOKEN``. Without this the operator has to copy the
@@ -294,7 +285,6 @@ class CapabilitySpec:
             injection=InjectionSpec.from_dict(data.get("injection", {})),
             ttl_seconds=int(data.get("ttl_seconds", DEFAULT_TTL_SECONDS)),
             max_response_bytes=int(data.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)),
-            approval_required_methods=data.get("approval_required_methods"),
             label=data.get("label", ""),
         )
         if not spec.hosts:
@@ -374,11 +364,6 @@ class CapabilityStore:
             injection=spec.injection,
             expires_at=(time.time() + spec.ttl_seconds) if spec.ttl_seconds else 0.0,
             max_response_bytes=spec.max_response_bytes,
-            approval_required_methods=(
-                list(spec.approval_required_methods)
-                if spec.approval_required_methods is not None
-                else list(MUTATING_METHODS)
-            ),
             label=spec.label,
         )
         with self._lock:

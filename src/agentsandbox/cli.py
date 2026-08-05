@@ -1,8 +1,8 @@
 """``asbx`` - the operator's interface to the sandbox.
 
 Everything a human does happens here, on the trusted side: starting boxes,
-minting capabilities, answering approval prompts, reviewing and applying the
-agent's changes.  The guest has no channel to any of it.
+minting capabilities, reviewing and applying the agent's changes.  The guest
+has no channel to any of it.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ import time
 from pathlib import Path
 
 from .audit import AuditLog
-from .broker.approvals import FileApprovalGate
 from .broker.core import BrokerRequest
 from .broker.server import UnixBrokerClient, read_token
 from .capabilities import CapabilitySpec, CapabilityStore, InjectionSpec, SecretRef
@@ -157,7 +156,6 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     args.mount_path = box.project_mount
     args.share = list(box.shares)
     args.profile = box.profile or None
-    args.approvals = box.approval_mode
     args.cpus = box.cpus
     args.memory = box.memory_mib
     args.label = box.name
@@ -319,7 +317,6 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         project=Path(args.project) if args.project else None,
         project_mount=args.mount_path or "",
         label=args.label,
-        approval_mode=args.approvals,
         shares=args.share or [],
         box_name=box.name if box else "",
     )
@@ -577,7 +574,6 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
         ),
         ttl_seconds=args.ttl,
         max_response_bytes=args.max_response_bytes,
-        approval_required_methods=args.approve_methods,
         label=args.label,
     )
     token, cap = manager.issue_capability(spec)
@@ -753,7 +749,7 @@ def cmd_cap_revoke(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# secrets and approvals
+# secrets
 
 
 def cmd_secret_set(args: argparse.Namespace) -> int:
@@ -798,29 +794,6 @@ def cmd_secret_refresh(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_approvals(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.name)
-    gate = FileApprovalGate(session.paths.root / "approvals")
-    pending = gate.list_pending()
-    if not pending:
-        print("no pending approvals")
-        return 0
-    for item in pending:
-        age = int(time.time() - item["created_at"])
-        print(f"{item['request_id']}  {item['method']} {item['url']}  ({age}s ago)")
-        print(f"    capability {item['cap_id']} provider {item['provider']}")
-    return 0
-
-
-def cmd_approve(args: argparse.Namespace) -> int:
-    session = _resolve_session(args.name)
-    gate = FileApprovalGate(session.paths.root / "approvals")
-    gate.answer(args.request_id, approved=not args.deny, note=args.note)
-    print(f"{'denied' if args.deny else 'approved'} {args.request_id}")
-    return 0
-
-
-
 # ---------------------------------------------------------------------------
 # misc
 
@@ -859,7 +832,6 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
     find out what it will actually do. Fields that are only documentation are
     not shown at all.
     """
-    from .capabilities import MUTATING_METHODS
     from .profiles import load_profile, load_profile_env, resolve_profile
 
     path = resolve_profile(args.name)
@@ -872,11 +844,6 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
             print(f"    {name}={value}")
 
     for spec in specs:
-        approve = (
-            list(spec.approval_required_methods)
-            if spec.approval_required_methods is not None
-            else list(MUTATING_METHODS)
-        )
         inject = spec.injection
         how = {
             "basic": f"basic auth as {inject.username!r}",
@@ -897,10 +864,6 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
             print(f"    denied:       {', '.join(spec.deny_path_globs)}")
         if spec.resources:
             print(f"    resources:    {', '.join(spec.resources)}")
-        # Spelled out even when empty: "nothing needs approval" is the single
-        # most consequential thing a profile can say, and its absence from the
-        # file is what silently routes every POST through an operator prompt.
-        print(f"    approval:     {', '.join(approve) if approve else 'none'}")
         print(f"    expires:      {f'{spec.ttl_seconds}s' if spec.ttl_seconds else 'never'}")
     print()
     return 0
@@ -950,7 +913,7 @@ def cmd_diag(args: argparse.Namespace) -> int:
     _print(
         {
             k: status[k]
-            for k in ("session", "state", "allow_hosts", "forwards", "approval_mode", "wireguard")
+            for k in ("session", "state", "allow_hosts", "forwards", "wireguard")
             if k in status
         }
     )
@@ -1045,7 +1008,6 @@ def cmd_box_create(args: argparse.Namespace) -> int:
         profile=args.profile or "",
         allow_hosts=list(args.allow or ["*"]),
         shares=args.share or [],
-        approval_mode=args.approvals,
         cpus=args.cpus,
         memory_mib=args.memory,
         image=args.image,
@@ -1666,7 +1628,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="restrict egress to these hosts (default: all public)")
     create.add_argument("--share", action="append", type=_parse_share, metavar="PATH:ro|rw",
                         help="extra host directory at /mnt/<name>")
-    create.add_argument("--approvals", choices=["deny", "file", "allow"], default="deny")
     create.add_argument("--cpus", type=int, default=2)
     create.add_argument("--memory", type=int, default=2048, help="guest RAM in MiB")
     create.add_argument(
@@ -1769,21 +1730,6 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--tail", type=int, default=50)
     audit.set_defaults(func=cmd_audit)
 
-    approvals = box_sub.add_parser("approvals", help="list pending approvals")
-    approvals.add_argument("name", nargs="?", help="box (default: the only one running)")
-    approvals.set_defaults(func=cmd_approvals)
-
-    # `request_id` leads and `name` trails: the required, command-specific
-    # positional goes first, and the optional box name fills in after it, so
-    # there is nothing for argparse - or a reader - to disambiguate by
-    # position.
-    approve = box_sub.add_parser("approve", help="answer a pending approval")
-    approve.add_argument("request_id")
-    approve.add_argument("name", nargs="?", help="box (default: the only one running)")
-    approve.add_argument("--deny", action="store_true")
-    approve.add_argument("--note", default="")
-    approve.set_defaults(func=cmd_approve)
-
     # -- image ----------------------------------------------------------------
     image_parser = sub.add_parser("image", help="base images boxes clone from")
     image_sub = image_parser.add_subparsers(dest="subcommand", required=True)
@@ -1830,11 +1776,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     issue.add_argument(
         "--max-response-bytes", type=int, default=DEFAULT_MAX_RESPONSE_BYTES
-    )
-    issue.add_argument(
-        "--approve-methods",
-        nargs="*",
-        help="methods needing operator approval (default: POST PUT PATCH DELETE)",
     )
     issue.add_argument("--label", default="")
     issue.set_defaults(func=cmd_cap_issue)

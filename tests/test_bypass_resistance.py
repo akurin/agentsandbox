@@ -12,7 +12,6 @@ import json
 
 import pytest
 
-from agentsandbox.broker.approvals import AllowAll
 from agentsandbox.broker.core import BrokerCore
 from agentsandbox.broker.upstream import UpstreamResponse
 from agentsandbox.capabilities import CapabilitySpec, SecretRef
@@ -104,7 +103,7 @@ def test_the_broker_will_not_fetch_from_private_space_either(session, store, res
 
     policy = DestinationPolicy(allow_hosts=["*"])
     core = BrokerCore(
-        session.session_id, store, policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, policy, resolver, executor=executor
     )
     token, _ = store.issue(
         CapabilitySpec(
@@ -181,7 +180,7 @@ def test_the_real_credential_never_crosses_back_into_the_guest(session, store, r
         )
     )
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     token, _ = store.issue(
         CapabilitySpec(

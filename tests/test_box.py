@@ -452,7 +452,6 @@ def test_the_rest_of_the_configuration_survives_a_resize():
         name="keep-config",
         profile="wiremock",
         allow_hosts=["example.com"],
-        approval_mode="file",
         project_path="/some/project",
     )
     box.save()
@@ -464,5 +463,4 @@ def test_the_rest_of_the_configuration_survives_a_resize():
     reloaded = Box.load("keep-config")
     assert reloaded.profile == "wiremock"
     assert reloaded.allow_hosts == ["example.com"]
-    assert reloaded.approval_mode == "file"
     assert reloaded.project_path == "/some/project"

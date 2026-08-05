@@ -100,7 +100,6 @@ Each capability should be bound to:
 * HTTP methods or semantic operations.
 * Expiration time.
 * Request and byte limits.
-* Approval requirements.
 
 The broker stores real credentials in macOS Keychain, refreshes OAuth tokens, validates each operation, and performs or signs authenticated requests.
 
@@ -138,7 +137,7 @@ This connection must not provide the VM with general access to Mac services.
 4. Mitmproxy decrypts supported TLS traffic using the session CA.
 5. An addon detects the placeholder.
 6. The addon sends the normalized request and capability to the broker.
-7. The broker validates the session, destination, method, path, body, limits, and approval policy.
+7. The broker validates the session, destination, method, path, body, and limits.
 8. The broker obtains the real credential and performs the upstream request.
 9. The broker removes sensitive response information.
 10. Mitmproxy returns the sanitized response to the client.
@@ -157,7 +156,6 @@ The client code does not need to know that a proxy or broker exists.
 * Do not save mitmproxy flow dumps.
 * Deny unsupported authenticated protocols by default.
 * Give package installation and test subprocesses fewer capabilities than the agent.
-* Require confirmation for writes, deployment, messaging, and destructive actions.
 * Support immediate session and capability revocation.
 * Limit request count, response size, duration, and external spending.
 

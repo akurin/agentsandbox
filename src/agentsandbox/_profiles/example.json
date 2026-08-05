@@ -10,7 +10,6 @@
 
   "capabilities": [
     {
-      "_comment": "Read-only, so nothing needs approval: GET and HEAD are not in the default approval list.",
       "provider": "github",
       "label": "read repos",
       "env": "GITHUB_TOKEN",
@@ -21,14 +20,12 @@
     },
 
     {
-      "_comment_approve": "POST is a *read* for this API - it is how a prompt is sent. Without approve_methods: [] the default would put every completion behind an operator prompt, and with the default deny mode that means every call fails. Spending money unattended is a real decision, so make it deliberately rather than by omission.",
       "provider": "openai",
       "label": "completions",
       "env": "OPENAI_API_KEY",
       "hosts": ["api.openai.com"],
       "methods": ["POST"],
       "paths": ["/v1/chat/completions", "/v1/embeddings"],
-      "approve_methods": [],
       "secret": "keychain:asbx-openai:default"
     },
 
@@ -42,7 +39,6 @@
       "methods": ["GET", "POST", "DELETE"],
       "paths": ["/v1/*"],
       "deny_paths": ["/v1/admin/*", "/v1/*/purge"],
-      "approve_methods": ["DELETE"],
       "ttl": 1800,
       "secret": "pass:internal/deploy-token",
       "injection": {

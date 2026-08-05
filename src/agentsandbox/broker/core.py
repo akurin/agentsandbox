@@ -24,7 +24,6 @@ from ..config import CAPABILITY_PREFIX
 from ..errors import PolicyDenied, UpstreamError
 from ..keychain import SecretResolver
 from ..netpolicy import Destination, DestinationPolicy
-from .approvals import ApprovalGate, ApprovalRequest, DenyAll
 from .upstream import HOP_BY_HOP, UpstreamExecutor, sanitize_response_headers
 
 #: Request headers we never forward: the guest's own idea of authentication is
@@ -194,7 +193,6 @@ class BrokerCore:
         resolver: SecretResolver,
         *,
         audit: AuditLog | None = None,
-        approvals: ApprovalGate | None = None,
         executor: UpstreamExecutor | None = None,
     ) -> None:
         self.session_id = session_id
@@ -202,7 +200,6 @@ class BrokerCore:
         self.policy = policy
         self.resolver = resolver
         self.audit = audit or NullAuditLog(session_id)
-        self.approvals = approvals or DenyAll()
         self.executor = executor or UpstreamExecutor(policy)
 
     # -- entry point --------------------------------------------------------
@@ -289,26 +286,6 @@ class BrokerCore:
         )
         self._reject_leaked_placeholders(req)
         self._reject_username_mismatch(req, cap)
-
-        if cap.needs_approval(req.method):
-            approval = ApprovalRequest(
-                session_id=req.session_id,
-                cap_id=cap.cap_id,
-                provider=cap.provider,
-                method=req.method.upper(),
-                url=f"{req.dest.origin}{req.target}",
-                reason=f"{req.method.upper()} requires approval for this capability",
-                body_preview=redactor.text(req.body[:200].decode("utf-8", "replace")),
-            )
-            self.audit.emit(
-                "broker.approval_requested",
-                cap_id=cap.cap_id,
-                request_id=approval.request_id,
-                method=approval.method,
-                host=req.host,
-            )
-            if not self.approvals.decide(approval):
-                raise PolicyDenied("approval_denied", "the operator did not approve this operation")
 
     def _reject_username_mismatch(self, req: BrokerRequest, cap: Capability) -> None:
         """Check the basic-auth credentials the guest actually presented.

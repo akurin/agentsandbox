@@ -15,7 +15,6 @@ import pytest
 
 
 from agentsandbox.audit import AuditLog
-from agentsandbox.broker.approvals import AllowAll, ApprovalGate, DenyAll, FileApprovalGate
 from agentsandbox.broker.core import BrokerCore, BrokerRequest, BrokerResponse, scrub_secret
 from agentsandbox.broker.upstream import UpstreamResponse
 from agentsandbox.capabilities import CapabilitySpec, InjectionSpec, SecretRef
@@ -94,7 +93,7 @@ def test_session_policy_applies_before_the_capability(session, store, executor, 
 
     narrow = DestinationPolicy(allow_hosts=["example.com"])
     core = BrokerCore(
-        session.session_id, store, narrow, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, narrow, resolver, executor=executor
     )
     token, _ = store.issue(
         CapabilitySpec(
@@ -146,7 +145,7 @@ def test_usage_accumulates_without_ever_blocking(session, store, executor, resol
     """There is no request budget: a long-running agent is not rate-limited
     by us. Usage is still recorded, because the audit trail wants it."""
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     token, cap = store.issue(
         CapabilitySpec(
@@ -168,7 +167,7 @@ def test_an_expired_capability_says_which_one_and_how_to_extend_it(
     credential - the agent cannot report anything useful, and whoever reads
     the audit log has to reconstruct the context by hand."""
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     token, cap = store.issue(
         CapabilitySpec(
@@ -192,7 +191,7 @@ def test_a_scope_denial_offers_no_remedy(session, store, executor, resolver):
     """Telling the guest how to widen its own scope is advice on getting
     around the policy. Only running out of time earns a remedy."""
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     token, _ = store.issue(
         CapabilitySpec(
@@ -212,7 +211,7 @@ def test_oversized_response_is_refused_not_truncated(session, store, resolver):
         UpstreamResponse(status_code=200, headers=[], body=b"x" * 100, truncated=True)
     )
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     token, _ = store.issue(
         CapabilitySpec(
@@ -236,7 +235,7 @@ def test_credential_echoed_by_upstream_is_scrubbed_from_the_response(session, st
         )
     )
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     token, _ = store.issue(
         CapabilitySpec(
@@ -266,7 +265,7 @@ def test_credential_bearing_response_headers_are_stripped(session, store, resolv
         )
     )
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     token, _ = store.issue(
         CapabilitySpec(
@@ -287,69 +286,9 @@ def test_identity_encoding_is_forced_so_bodies_stay_scannable(broker, executor, 
     assert encodings == ["identity"]
 
 
-def test_mutating_operations_are_denied_without_an_approval_channel(session, store, executor, resolver):
-    core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=DenyAll(), executor=executor
-    )
-    token, _ = store.issue(
-        CapabilitySpec(
-            provider="github",
-            hosts=["api.github.com"],
-            methods=["GET", "POST"],
-            secret=SecretRef(service="github-token"),
-        )
-    )
-    response = core.handle(make_request(token, method="POST", body=b"{}"))
-    assert response.reason == "approval_denied"
-    assert executor.calls == []
-
-
-def test_file_approval_gate_allows_when_answered(session, store, executor, resolver):
-    gate = FileApprovalGate(session.paths.root / "approvals", timeout=2.0, poll=0.05)
-
-    class ImmediateGate(ApprovalGate):
-        """Answers its own request the way an operator at a terminal would."""
-
-        def decide(self, request):
-            gate.answer(request.request_id, approved=True)
-            return gate.decide(request)
-
-    core = BrokerCore(
-        session.session_id,
-        store,
-        session.policy,
-        resolver,
-        approvals=ImmediateGate(),
-        executor=executor,
-    )
-    token, _ = store.issue(
-        CapabilitySpec(
-            provider="github",
-            hosts=["api.github.com"],
-            methods=["POST"],
-            secret=SecretRef(service="github-token"),
-        )
-    )
-    assert core.handle(make_request(token, method="POST", body=b"{}")).decision == "allow"
-
-
-def test_unanswered_approval_times_out_as_a_denial(session):
-    gate = FileApprovalGate(session.paths.root / "approvals", timeout=0.3, poll=0.05)
-    from agentsandbox.broker.approvals import ApprovalRequest
-
-    request = ApprovalRequest(
-        session_id=session.session_id,
-        cap_id="cap-x",
-        provider="github",
-        method="POST",
-        url="https://api.github.com/x",
-    )
-    assert gate.decide(request) is False
-
-
 def test_basic_and_header_injection_shapes(session, store, executor, resolver):
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     token, _ = store.issue(
         CapabilitySpec(
@@ -386,7 +325,6 @@ def test_upstream_failure_becomes_a_502_without_leaking_detail(session, store, r
         store,
         session.policy,
         resolver,
-        approvals=AllowAll(),
         executor=FailingExecutor(),
     )
     token, _ = store.issue(
@@ -409,7 +347,6 @@ def test_audit_log_never_contains_the_secret_or_the_placeholder(
         session.policy,
         resolver,
         audit=audit,
-        approvals=AllowAll(),
         executor=executor,
     )
     token, _ = github_capability
@@ -459,7 +396,6 @@ class CountingProvider(StaticResolver):  # noqa: F811
 def test_the_keychain_is_not_asked_for_the_same_credential_twice(store):
     """Five brokered requests, one Keychain prompt - not five."""
     from agentsandbox.broker.core import BrokerCore
-    from agentsandbox.broker.approvals import AllowAll
     from agentsandbox.netpolicy import DestinationPolicy
     from helpers import RecordingExecutor, make_request
 
@@ -467,7 +403,7 @@ def test_the_keychain_is_not_asked_for_the_same_credential_twice(store):
     resolver = SecretResolver(providers={"keychain": provider}, cache_ttl=300)
     policy = DestinationPolicy(allow_hosts=["api.github.com"])
     executor = RecordingExecutor()
-    core = BrokerCore("s", store, policy, resolver, approvals=AllowAll(), executor=executor)
+    core = BrokerCore("s", store, policy, resolver, executor=executor)
 
     token, _ = store.issue(
         CapabilitySpec(
@@ -488,13 +424,12 @@ def test_a_capability_issued_after_the_broker_started_is_usable(session, executo
     The CLI issues into the same file the running broker holds, so `asbx cap
     issue` against a live session takes effect on the next request.
     """
-    from agentsandbox.broker.approvals import AllowAll
     from agentsandbox.capabilities import CapabilityStore
 
     # The broker starts with an empty store, as it would at session start.
     store = CapabilityStore(session.paths.capabilities, session.session_id)
     core = BrokerCore(
-        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+        session.session_id, store, session.policy, resolver, executor=executor
     )
     assert store.list() == []
 

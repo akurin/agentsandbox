@@ -63,7 +63,6 @@ class Box:
     #: Egress policy. ``["*"]`` is any public host; the hard blocks are separate.
     allow_hosts: list[str] = field(default_factory=lambda: ["*"])
     shares: list[Share] = field(default_factory=list)
-    approval_mode: str = "deny"
 
     cpus: int = 2
     memory_mib: int = 2048

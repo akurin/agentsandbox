@@ -124,14 +124,6 @@ def test_the_wiremock_profile_cannot_wipe_the_shared_journal():
         assert exc.value.reason == "path_denied", destructive
 
 
-def test_the_wiremock_profile_does_not_demand_approval_for_searches():
-    """POST /find is a read; blocking it on approval would make it unusable."""
-    spec = load_profile(resolve_profile("wiremock"))[0]
-    assert spec.approval_required_methods == []
-    assert spec.injection.kind == "basic"
-    assert spec.injection.username == "developer"
-
-
 def test_query_strings_do_not_defeat_the_path_check():
     """`?since=...` must not change which path a capability matches."""
     from agentsandbox.capabilities import Capability
@@ -234,9 +226,9 @@ def test_no_module_hardcodes_a_default_that_config_owns():
 
 
 def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
-    """It used to print `label`, which does nothing, and hide approval,
-    injection, deny_paths and the placeholder name - so the fields that decide
-    whether a request succeeds were the ones you could not see."""
+    """It used to print `label`, which does nothing, and hide injection,
+    deny_paths and the placeholder name - so the fields that decide whether a
+    request succeeds were the ones you could not see."""
     from agentsandbox import cli
 
     (profile_dir / "p.json").write_text(json.dumps({
@@ -250,7 +242,6 @@ def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
             "methods": ["GET", "POST"],
             "paths": ["/v1/*"],
             "deny_paths": ["/v1/admin/*"],
-            "approve_methods": [],
             "secret": "pass:svc/token",
             "injection": {"kind": "header", "header": "X-Key", "template": "{secret}"},
         }],
@@ -261,7 +252,6 @@ def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
     assert "$SVC_TOKEN" in out            # what the agent actually uses
     assert "X-Key: <secret>" in out       # how it is attached
     assert "/v1/admin/*" in out           # the deny list is a security control
-    assert "approval:     none" in out    # empty is a decision, not an absence
     assert "expires:      never" in out
     assert "API_BASE=https://api.example.com" in out
     assert "ignore me" not in out         # documentation-only, not shown

@@ -431,7 +431,7 @@ def test_web_direction_is_a_required_flag_not_a_toggle():
         parser.parse_args(["box", "web", "neo", "--on", "--off"])
 
 
-def test_web_takes_a_trailing_box_name_like_approve_takes_a_trailing_one():
+def test_web_takes_a_trailing_box_name():
     args = cli.build_parser().parse_args(["box", "web", "neo", "--on"])
     assert args.on is True
     assert args.name == "neo"

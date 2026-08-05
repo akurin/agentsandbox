@@ -15,7 +15,6 @@
 
       "_comment_methods": "POST is not a write here: /__admin/requests/find is a search. Method is a poor proxy for danger on this API, so the deny list below carries the weight.",
       "methods": ["GET", "POST", "PUT", "DELETE"],
-      "approve_methods": [],
 
       "paths": ["/__admin/*"],
 
