@@ -223,3 +223,11 @@ def test_the_sshd_probe_returns_when_the_banner_arrives(tmp_path):
         assert cli._wait_for_sshd(path, timeout=10.0) is True
     finally:
         server.close()
+
+
+def test_the_wait_message_says_how_long_it_will_wait(tmp_path, capsys):
+    """"waiting..." with no bound is indistinguishable from a hang - which is
+    exactly what it got asked."""
+    cli._wait_for_sshd(tmp_path / "none.sock", timeout=3.0)
+    err = capsys.readouterr().err
+    assert "up to 3s" in err

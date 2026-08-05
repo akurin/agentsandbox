@@ -1191,8 +1191,10 @@ def _wait_for_sshd(socket_path: Path, timeout: float = 180.0) -> bool:
     """
     import socket as _socket
 
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     announced = False
+    reported = 0
     while time.monotonic() < deadline:
         sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
         sock.settimeout(5.0)
@@ -1206,9 +1208,18 @@ def _wait_for_sshd(socket_path: Path, timeout: float = 180.0) -> bool:
             sock.close()
         if not announced:
             # A first boot installs packages before sshd is reachable. Silence
-            # for two minutes is indistinguishable from a hang.
-            print("waiting for the guest to finish booting...", file=sys.stderr)
+            # is indistinguishable from a hang, and so is a message with no
+            # bound on it - say how long this will wait before giving up.
+            print(
+                f"waiting for {socket_path.parent.parent.name} to finish booting "
+                f"(up to {int(timeout)}s)...",
+                file=sys.stderr,
+            )
             announced = True
+        waited = int(time.monotonic() - started)
+        if waited and waited // 15 > reported:
+            reported = waited // 15
+            print(f"  ... still booting ({waited}s)", file=sys.stderr)
         time.sleep(2.0)
     return False
 
