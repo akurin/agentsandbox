@@ -43,6 +43,26 @@ def test_hidden_commands_stay_out_of_help_entirely():
     assert "vsock-proxy" not in parser.format_help()
 
 
+def test_session_has_no_start_subcommand():
+    """`asbx start <box>` is what every real workflow uses. An anonymous,
+    boxless session is still a real capability - `SessionManager.create()`
+    plus `manager.start()`, which is how the test suite exercises it - but it
+    has no CLI front door: `asbx session start` sitting next to `asbx start`
+    read as a typo of it rather than a different thing, and nothing here ever
+    called it through the CLI anyway."""
+    parser = cli.build_parser()
+    session_sub = next(
+        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+    ).choices["session"]
+    action = next(a for a in session_sub._actions if isinstance(a, argparse._SubParsersAction))
+
+    assert "start" not in action.choices
+    assert not hasattr(cli, "cmd_session_start")
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["session", "start"])
+
+
 def test_set_is_reachable_and_wired_up():
     args = cli.build_parser().parse_args(["set", "neo", "--memory", "8192"])
     assert args.func is cli.cmd_box_set
@@ -418,9 +438,8 @@ def test_mitmweb_is_not_a_start_time_flag():
     weeks is precisely the shape the warning exists to discourage.
     """
     parser = cli.build_parser()
-    for argv in (["start", "neo", "--mitmweb"], ["session", "start", "--mitmweb"]):
-        with pytest.raises(SystemExit):
-            parser.parse_args(argv)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["start", "neo", "--mitmweb"])
 
 
 def test_the_web_port_moved_to_the_command_that_starts_it():

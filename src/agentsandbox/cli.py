@@ -288,10 +288,6 @@ def _report_started(box) -> None:
     print(f"  asbx stop {box.name}       shut it down")
 
 
-def cmd_session_start(args: argparse.Namespace) -> int:
-    return _start_session(args, box=None)
-
-
 def _ssh_vm_config(box, session) -> dict:
     """SSH key material for the guest, or nothing for an anonymous session."""
     if box is None:
@@ -417,9 +413,11 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
 def _await_ssh_channel(manager, timeout: float = 20.0) -> None:
     """Block until vfkit has created the ssh socket, if there is to be one.
 
-    Only waits when ssh was configured: a one-off `asbx session start` has no
-    sshd and no socket, and waiting for one would add twenty seconds to every
-    such run before timing out for a file that is never coming.
+    Only waits when ssh was configured: a boxless session (`_start_session`
+    with no box, reachable only through `SessionManager.create()` now, not
+    through the CLI) has no sshd and no socket, and waiting for one would add
+    twenty seconds to every such run before timing out for a file that is
+    never coming.
 
     Not waiting for *sshd* - that is inside the guest and takes as long as the
     boot takes. `asbx shell` retries for it.
@@ -626,7 +624,7 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
         "    ]\n"
         "  }\n"
     )
-    print("  asbx session start --profile my-project")
+    print("  asbx create my-project --profile my-project && asbx start my-project")
     return 0
 
 
@@ -1629,6 +1627,19 @@ def _hidden_parser(sub, name: str) -> argparse.ArgumentParser:
     return parser
 
 
+def _hide_suppressed_from_usage(sub) -> None:
+    """Recompute a subparsers group's auto-generated ``{a,b,c}`` usage line.
+
+    Popping from ``_choices_actions`` (what :func:`_hidden_parser` does) hides
+    a command from the itemized help body, but the usage line's ``{...}`` is a
+    separate metavar that argparse only auto-generates once, from every
+    registered choice - it does not notice the pop. Call this after the last
+    subcommand is registered on a group that has any hidden ones.
+    """
+    visible = [a.dest for a in sub._choices_actions if a.help is not argparse.SUPPRESS]
+    sub.metavar = "{" + ",".join(visible) + "}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asbx", description=__doc__)
     parser.add_argument(
@@ -1742,70 +1753,19 @@ def build_parser() -> argparse.ArgumentParser:
     reset.add_argument("name")
     reset.set_defaults(func=cmd_box_reset)
 
-    # -- session ------------------------------------------------------------
+    # -- session --------------------------------------------------------------
+    # No CLI `session start`. Booting a box (`asbx start <name>`) already
+    # covers everything a running session needs, and an anonymous, boxless,
+    # optionally guest-less (`--no-vm`) session is a real capability but only
+    # ever a programmatic one - `SessionManager.create()` plus `manager.start()`
+    # - for exercising the tunnel and policy layer on their own. It does not
+    # need a CLI front door: nothing here calls it through one, precisely
+    # because `_start_session`'s foreground supervise loop makes it awkward to
+    # drive from a script anyway. `session list/status/prune/stop` remain,
+    # since they inspect and tear down whatever `asbx start` already created -
+    # box-derived sessions included.
     session_parser = sub.add_parser("session", help="session lifecycle")
     session_sub = session_parser.add_subparsers(dest="subcommand", required=True)
-
-    start = session_sub.add_parser("start", help="create and run a session")
-    start.add_argument(
-        "--allow",
-        action="append",
-        default=[],
-        metavar="HOST",
-        help="restrict the guest to only these hosts (default: all public hosts; repeatable)",
-    )
-    start.add_argument("--project", help="host directory to mount in the guest")
-    start.add_argument("--mount-path", help="where --project mounts inside the guest (default: same as host)")
-    start.add_argument("--profile", help="issue every capability in this profile on start")
-    start.add_argument("--label", default="", help="human label for this session")
-    start.add_argument(
-        "--approvals",
-        choices=["deny", "file", "allow"],
-        default="deny",
-        help="how mutating operations are approved (default: deny everything)",
-    )
-    start.add_argument(
-        "--share",
-        action="append",
-        type=_parse_share,
-        metavar="PATH:ro|rw",
-        help="mount an extra host directory at /mnt/<name> (default read-only)",
-    )
-    start.add_argument(
-        "--forward",
-        action="append",
-        type=_parse_forward,
-        default=[],
-        metavar="[HOST:]GUEST",
-        help="forward a guest port to localhost, e.g. 3000 or 8080:3000 (repeatable)",
-    )
-    start.add_argument(
-        "--dev-target",
-        action="append",
-        default=[],
-        metavar="GUESTPORT:HOSTPORT",
-        help="with --no-vm, point a forward at a host port instead of the guest",
-    )
-    start.add_argument("--cpus", type=int, default=2)
-    start.add_argument("--memory", type=int, default=2048, help="guest RAM in MiB")
-    start.add_argument("--no-vm", dest="vm", action="store_false", help="host side only")
-    start.add_argument(
-        "--netcheck",
-        choices=["halt", "warn"],
-        default="halt",
-        help="what the guest does if it is not fail-closed (default: power off)",
-    )
-    start.add_argument(
-        "--console",
-        action="store_true",
-        help="attach the guest console to this terminal (autologin as `agent`)",
-    )
-    start.add_argument(
-        "--purge-on-stop",
-        action="store_true",
-        help="erase all session state on shutdown, not just the disk",
-    )
-    start.set_defaults(func=cmd_session_start, vm=True, console=False)
 
     session_sub.add_parser("list", help="list sessions").set_defaults(func=cmd_session_list)
 
@@ -1944,11 +1904,7 @@ def build_parser() -> argparse.ArgumentParser:
     # It used to be a hand-written string, which meant a new subcommand was
     # invisible in `asbx` until someone remembered to edit it in two places -
     # the command worked, but nobody could find it.
-    #
-    # Commands registered through _hidden_parser are already absent from
-    # _choices_actions, so this lists exactly what the help body lists.
-    visible = [a.dest for a in sub._choices_actions if a.help is not argparse.SUPPRESS]
-    sub.metavar = "{" + ",".join(visible) + "}"
+    _hide_suppressed_from_usage(sub)
     return parser
 
 

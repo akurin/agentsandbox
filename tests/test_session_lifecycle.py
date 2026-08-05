@@ -377,10 +377,11 @@ def test_diag_survives_a_session_with_no_logs_yet(capsys, monkeypatch):
     assert "no gateway stats" in out  # not running: says so rather than crashing
 
 
-def test_session_start_with_profile_issues_all_capabilities(tmp_path, monkeypatch):
-    """`asbx session start --profile X` issues everything the profile declares.
+def test_starting_with_a_profile_issues_all_capabilities(tmp_path, monkeypatch):
+    """`--profile X` issues everything the profile declares, at start.
 
-    Tested at the manager level to avoid the polling loop in cmd_session_start.
+    Tested at the manager level to avoid the foreground supervise loop
+    `_start_session` enters once a session is up.
     """
     profile_dir = tmp_path / "profiles"
     profile_dir.mkdir()
