@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import base64
 import json
+import time
+
+import pytest
 
 
 from agentsandbox.audit import AuditLog
@@ -432,3 +435,290 @@ def test_the_keychain_is_not_asked_for_the_same_credential_twice(store):
 
     assert provider.calls == 1
     assert executor.calls[0]["credential_headers"] == [("Authorization", "Bearer ghp_the-real-secret")]
+
+
+def test_a_capability_issued_after_the_broker_started_is_usable(session, executor, resolver):
+    """No restart to add a credential: the store is re-read when it changes.
+
+    The CLI issues into the same file the running broker holds, so `asbx cap
+    issue` against a live session takes effect on the next request.
+    """
+    from agentsandbox.broker.approvals import AllowAll
+    from agentsandbox.capabilities import CapabilityStore
+
+    # The broker starts with an empty store, as it would at session start.
+    store = CapabilityStore(session.paths.capabilities, session.session_id)
+    core = BrokerCore(
+        session.session_id, store, session.policy, resolver, approvals=AllowAll(), executor=executor
+    )
+    assert store.list() == []
+
+    # A second process (the CLI) issues into the same file.
+    issuing = CapabilityStore(session.paths.capabilities, session.session_id)
+    token, cap = issuing.issue(
+        CapabilitySpec(
+            provider="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
+        )
+    )
+
+    # The running broker picks it up without being restarted.
+    assert core.handle(make_request(token)).decision == "allow"
+
+
+def test_a_revocation_from_another_process_takes_effect_immediately(broker, store, github_capability):
+    """The same path in reverse - revoking must not need a restart either."""
+    from agentsandbox.capabilities import CapabilityStore
+
+    token, cap = github_capability
+    assert broker.handle(make_request(token)).decision == "allow"
+
+    other = CapabilityStore(store.path, store.session_id)
+    assert other.revoke(cap.cap_id) is True
+
+    assert broker.handle(make_request(token)).reason == "capability_revoked"
+
+
+# -- pass (passwordstore.org) ------------------------------------------------
+
+
+def test_pass_returns_the_first_line_only(tmp_path):
+    """A pass entry is `secret\\nmetadata...` by convention."""
+    from agentsandbox.keychain import PassProvider
+
+    fake = tmp_path / "pass"
+    fake.write_text("#!/bin/sh\nprintf 'the-secret\\nurl: https://example.com\\nuser: bob\\n'\n")
+    fake.chmod(0o755)
+
+    got = PassProvider(binary=str(fake)).fetch(SecretRef(backend="pass", service="work/wiremock"))
+    assert got == "the-secret"
+
+
+def test_pass_builds_the_entry_path_from_service_and_account(tmp_path):
+    from agentsandbox.keychain import PassProvider
+
+    fake = tmp_path / "pass"
+    fake.write_text('#!/bin/sh\necho "asked-for:$2"\n')
+    fake.chmod(0o755)
+
+    got = PassProvider(binary=str(fake)).fetch(
+        SecretRef(backend="pass", service="work/wiremock", account="developer")
+    )
+    assert got == "asked-for:work/wiremock/developer"
+
+
+def test_a_missing_pass_entry_explains_itself(tmp_path):
+    from agentsandbox.errors import BrokerError
+    from agentsandbox.keychain import PassProvider
+
+    fake = tmp_path / "pass"
+    fake.write_text('#!/bin/sh\necho "Error: nope is not in the password store." >&2\nexit 1\n')
+    fake.chmod(0o755)
+
+    with pytest.raises(BrokerError) as exc:
+        PassProvider(binary=str(fake)).fetch(SecretRef(backend="pass", service="nope"))
+    assert "nope" in str(exc.value)
+    assert "password store" in str(exc.value)
+
+
+def test_a_pass_secret_is_registered_for_redaction(tmp_path):
+    """Anything the broker reads must never survive into a log line."""
+    from agentsandbox.audit import redactor
+    from agentsandbox.keychain import PassProvider
+
+    fake = tmp_path / "pass"
+    fake.write_text("#!/bin/sh\necho 'hunter2-hunter2-hunter2'\n")
+    fake.chmod(0o755)
+
+    PassProvider(binary=str(fake)).fetch(SecretRef(backend="pass", service="x"))
+    assert "hunter2-hunter2-hunter2" not in redactor.text("token=hunter2-hunter2-hunter2")
+
+
+def test_the_resolver_knows_the_pass_backend():
+    from agentsandbox.keychain import PassProvider, SecretResolver
+
+    assert isinstance(SecretResolver().providers["pass"], PassProvider)
+
+
+def test_pass_consults_the_store_it_was_told_to(tmp_path):
+    """A per-project database is selected explicitly, never inherited."""
+    from agentsandbox.keychain import PassProvider
+
+    fake = tmp_path / "pass"
+    fake.write_text('#!/bin/sh\necho "store=$PASSWORD_STORE_DIR"\n')
+    fake.chmod(0o755)
+
+    got = PassProvider(binary=str(fake)).fetch(
+        SecretRef(backend="pass", service="x", store=str(tmp_path / "neo-store"))
+    )
+    assert got == f"store={tmp_path / 'neo-store'}"
+
+
+def test_two_stores_with_the_same_entry_name_do_not_share_a_cache(tmp_path):
+    """`wiremock/developer` in two databases is two different secrets."""
+    from agentsandbox.keychain import PassProvider, SecretResolver
+
+    fake = tmp_path / "pass"
+    fake.write_text('#!/bin/sh\necho "secret-from:$PASSWORD_STORE_DIR"\n')
+    fake.chmod(0o755)
+
+    resolver = SecretResolver(providers={"pass": PassProvider(binary=str(fake))}, cache_ttl=300)
+    work = resolver.fetch(SecretRef(backend="pass", service="wiremock", store="/tmp/work"))
+    personal = resolver.fetch(SecretRef(backend="pass", service="wiremock", store="/tmp/personal"))
+
+    assert work == "secret-from:/tmp/work"
+    assert personal == "secret-from:/tmp/personal"
+
+
+# -- one unlock, then days -----------------------------------------------------
+
+
+def test_a_held_secret_never_expires(tmp_path):
+    """An unattended agent runs for days with nobody to answer a prompt.
+
+    The unlock happens once in the foreground; after `hold_for_session` the
+    broker must never go back to the store, because there is no terminal left
+    to prompt in.
+    """
+    from agentsandbox.keychain import SecretResolver
+
+    provider = CountingProvider("the-secret")
+    resolver = SecretResolver(providers={"keychain": provider}, cache_ttl=1)
+    ref = SecretRef(service="t")
+
+    assert resolver.fetch(ref) == "the-secret"
+    resolver.hold_for_session()
+
+    time.sleep(1.1)  # well past the original TTL
+    assert resolver.fetch(ref) == "the-secret"
+    assert provider.calls == 1
+
+
+def test_holding_extends_secrets_read_before_the_call(tmp_path):
+    """The foreground read happens first; holding must not discard it."""
+    from agentsandbox.keychain import SecretResolver
+
+    provider = CountingProvider("the-secret")
+    resolver = SecretResolver(providers={"keychain": provider}, cache_ttl=0.01)
+    resolver.fetch(SecretRef(service="t"))
+    resolver.hold_for_session()
+
+    time.sleep(0.05)
+    resolver.fetch(SecretRef(service="t"))
+    assert provider.calls == 1
+
+
+def test_refresh_drops_the_held_secrets(tmp_path):
+    """A credential rotated upstream has to be re-readable without a restart."""
+    from agentsandbox.keychain import SecretResolver
+
+    provider = CountingProvider("old-secret")
+    resolver = SecretResolver(providers={"keychain": provider}, cache_ttl=1)
+    resolver.fetch(SecretRef(service="t"))
+    resolver.hold_for_session()
+
+    resolver.clear_cache()
+    resolver.fetch(SecretRef(service="t"))
+    assert provider.calls == 2
+
+
+def test_the_broker_control_channel_refuses_unknown_commands(session, broker):
+    """The operator channel is narrow: one verb, and it says so."""
+    from agentsandbox.broker.server import BrokerServer, issue_token
+
+    token = issue_token(session.paths.broker_token)
+    server = BrokerServer(broker, session.paths.broker_socket, token)
+    try:
+        import json as _json
+
+        assert _json.loads(server.handle_command("refresh-secrets"))["ok"] is True
+        answer = _json.loads(server.handle_command("rm -rf /"))
+        assert answer["ok"] is False
+        assert "unknown command" in answer["error"]
+    finally:
+        server.server_close()
+
+
+# -- basic auth: whose account? ----------------------------------------------
+
+
+def _basic(user: str, password: str) -> str:
+    return "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+
+
+def _basic_capability(store, username="developer"):
+    return store.issue(
+        CapabilitySpec(
+            provider="wiremock",
+            hosts=["api.github.com"],
+            secret=SecretRef(service="github-token"),
+            injection=InjectionSpec(kind="basic", username=username),
+        )
+    )
+
+
+def test_the_capability_decides_which_account_is_used(broker, executor, store):
+    """The guest cannot select an account by changing the username."""
+    token, _ = _basic_capability(store)
+    broker.handle(make_request(token, headers=[("Authorization", _basic("developer", token))]))
+
+    name, value = executor.last["credential_headers"][0]
+    assert name == "Authorization"
+    assert base64.b64decode(value.split()[1]).decode() == f"developer:{SECRET}"
+
+
+def test_a_different_username_is_refused_rather_than_silently_replaced(broker, executor, store):
+    """Substituting silently makes a typo look like it worked."""
+    token, _ = _basic_capability(store)
+    response = broker.handle(
+        make_request(token, headers=[("Authorization", _basic("wrong_user", token))])
+    )
+
+    assert response.decision == "deny"
+    assert response.reason == "username_mismatch"
+    assert b"developer" in response.body  # says which account it does authenticate as
+    assert executor.calls == []  # and never reached the upstream
+
+
+def test_an_empty_username_is_allowed(broker, executor, store):
+    """Token-style APIs routinely send `:token` with no user part."""
+    token, _ = _basic_capability(store)
+    assert broker.handle(
+        make_request(token, headers=[("Authorization", _basic("", token))])
+    ).decision == "allow"
+
+
+def test_bearer_capabilities_are_unaffected_by_the_username_check(broker, executor, github_capability):
+    token, _ = github_capability
+    assert broker.handle(make_request(token)).decision == "allow"
+
+
+def test_a_password_with_anything_appended_is_refused(broker, executor, store):
+    """`-u user:$CAP:123` must not quietly work.
+
+    Detection has to be lenient to find a placeholder inside base64; that is
+    not a licence to accept a credential the agent built wrong.
+    """
+    token, _ = _basic_capability(store)
+    response = broker.handle(
+        make_request(token, headers=[("Authorization", _basic("developer", f"{token}:123"))])
+    )
+
+    assert response.decision == "deny"
+    assert response.reason == "malformed_credential"
+    assert executor.calls == []
+
+
+def test_a_malformed_credential_never_reaches_the_upstream(broker, executor, store):
+    """The refusal is also what stops a placeholder leaving the sandbox."""
+    token, _ = _basic_capability(store)
+    broker.handle(
+        make_request(token, headers=[("Authorization", _basic("developer", f"prefix{token}"))])
+    )
+    assert executor.calls == []
+
+
+def test_an_exact_placeholder_password_is_accepted(broker, executor, store):
+    token, _ = _basic_capability(store)
+    assert broker.handle(
+        make_request(token, headers=[("Authorization", _basic("developer", token))])
+    ).decision == "allow"

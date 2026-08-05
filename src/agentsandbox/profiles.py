@@ -93,6 +93,20 @@ def list_profiles() -> dict[str, Path]:
 
 def load_profile(path: Path) -> list[CapabilitySpec]:
     """Parse a profile file and return its capability specs."""
+    return _parse(path)[0]
+
+
+def load_profile_env(path: Path) -> dict[str, str]:
+    """Non-secret environment the profile wants in the guest.
+
+    A base URL or a username is configuration, not a credential - it has no
+    business going through the broker, and the agent needs it to build the
+    request at all.
+    """
+    return _parse(path)[1]
+
+
+def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str]]:
     data = json.loads(path.read_text())
 
     if not isinstance(data, dict):
@@ -108,17 +122,27 @@ def load_profile(path: Path) -> list[CapabilitySpec]:
     if not isinstance(entries, list):
         raise CapabilityError(f"profile {path}: 'capabilities' must be a list")
 
+    # A profile for one project usually points at one store; let it say so
+    # once instead of on every capability.
+    default_store = str(data.get("pass_store", ""))
+
     specs: list[CapabilitySpec] = []
     for i, entry in enumerate(entries):
         try:
-            specs.append(_entry_to_spec(entry))
+            specs.append(_entry_to_spec(entry, default_store))
         except (KeyError, TypeError, ValueError) as exc:
             raise CapabilityError(f"profile {path}, entry {i}: {exc}") from exc
-    return specs
+
+    plain_env = data.get("env", {})
+    if not isinstance(plain_env, dict):
+        raise CapabilityError(f"profile {path}: 'env' must be a mapping")
+    return specs, {str(k): str(v) for k, v in plain_env.items()}
 
 
-def _entry_to_spec(entry: dict[str, Any]) -> CapabilitySpec:
+def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> CapabilitySpec:
     secret = _resolve_secret_ref(entry.get("secret"))
+    if default_store and not secret.store:
+        secret.store = default_store
     injection = InjectionSpec.from_dict(entry.get("injection", {}))
 
     return CapabilitySpec(
@@ -128,6 +152,7 @@ def _entry_to_spec(entry: dict[str, Any]) -> CapabilitySpec:
         resources=_as_list(entry.get("resources", [])),
         methods=_as_list(entry.get("methods", ["GET"])),
         path_globs=_as_list(entry.get("paths", ["/*"])),
+        deny_path_globs=_as_list(entry.get("deny_paths", [])),
         operations=_as_list(entry.get("operations", [])),
         secret=secret,
         injection=injection,
@@ -142,13 +167,13 @@ def _entry_to_spec(entry: dict[str, Any]) -> CapabilitySpec:
 
 
 def _resolve_secret_ref(value: str | dict | None) -> SecretRef:
-    """``keychain:SERVICE[:ACCOUNT]``, ``env:NAME`` or ``file:/path``."""
+    """``keychain:SERVICE[:ACCOUNT]``, ``pass:path/to/entry``, ``env:NAME`` or ``file:/path``."""
     if value is None:
         raise CapabilityError("a profile capability must declare a secret")
     if isinstance(value, dict):
         return SecretRef.from_dict(value)
     backend, _, rest = str(value).partition(":")
-    if backend not in ("keychain", "env", "file"):
+    if backend not in ("keychain", "pass", "env", "file"):
         raise CapabilityError(f"unknown secret backend {backend!r}")
     service, _, account = rest.partition(":")
     if not service:

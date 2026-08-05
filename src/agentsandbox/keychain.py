@@ -103,6 +103,66 @@ class KeychainProvider(SecretProvider):
 
 
 @dataclass
+class PassProvider(SecretProvider):
+    """Reads from ``pass`` (passwordstore.org).
+
+    Worth preferring over the Keychain when you already use it: each secret is
+    separately GPG-encrypted, gpg-agent owns the caching and the prompt, and
+    the store is usually a git repo you already back up. We add no new place
+    for secrets to live.
+
+    By convention a pass entry's first line is the secret and anything after
+    it is metadata, so only the first line is returned.
+    """
+
+    binary: str = "pass"
+    timeout: float = 120.0  # generous: a pinentry prompt waits for a human
+
+    def fetch(self, ref: SecretRef) -> str:
+        entry = ref.service
+        if ref.account:
+            entry = f"{entry}/{ref.account}"
+        if not entry:
+            raise BrokerError("secret ref has no pass entry")
+
+        env = dict(os.environ)
+        if ref.store:
+            # A per-project store, with its own GPG key if you want one. Set
+            # explicitly rather than inherited, so which database was consulted
+            # is never ambiguous.
+            env["PASSWORD_STORE_DIR"] = str(Path(ref.store).expanduser())
+
+        try:
+            proc = subprocess.run(
+                [self.binary, "show", entry],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+                env=env,
+            )
+        except FileNotFoundError as exc:
+            raise BrokerError("`pass` is not installed or not on PATH") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise BrokerError(
+                f"`pass show {entry}` timed out - a pinentry prompt with nowhere "
+                "to draw itself is the usual cause; see `asbx doctor`"
+            ) from exc
+
+        if proc.returncode != 0:
+            # stderr can name the entry but never its contents.
+            detail = (proc.stderr or "").strip().splitlines()
+            hint = detail[-1] if detail else f"exit {proc.returncode}"
+            raise BrokerError(f"pass could not read {entry!r}: {hint}")
+
+        secret = proc.stdout.split("\n", 1)[0].strip()
+        if not secret:
+            raise BrokerError(f"pass entry {entry!r} is empty")
+        redactor.register_secret(secret)
+        return secret
+
+
+@dataclass
 class EnvProvider(SecretProvider):
     """Reads from the broker process environment. Development convenience."""
 
@@ -133,10 +193,18 @@ class FileProvider(SecretProvider):
         return value
 
 
-#: How long a fetched credential stays in memory before the broker fetches it
-#: again. The Keychain access prompt appears once then is silent for this long.
-#: Set ``ASBX_SECRET_CACHE_TTL=0`` to disable caching entirely (a prompt on
-#: every brokered request).
+#: Hold a credential for the life of the process rather than a fixed window.
+#: An unattended agent runs for days with nobody to answer a pinentry or a
+#: Keychain prompt, so the unlock has to happen once, in the foreground, and
+#: last. This is narrower than the obvious alternative of extending
+#: gpg-agent's cache: that would let *any* process running as the user decrypt
+#: the *whole* store for days, where this holds only the entries a profile
+#: named, only inside the supervisor.
+FOREVER = float("inf")
+
+#: How long a fetched credential stays in memory before it is fetched again.
+#: ``0`` disables caching (a prompt per request); ``inf`` keeps it for the
+#: process's lifetime.
 DEFAULT_CACHE_TTL = float(os.environ.get("ASBX_SECRET_CACHE_TTL", 900))
 
 
@@ -158,22 +226,40 @@ class SecretResolver:
         self.keychain = keychain or KeychainProvider()
         self.providers: dict[str, SecretProvider] = providers or {
             "keychain": self.keychain,
+            "pass": PassProvider(),
             "env": EnvProvider(),
             "file": FileProvider(),
         }
         self.cache_ttl = cache_ttl
-        self._cache: dict[tuple[str, str, str], tuple[str, float]] = {}
+        self._cache: dict[tuple[str, str, str, str], tuple[str, float]] = {}
 
     def clear_cache(self) -> None:
         """Forget every cached credential. Called when a session stops."""
         self._cache.clear()
+
+    def hold_for_session(self) -> None:
+        """Stop expiring cached credentials.
+
+        Called once the foreground unlock is done and the supervisor is about
+        to detach. From that point there is no terminal to show a pinentry or
+        a Keychain prompt in, so an expiring cache would mean an outage on day
+        two rather than a re-read.
+
+        Deliberately narrower than the obvious alternative of extending
+        gpg-agent's own cache: that would let *any* process running as the user
+        decrypt the *whole* store for as long as it lasted. This holds only the
+        entries a profile named, only inside this process.
+        """
+        self.cache_ttl = FOREVER
+        # Entries read before this call carry the old, shorter deadline.
+        self._cache = {key: (value, FOREVER) for key, (value, _) in self._cache.items()}
 
     def fetch(self, ref: SecretRef) -> str:
         provider = self.providers.get(ref.backend)
         if provider is None:
             raise BrokerError(f"unknown secret backend {ref.backend!r}")
 
-        cache_key = (ref.backend, ref.service, ref.account)
+        cache_key = (ref.backend, ref.service, ref.account, ref.store)
         cached = self._cache.get(cache_key)
         if cached is not None:
             raw, expires_at = cached
@@ -276,6 +362,10 @@ class StaticResolver(SecretResolver):
     """Test double: a dict of ``service`` -> secret, no OS involvement."""
 
     def __init__(self, secrets: dict[str, str]) -> None:
+        # Chain up: the base class owns the cache, and everything that operates
+        # on a resolver generically - clear_cache, hold_for_session - has to
+        # work on the double too, or the tests stop covering those paths.
+        super().__init__(providers={})
         self._secrets = dict(secrets)
         for value in secrets.values():
             redactor.register_secret(value)

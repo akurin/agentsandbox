@@ -64,9 +64,13 @@ def short_id(token_hash_hex: str) -> str:
 class SecretRef:
     """Where the *real* credential lives. Never the credential itself."""
 
-    backend: str = "keychain"  # keychain | env | file
+    backend: str = "keychain"  # keychain | pass | env | file
     service: str = ""
     account: str = ""
+    #: Which store to look in, when the backend has more than one. For ``pass``
+    #: this is ``PASSWORD_STORE_DIR`` - the way to keep a project's secrets in
+    #: their own database, under their own GPG key.
+    store: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -77,6 +81,7 @@ class SecretRef:
             backend=data.get("backend", "keychain"),
             service=data.get("service", ""),
             account=data.get("account", ""),
+            store=data.get("store", ""),
         )
 
 
@@ -121,6 +126,10 @@ class Capability:
     resources: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=lambda: ["GET", "HEAD"])
     path_globs: list[str] = field(default_factory=lambda: ["/*"])
+    #: Checked before ``path_globs``, so a broad allow can keep a few specific
+    #: endpoints out of reach - the destructive corner of an API you otherwise
+    #: want open.
+    deny_path_globs: list[str] = field(default_factory=list)
     operations: list[str] = field(default_factory=list)
     secret: SecretRef = field(default_factory=SecretRef)
     injection: InjectionSpec = field(default_factory=InjectionSpec)
@@ -176,6 +185,10 @@ class Capability:
         if method not in {m.upper() for m in self.methods}:
             raise PolicyDenied("method_not_permitted", f"{method} is not permitted")
         path_only = path.split("?", 1)[0]
+        # Deny wins, and is checked first: the point of the list is to carve
+        # exceptions out of a permissive allow.
+        if any(fnmatch.fnmatchcase(path_only, glob) for glob in self.deny_path_globs):
+            raise PolicyDenied("path_denied", "this path is explicitly denied")
         if not any(fnmatch.fnmatchcase(path_only, glob) for glob in self.path_globs):
             raise PolicyDenied("path_not_permitted", "path is not permitted")
         if self.resources and not any(res_matches(r, path_only) for r in self.resources):
@@ -231,6 +244,7 @@ class Capability:
             "resources": self.resources,
             "methods": self.methods,
             "paths": self.path_globs,
+            "denied_paths": self.deny_path_globs,
             "operations": self.operations,
             "expires_at": self.expires_at,
             "expires_in": max(0, int(self.expires_at - time.time())) if self.expires_at else None,
@@ -265,6 +279,7 @@ class CapabilitySpec:
     resources: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=lambda: ["GET", "HEAD"])
     path_globs: list[str] = field(default_factory=lambda: ["/*"])
+    deny_path_globs: list[str] = field(default_factory=list)
     operations: list[str] = field(default_factory=list)
     secret: SecretRef = field(default_factory=SecretRef)
     injection: InjectionSpec = field(default_factory=InjectionSpec)
@@ -288,6 +303,7 @@ class CapabilitySpec:
             resources=list(data.get("resources", [])),
             methods=list(data.get("methods", ["GET", "HEAD"])),
             path_globs=list(data.get("path_globs", data.get("paths", ["/*"]))),
+            deny_path_globs=list(data.get("deny_paths", [])),
             operations=list(data.get("operations", [])),
             secret=SecretRef.from_dict(data.get("secret", {})),
             injection=InjectionSpec.from_dict(data.get("injection", {})),
@@ -369,6 +385,7 @@ class CapabilityStore:
             resources=list(spec.resources),
             methods=[m.upper() for m in spec.methods],
             path_globs=list(spec.path_globs),
+            deny_path_globs=list(spec.deny_path_globs),
             operations=list(spec.operations),
             secret=spec.secret,
             injection=spec.injection,

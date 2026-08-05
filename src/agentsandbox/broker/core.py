@@ -12,6 +12,7 @@ Order of checks is the order of the spec's flow, and every step fails closed.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import time
 from dataclasses import dataclass, field
@@ -238,6 +239,7 @@ class BrokerCore:
             operation=req.operation,
         )
         self._reject_leaked_placeholders(req)
+        self._reject_username_mismatch(req, cap)
 
         if cap.needs_approval(req.method):
             approval = ApprovalRequest(
@@ -259,6 +261,54 @@ class BrokerCore:
             if not self.approvals.decide(approval):
                 raise PolicyDenied("approval_denied", "the operator did not approve this operation")
         return cap
+
+    def _reject_username_mismatch(self, req: BrokerRequest, cap: Capability) -> None:
+        """Check the basic-auth credentials the guest actually presented.
+
+        The account is fixed when the capability is issued - the guest never
+        gets to choose it, or a placeholder for one account could be tried
+        against another. That much is deliberate.
+
+        What is *not* deliberate is doing it silently: quietly substituting the
+        right username makes a typo look like it worked, and hides the bug in
+        whatever built the request. So a mismatch is an error, while an empty
+        username is allowed, since plenty of token-style APIs omit it.
+        """
+        if cap.injection.kind != "basic":
+            return
+        expected = (cap.injection.username or "").strip()
+        if not expected:
+            return
+
+        for name, value in req.headers:
+            if name.lower() != "authorization":
+                continue
+            scheme, _, encoded = value.partition(" ")
+            if scheme.lower() != "basic" or not encoded:
+                continue
+            try:
+                decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8", "replace")
+            except (ValueError, binascii.Error):
+                continue
+            presented, _, password = decoded.partition(":")
+            presented = presented.strip()
+            if presented and presented != expected:
+                raise PolicyDenied(
+                    "username_mismatch",
+                    f"this capability authenticates as {expected!r}, not {presented!r}",
+                )
+
+            # Detection is deliberately lenient - it has to find a placeholder
+            # inside base64 - but anything *around* it means the request was
+            # built wrong. Refusing here is also what stops the malformed value
+            # from being forwarded upstream: a placeholder must never leave the
+            # sandbox, even though it is not itself a credential.
+            if password and password.strip() != req.capability:
+                raise PolicyDenied(
+                    "malformed_credential",
+                    "the password must be exactly the capability placeholder, "
+                    "with nothing appended",
+                )
 
     def _reject_leaked_placeholders(self, req: BrokerRequest) -> None:
         """A capability belongs in a header, nowhere else.

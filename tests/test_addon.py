@@ -372,3 +372,53 @@ def test_empty_host_filters_are_reported_as_bypasses():
     assert uninspected_option_problems(
         {"ignore_hosts": [], "allow_hosts": [], "tcp_hosts": [], "udp_hosts": []}
     ) == []
+
+
+# -- basic auth --------------------------------------------------------------
+
+
+def test_a_placeholder_inside_basic_auth_is_found(addon, broker_stub):
+    """`curl -u user:cap_v1_...` must work without rewriting the command.
+
+    Basic auth base64-encodes the credentials, so the placeholder never
+    appears literally in the header.
+    """
+    import base64
+
+    encoded = base64.b64encode(f"developer:{TOKEN}".encode()).decode()
+    flow = http_flow(headers=[("Host", "api.github.com"), ("Authorization", f"Basic {encoded}")])
+    addon.request(flow)
+
+    assert len(broker_stub.requests) == 1
+    assert broker_stub.requests[0].capability == TOKEN
+
+
+def test_basic_auth_without_a_placeholder_is_left_alone(addon, broker_stub):
+    import base64
+
+    encoded = base64.b64encode(b"developer:an-ordinary-password").decode()
+    flow = http_flow(headers=[("Host", "api.github.com"), ("Authorization", f"Basic {encoded}")])
+    addon.request(flow)
+    assert broker_stub.requests == []
+    assert flow.response is None  # forwarded, not brokered
+
+
+def test_malformed_basic_auth_does_not_crash(addon):
+    for value in ("Basic", "Basic !!!not-base64!!!", "Basic ", "Bearer something"):
+        flow = http_flow(headers=[("Host", "api.github.com"), ("Authorization", value)])
+        addon.request(flow)  # must not raise
+
+
+def test_the_guest_cannot_choose_the_account(addon, broker_stub):
+    """The username in the header is ignored; the capability fixes it."""
+    import base64
+
+    encoded = base64.b64encode(f"someone-else:{TOKEN}".encode()).decode()
+    flow = http_flow(headers=[("Host", "api.github.com"), ("Authorization", f"Basic {encoded}")])
+    addon.request(flow)
+
+    brokered = broker_stub.requests[0]
+    assert brokered.capability == TOKEN
+    # The broker injects from the capability's own InjectionSpec, so nothing
+    # about "someone-else" travels with the request.
+    assert not any("someone-else" in v for _, v in brokered.headers if "auth" in _.lower())

@@ -86,9 +86,9 @@ def _parse_forward(value: str) -> tuple[int, int]:
 
 
 def _parse_secret_ref(value: str) -> SecretRef:
-    """``keychain:SERVICE[:ACCOUNT]``, ``env:NAME`` or ``file:/path``."""
+    """``keychain:SERVICE[:ACCOUNT]``, ``pass:path/to/entry``, ``env:NAME`` or ``file:/path``."""
     backend, _, rest = value.partition(":")
-    if backend not in ("keychain", "env", "file"):
+    if backend not in ("keychain", "pass", "env", "file"):
         raise argparse.ArgumentTypeError(f"unknown secret backend {backend!r}")
     service, _, account = rest.partition(":")
     if not service:
@@ -105,6 +105,16 @@ def cmd_env_start(args: argparse.Namespace) -> int:
     from .env import Environment
 
     env = Environment.load(args.name)
+
+    # One guest per environment: they share a disk, and a second vfkit opening
+    # it fails deep inside Virtualization.framework with "the storage device
+    # attachment is invalid", which says nothing about the real cause.
+    if existing := _running_session_for(env.name):
+        print(f"!! {env.name} is already running (session {existing.session_id})", file=sys.stderr)
+        print(f"   asbx shell {env.name}    open a shell in it", file=sys.stderr)
+        print(f"   asbx stop {env.name}     stop it first to restart", file=sys.stderr)
+        return EXIT_USAGE
+
     if args.fresh and env.has_disk:
         env.remove_disk()
         print(f"reset {env.name}'s disk")
@@ -131,6 +141,16 @@ def cmd_env_start(args: argparse.Namespace) -> int:
         args.console = True
         return _start_session(args, env=env)
 
+    # Unlock every secret the profile needs while we still have a terminal,
+    # and carry the loaded resolver across the fork. The supervisor has no
+    # terminal, so a pinentry fired from there has nowhere to draw itself.
+    resolver = None
+    if env.profile:
+        resolver, problem = _warm_secrets(env.profile)
+        if problem:
+            print(f"!! {problem}", file=sys.stderr)
+            return EXIT_DENIED
+
     # Detached, like `podman start`: the supervisor outlives this terminal, so
     # `asbx shell` from anywhere keeps working and closing the window is safe.
     args.console = False
@@ -138,7 +158,7 @@ def cmd_env_start(args: argparse.Namespace) -> int:
 
     try:
         spawn_supervisor(
-            lambda: _start_session(args, env=env),
+            lambda: _start_session(args, env=env, resolver=resolver),
             log_path=envs_supervisor_log(env),
         )
     except StartupFailed as exc:
@@ -148,6 +168,62 @@ def cmd_env_start(args: argparse.Namespace) -> int:
 
     _report_started(env)
     return 0
+
+
+def _warm_secrets(profile_name: str):
+    """Unlock every secret a profile needs, here, where a prompt can be seen.
+
+    Returns ``(resolver, error)``. The resolver comes back holding the
+    plaintext, and the caller hands it to the session *before* the supervisor
+    forks - so the cache is inherited and the detached process never has to
+    read a secret with no terminal to prompt in. That is what makes one unlock
+    last for days.
+
+    An unreadable secret stops the start with an explanation, rather than
+    surfacing hours later as a brokered request that mysteriously 401s.
+    """
+    from .errors import SandboxError
+    from .keychain import SecretResolver
+    from .profiles import load_profile, resolve_profile
+
+    resolver = SecretResolver()
+    seen: set[tuple[str, str, str, str]] = set()
+    for spec in load_profile(resolve_profile(profile_name)):
+        ref = spec.secret
+        key = (ref.backend, ref.service, ref.account, ref.store)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            resolver.fetch(ref)
+        except SandboxError as exc:
+            where = f"{ref.backend}:{ref.service}" + (f":{ref.account}" if ref.account else "")
+            return resolver, f"cannot read the secret for {spec.provider} ({where}): {exc}"
+
+    # From here there is no going back to a terminal, so stop expiring them.
+    resolver.hold_for_session()
+    return resolver, None
+
+
+def _running_session_for(env_name: str) -> Session | None:
+    """The live session for an environment, if there is one.
+
+    A session file can say RUNNING after a crash, so the supervisor's pid is
+    what decides - otherwise a killed run would block every future start.
+    """
+    from .manager import _is_alive
+    from .session import STATE_RUNNING, STATE_STOPPED
+
+    for session in list_sessions():
+        if session.env_name != env_name or session.state != STATE_RUNNING:
+            continue
+        if _is_alive(session.supervisor_pid) or _is_alive(session.vm_pid):
+            return session
+        # Stale: the supervisor died without tidying up. Record that rather
+        # than leaving a corpse that blocks the environment forever.
+        session.state = STATE_STOPPED
+        session.save()
+    return None
 
 
 def envs_supervisor_log(env) -> Path:
@@ -166,6 +242,16 @@ def _report_started(env) -> None:
     if session is None:
         return
     print(f"  session    {session.session_id}")
+
+    # Capabilities are issued inside the supervisor, whose output goes to a
+    # log. Say what the guest actually got, or a profile that silently issued
+    # nothing looks identical to one that worked.
+    caps = CapabilityStore(session.paths.capabilities, session.session_id).list()
+    for cap in caps:
+        print(f"  cap        {cap.cap_id}  {cap.provider} ({', '.join(cap.hosts)})")
+    if env.profile and not caps:
+        print(f"  !! profile {env.profile!r} issued no capabilities - see {envs_supervisor_log(env)}")
+
     for port, info in session.forwards.items():
         print(f"  forward    guest:{port} -> {info['url']}")
     print(f"\n  asbx shell {env.name}      open a shell (as many as you like)")
@@ -193,7 +279,7 @@ def _ssh_vm_config(env, session) -> dict:
     }
 
 
-def _start_session(args: argparse.Namespace, env=None) -> int:
+def _start_session(args: argparse.Namespace, env=None, resolver=None) -> int:
     problems = check_environment() if args.vm else []
     if problems and args.vm:
         for problem in problems:
@@ -230,9 +316,13 @@ def _start_session(args: argparse.Namespace, env=None) -> int:
     # be delivered as environment in cloud-init, rather than pasted by hand.
     capability_env: dict[str, str] = {}
     if args.profile:
-        from .profiles import load_profile, resolve_profile
+        from .profiles import load_profile, load_profile_env, resolve_profile
 
-        for spec in load_profile(resolve_profile(args.profile)):
+        profile_path = resolve_profile(args.profile)
+        capability_env.update(load_profile_env(profile_path))
+        for name in sorted(load_profile_env(profile_path)):
+            print(f"  env {name}")
+        for spec in load_profile(profile_path):
             token, cap = manager.issue_capability(spec)
             label = spec.label or spec.provider
             print(f"  cap {cap.cap_id:<18} {label} ({', '.join(spec.methods)} {', '.join(spec.hosts)})")
@@ -269,6 +359,7 @@ def _start_session(args: argparse.Namespace, env=None) -> int:
             dev_targets=dev_targets,
             web=args.mitmweb,
             web_port=args.web_port,
+            resolver=resolver,
         )
     except SandboxError as exc:
         print(f"!! {exc}", file=sys.stderr)
@@ -611,6 +702,36 @@ def cmd_secret_set(args: argparse.Namespace) -> int:
         SecretRef(backend="keychain", service=args.service, account=args.account), secret
     )
     print(f"stored keychain item service={args.service} account={args.account or args.service}")
+    return 0
+
+
+def cmd_secret_refresh(args: argparse.Namespace) -> int:
+    """Pick up a rotated credential without restarting the environment.
+
+    Unlocks the store here, where you can answer the prompt, then tells the
+    running broker to drop what it cached. Its next brokered request re-reads
+    against a warm agent - so a credential that rotated mid-run lands without
+    interrupting an agent that has been working for days.
+    """
+    from .broker.server import send_command
+    from .env import Environment
+
+    session = _resolve_session(args.session)
+    if session.env_name and Environment.exists(session.env_name):
+        env = Environment.load(session.env_name)
+        if env.profile:
+            _, problem = _warm_secrets(env.profile)
+            if problem:
+                print(f"!! {problem}", file=sys.stderr)
+                return EXIT_DENIED
+
+    answer = send_command(
+        session.paths.broker_socket, read_token(session.paths.broker_token), "refresh-secrets"
+    )
+    if not answer.get("ok"):
+        print(f"!! {answer.get('error', 'refresh failed')}", file=sys.stderr)
+        return 1
+    print(f"refreshed credentials for {session.env_name or session.session_id}")
     return 0
 
 
@@ -1207,6 +1328,11 @@ def build_parser() -> argparse.ArgumentParser:
     # -- secrets ------------------------------------------------------------
     secret = sub.add_parser("secret", help="credentials in the macOS keychain")
     secret_sub = secret.add_subparsers(dest="subcommand", required=True)
+    secret_refresh = secret_sub.add_parser(
+        "refresh", help="re-read credentials into a running environment"
+    )
+    secret_refresh.set_defaults(func=cmd_secret_refresh)
+
     secret_set = secret_sub.add_parser("set", help="store a credential (prompts, never echoes)")
     secret_set.add_argument("--service", required=True)
     secret_set.add_argument("--account", default="")

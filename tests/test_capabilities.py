@@ -219,3 +219,53 @@ def test_prune_expired(store):
     )
     assert store.prune_expired(now=time.time() + 5) == 1
     assert store.list() == []
+
+
+def test_a_deny_list_carves_exceptions_out_of_a_broad_allow(store):
+    """Allow the API, keep the destructive corner of it out of reach."""
+    token, cap = store.issue(
+        CapabilitySpec(
+            provider="svc",
+            hosts=["api.example.com"],
+            methods=["GET", "POST", "DELETE"],
+            path_globs=["/admin/*"],
+            deny_path_globs=["/admin/*/reset", "/admin/shutdown"],
+            secret=SecretRef(service="x"),
+        )
+    )
+    cap.check_operation("POST", "/admin/requests/find")
+    cap.check_operation("DELETE", "/admin/mappings/abc")
+
+    for denied in ("/admin/requests/reset", "/admin/shutdown"):
+        with pytest.raises(PolicyDenied) as exc:
+            cap.check_operation("POST", denied)
+        assert exc.value.reason == "path_denied"
+
+
+def test_deny_beats_allow_even_for_an_exact_match(store):
+    """Order matters: the deny list is checked first, so it always wins."""
+    _, cap = store.issue(
+        CapabilitySpec(
+            provider="svc",
+            hosts=["api.example.com"],
+            path_globs=["/thing"],
+            deny_path_globs=["/thing"],
+            secret=SecretRef(service="x"),
+        )
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        cap.check_operation("GET", "/thing")
+    assert exc.value.reason == "path_denied"
+
+
+def test_denied_paths_are_visible_when_reviewing_a_capability(store):
+    _, cap = store.issue(
+        CapabilitySpec(
+            provider="svc",
+            hosts=["api.example.com"],
+            path_globs=["/*"],
+            deny_path_globs=["/dangerous"],
+            secret=SecretRef(service="x"),
+        )
+    )
+    assert cap.public_view()["denied_paths"] == ["/dangerous"]

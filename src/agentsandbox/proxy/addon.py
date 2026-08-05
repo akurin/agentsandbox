@@ -14,6 +14,8 @@ normalised request and receives a sanitised response.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import ipaddress
 import logging
 import os
@@ -254,6 +256,12 @@ class SandboxAddon:
                 found = find_placeholders(value)
                 if found:
                     return found[0], "header"
+                # `curl -u user:cap_v1_...` base64-encodes the credentials, so
+                # the placeholder is invisible in the raw header. Look inside,
+                # otherwise every basic-auth tool needs rewriting to use a
+                # bearer token it does not otherwise want.
+                if placeholder := _placeholder_in_basic_auth(value):
+                    return placeholder, "header"
         for name, value in req.headers.items(multi=True):
             if CAPABILITY_PREFIX in value:
                 if name.lower() == "cookie":
@@ -355,6 +363,28 @@ def _to_mitm_response(response: BrokerResponse) -> http.Response:
         made.headers.add(key, value)
     made.headers["content-length"] = str(len(response.body))
     return made
+
+
+def _placeholder_in_basic_auth(header_value: str) -> str | None:
+    """Find a capability inside ``Authorization: Basic base64(user:pass)``.
+
+    Tools that speak basic auth - curl -u, requests' auth=, half of every CI
+    script - encode the password before it reaches the wire. Without this, a
+    placeholder in the password position looks like opaque base64 and the
+    request is forwarded with a credential the upstream will reject.
+
+    The *username* here is deliberately ignored: which account a capability
+    uses is fixed when it is issued, not chosen by the guest.
+    """
+    scheme, _, encoded = header_value.partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        return None
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8", "replace")
+    except (ValueError, binascii.Error):
+        return None
+    found = find_placeholders(decoded)
+    return found[0] if found else None
 
 
 def _is_tunnel_dns(address: Any) -> bool:

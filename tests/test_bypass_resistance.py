@@ -198,8 +198,11 @@ def test_the_real_credential_never_crosses_back_into_the_guest(session, store, r
 def test_the_capability_store_holds_references_not_secrets(store, github_capability):
     """There is no "get secret" surface: a capability names where to look."""
     _, cap = github_capability
-    assert set(cap.secret.to_dict()) == {"backend", "service", "account"}
+    # Every field is a *pointer* - which backend, which entry, which database.
+    # None of them can hold credential material.
+    assert set(cap.secret.to_dict()) == {"backend", "service", "account", "store"}
     assert SECRET not in store.path.read_text()
+    assert SECRET not in json.dumps(cap.secret.to_dict())
 
 
 def test_the_broker_protocol_can_only_ask_for_an_operation():

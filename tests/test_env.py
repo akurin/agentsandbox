@@ -382,3 +382,44 @@ def test_a_supervisor_that_never_signals_times_out(tmp_path):
 
     with pytest.raises(StartupFailed, match="did not come up"):
         spawn_supervisor(run, log_path=tmp_path / "sup.log", ready_timeout=1)
+
+
+def test_starting_an_already_running_environment_is_refused(project, capsys, monkeypatch):
+    """Two guests would share one disk; vfkit's own error explains nothing."""
+    import os
+
+    from agentsandbox.manager import SessionManager
+    from agentsandbox.session import STATE_RUNNING
+
+    cli.main(["create", "neo", "--project", str(project)])
+    capsys.readouterr()
+
+    manager = SessionManager.create(allow_hosts=["*"], env_name="neo")
+    manager.session.state = STATE_RUNNING
+    manager.session.supervisor_pid = os.getpid()  # alive
+    manager.session.save()
+
+    assert cli.main(["start", "neo"]) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "already running" in err
+    assert "asbx shell neo" in err
+
+
+def test_a_crashed_supervisor_does_not_block_the_environment(project, capsys):
+    """A session left marked RUNNING by a crash must not wedge it forever."""
+    from agentsandbox.cli import _running_session_for
+    from agentsandbox.manager import SessionManager
+    from agentsandbox.session import STATE_RUNNING, Session
+
+    cli.main(["create", "neo", "--project", str(project)])
+    capsys.readouterr()
+
+    manager = SessionManager.create(allow_hosts=["*"], env_name="neo")
+    manager.session.state = STATE_RUNNING
+    manager.session.supervisor_pid = 999999  # long gone
+    manager.session.vm_pid = 0
+    manager.session.save()
+
+    assert _running_session_for("neo") is None
+    # ...and the stale record is corrected rather than left to confuse.
+    assert Session.load(manager.session.session_id).state != STATE_RUNNING

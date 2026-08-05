@@ -98,6 +98,12 @@ class _Handler(socketserver.BaseRequestHandler):
                     )
                     return
 
+                # Control messages: the operator asking the broker to do
+                # something, rather than the guest asking for an operation.
+                if command := message.get("command"):
+                    _send_frame(sock, self.server.handle_command(command).encode())
+                    continue
+
                 try:
                     request = BrokerRequest.from_dict(message["request"])
                 except (KeyError, TypeError, ValueError):
@@ -139,6 +145,24 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
         finally:
             os.umask(old_umask)
 
+    def handle_command(self, command: str) -> str:
+        """Operator commands, arriving over the same authenticated socket.
+
+        Only ``refresh-secrets`` for now: it drops the broker's cached
+        credentials so the next brokered request re-reads them. The operator
+        runs `asbx secret refresh` while present, which unlocks the store
+        again; this is what lets a rotated credential land without restarting
+        an environment that has been running for days.
+        """
+        if command == "refresh-secrets":
+            resolver = getattr(self.core, "resolver", None)
+            if resolver is None or not hasattr(resolver, "clear_cache"):
+                return json.dumps({"ok": False, "error": "no resolver to refresh"})
+            resolver.clear_cache()
+            self.audit.emit("secrets.refreshed")
+            return json.dumps({"ok": True, "message": "cached credentials dropped"})
+        return json.dumps({"ok": False, "error": f"unknown command {command!r}"})
+
     def serve_in_thread(self) -> threading.Thread:
         thread = threading.Thread(target=self.serve_forever, name="broker", daemon=True)
         thread.start()
@@ -150,6 +174,21 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
             self.socket_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def send_command(socket_path: Path, token: str, command: str, timeout: float = 30.0) -> dict:
+    """Send one control message to a running broker and return its answer."""
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(str(socket_path))
+    except OSError as exc:
+        raise BrokerError(f"broker unavailable at {socket_path}: {exc.strerror}") from exc
+    try:
+        _send_frame(sock, json.dumps({"token": token, "command": command}).encode())
+        return json.loads(_recv_frame(sock))
+    finally:
+        sock.close()
 
 
 class BrokerClientProtocol:
