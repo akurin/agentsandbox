@@ -1,7 +1,11 @@
 """Capability profiles: declare once, issue many."""
 import json
+import re
+from pathlib import Path
+
 import pytest
 from agentsandbox.errors import CapabilityError
+from agentsandbox import profiles
 from agentsandbox.profiles import load_profile, resolve_profile, list_profiles
 
 @pytest.fixture
@@ -180,3 +184,50 @@ def test_a_capability_can_override_the_profile_store(profile_dir):
     specs = load_profile(resolve_profile("neo"))
     assert specs[0].secret.store == "~/.password-store-neo"
     assert specs[1].secret.store == "~/.password-store"
+
+
+@pytest.mark.parametrize(
+    "name", [p.stem for p in (Path(profiles.__file__).parent / "_profiles").glob("*.json")]
+)
+def test_every_shipped_profile_loads(name):
+    """A shipped example that does not parse is worse than none: it is the
+    thing people copy."""
+    specs = load_profile(resolve_profile(name))
+    assert specs
+    for spec in specs:
+        assert spec.hosts and spec.provider
+        spec.injection.validate()
+
+
+def test_a_profile_capability_does_not_expire_by_default():
+    """profiles.py had its own hardcoded 3600 and kept it when the default
+    changed, so every profile-issued capability still expired after an hour -
+    which is every capability anyone actually uses."""
+    from agentsandbox.config import DEFAULT_TTL_SECONDS
+
+    for spec in load_profile(resolve_profile("example")):
+        if spec.provider == "internal-api":
+            assert spec.ttl_seconds == 1800  # explicit, and honoured
+        else:
+            assert spec.ttl_seconds == DEFAULT_TTL_SECONDS == 0
+
+
+def test_no_module_hardcodes_a_default_that_config_owns():
+    """The same constant in two places is how the TTL change missed profiles.
+
+    cli.py and profiles.py both had their own copies of 3600. Both now import
+    from config; this keeps a third from appearing.
+    """
+    import agentsandbox
+
+    root = Path(agentsandbox.__file__).parent
+    offenders = []
+    for path in root.rglob("*.py"):
+        if path.name == "config.py":
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if re.search(r"\b(ttl|max_response_bytes)\w*\s*=.*\b(3600|8 \* 1024 \* 1024)\b", line):
+                offenders.append(f"{path.name}:{number}: {line.strip()}")
+    assert not offenders, "\n".join(offenders)

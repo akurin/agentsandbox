@@ -144,28 +144,38 @@ cat >"$IMAGES_DIR/$IMAGE_NAME.json" <<EOF
 }
 EOF
 
+# No backticks anywhere below: this heredoc is unquoted, because it has to
+# expand $IMAGE_NAME, and in an unquoted heredoc a backtick runs a command.
+# One of them here used to say 'asbx reset' in prose, which meant printing
+# this banner executed it - and the reader saw a sentence with a hole in it
+# where the command name should have been.
 cat <<EOF
 
 ==> image ready: $IMAGE_NAME ($DISTRO, $IMAGE_SIZE)
     $GOLDEN
 
-    Boxes clone it with \`cp -c\` (APFS copy-on-write), so this file is
-    never written to and every clone starts from the same known state.
+    Nothing uses it yet. Building an image never changes an existing box:
+    each box records the image it was created with, and reset re-clones that
+    one, not whatever was built most recently.
 
-    NEXT, and not optional:
+    1. Prepare it (required - installs the tunnel's packages):
 
-        ASBX_IMAGE_NAME=$IMAGE_NAME ./vm/prepare-image.sh
+           ASBX_IMAGE_NAME=$IMAGE_NAME ./vm/prepare-image.sh
 
-    Then use it:
+    2. Use it, either in a new box:
 
-        asbx create NAME --project DIR --image $IMAGE_NAME   for a new one
-        asbx set NAME --image $IMAGE_NAME && asbx reset NAME  for an existing one
+           asbx create NAME --project DIR --image $IMAGE_NAME
 
-    Only boxes naming this image are affected. Existing boxes keep the image
-    they were created with until you change it - `asbx reset` re-clones from
-    whatever the box names, not from whatever was built most recently.
+       or by moving an existing one, which rebuilds its disk from scratch
+       and discards everything installed inside the guest:
 
-    prepare-image.sh boots the image once with ordinary networking to install
-    wireguard-tools, nftables and socat. A session's guest can only reach the
-    WireGuard endpoint, so it cannot install those for itself.
+           asbx set NAME --image $IMAGE_NAME
+           asbx reset NAME
+
+    The prepare step boots the image once with ordinary networking to install
+    wireguard-tools, nftables and socat. A guest can only reach the WireGuard
+    endpoint, so it can never install those for itself.
+
+    The image is cloned with cp -c (APFS copy-on-write), so it is never
+    written to and every box starts from the same known state.
 EOF

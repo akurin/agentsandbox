@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from .capabilities import CapabilitySpec, InjectionSpec, SecretRef
+from .config import DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
 from .errors import CapabilityError
 
 
@@ -156,8 +157,8 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
         operations=_as_list(entry.get("operations", [])),
         secret=secret,
         injection=injection,
-        ttl_seconds=int(entry.get("ttl", 3600)),
-        max_response_bytes=int(entry.get("max_response_bytes", 8 * 1024 * 1024)),
+        ttl_seconds=int(entry.get("ttl", DEFAULT_TTL_SECONDS)),
+        max_response_bytes=int(entry.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)),
         approval_required_methods=entry.get("approve_methods"),
         label=str(entry.get("label", "")),
         env_var=str(entry.get("env", "")),

@@ -1,22 +1,55 @@
 {
+  "_comment": "Example profile showing every option. Copy to ~/.config/asbx/profiles/ and edit - real hosts and secret paths belong there, not in version control. `asbx profile show NAME` prints what a profile resolves to.",
+
   "version": 1,
+
+  "_comment_env": "Non-secret values delivered to the guest as environment variables, alongside the capability placeholders. Base URLs and usernames go here; credentials never do.",
+  "env": {
+    "GITHUB_API": "https://api.github.com"
+  },
+
   "capabilities": [
     {
+      "_comment": "Read-only, so nothing needs approval: GET and HEAD are not in the default approval list.",
       "provider": "github",
+      "label": "read repos",
       "env": "GITHUB_TOKEN",
       "hosts": ["api.github.com"],
       "methods": ["GET", "HEAD"],
       "paths": ["/repos/*", "/user"],
-      "secret": "keychain:asbx-github:me",
-      "label": "read repos"
+      "secret": "pass:github/read-only-token"
     },
+
     {
+      "_comment_approve": "POST is a *read* for this API - it is how a prompt is sent. Without approve_methods: [] the default would put every completion behind an operator prompt, and with the default deny mode that means every call fails. Spending money unattended is a real decision, so make it deliberately rather than by omission.",
       "provider": "openai",
+      "label": "completions",
       "env": "OPENAI_API_KEY",
       "hosts": ["api.openai.com"],
       "methods": ["POST"],
-      "paths": ["/*"],
+      "paths": ["/v1/chat/completions", "/v1/embeddings"],
+      "approve_methods": [],
       "secret": "keychain:asbx-openai:default"
+    },
+
+    {
+      "_comment_deny": "deny_paths is checked before paths, so a broad allow can keep a few endpoints out of reach. Use it where an API mixes routine and destructive operations under one prefix.",
+      "_comment_ttl": "ttl is in seconds, and 0 - the default - means the capability never expires, because an agent may run for days. Set it only for a grant meant to lapse on its own; extend one with `asbx cap renew`.",
+      "provider": "internal-api",
+      "label": "deploy tooling",
+      "env": "INTERNAL_TOKEN",
+      "hosts": ["api.internal.example.com"],
+      "methods": ["GET", "POST", "DELETE"],
+      "paths": ["/v1/*"],
+      "deny_paths": ["/v1/admin/*", "/v1/*/purge"],
+      "approve_methods": ["DELETE"],
+      "ttl": 1800,
+      "secret": "pass:internal/deploy-token",
+      "injection": {
+        "kind": "header",
+        "header": "X-Api-Key",
+        "template": "{secret}"
+      }
     }
   ]
 }
