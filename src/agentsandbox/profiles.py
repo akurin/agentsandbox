@@ -97,7 +97,7 @@ def load_profile(path: Path) -> list[CapabilitySpec]:
 
 
 def load_profile_env(path: Path) -> dict[str, str]:
-    """Non-secret environment the profile wants in the guest.
+    """Non-secret box the profile wants in the guest.
 
     A base URL or a username is configuration, not a credential - it has no
     business going through the broker, and the agent needs it to build the

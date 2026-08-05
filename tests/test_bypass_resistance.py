@@ -252,9 +252,9 @@ def test_redirects_cannot_carry_the_credential_off_origin(policy):
 def test_package_scripts_cannot_read_the_agents_capabilities(session, tmp_path):
     """"Untrusted package scripts cannot access agent capabilities by default.\"
 
-    Enforced in the guest bootstrap: the capability environment file is 0600
+    Enforced in the guest bootstrap: the capability box file is 0600
     owned by ``agent``, and ``asbx-run-untrusted`` drops to ``builder`` with a
-    scrubbed environment.
+    scrubbed box.
     """
     from agentsandbox.vm.cloudinit import GUEST_DIR
 

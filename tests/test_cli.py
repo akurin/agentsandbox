@@ -40,7 +40,7 @@ def test_hidden_commands_stay_out_of_help_entirely():
 
 def test_set_is_reachable_and_wired_up():
     args = cli.build_parser().parse_args(["set", "neo", "--memory", "8192"])
-    assert args.func is cli.cmd_env_set
+    assert args.func is cli.cmd_box_set
     assert args.name == "neo"
     assert args.memory == 8192
 
@@ -58,7 +58,7 @@ def _build_image(name: str, distro: str, *, prepared: bool = True) -> None:
 
 
 def test_doctor_lists_every_built_image_with_its_distro():
-    """Which distro is in play is a property of the image an environment
+    """Which distro is in play is a property of the image a box
     names, so doctor lists what exists rather than asserting one answer."""
     _build_image("ubuntu-24.04", "ubuntu")
     described = " ".join(cli._describe_images())
@@ -83,46 +83,46 @@ def test_doctor_says_so_when_nothing_is_built():
 
 def test_an_environment_records_the_image_it_was_created_with():
     """The point of the whole thing: `asbx reset` must rebuild from the image
-    the environment was created with, not from whatever was built last."""
-    from agentsandbox.env import Environment
+    the box was created with, not from whatever was built last."""
+    from agentsandbox.box import Box
 
     _build_image("ubuntu-24.04", "ubuntu")
     assert cli.main(["create", "on-ubuntu", "--image", "ubuntu-24.04"]) == 0
-    assert Environment.load("on-ubuntu").image == "ubuntu-24.04"
+    assert Box.load("on-ubuntu").image == "ubuntu-24.04"
 
     # Building another image later must not move it.
     _build_image("debian-14", "debian")
-    assert Environment.load("on-ubuntu").image == "ubuntu-24.04"
+    assert Box.load("on-ubuntu").image == "ubuntu-24.04"
 
 
 def test_two_environments_can_run_different_images():
-    from agentsandbox.env import Environment
+    from agentsandbox.box import Box
 
     _build_image("ubuntu-24.04", "ubuntu")
-    assert cli.main(["create", "env-deb"]) == 0
-    assert cli.main(["create", "env-ubu", "--image", "ubuntu-24.04"]) == 0
-    assert Environment.load("env-deb").image == "debian-13"
-    assert Environment.load("env-ubu").image == "ubuntu-24.04"
+    assert cli.main(["create", "box-deb"]) == 0
+    assert cli.main(["create", "box-ubu", "--image", "ubuntu-24.04"]) == 0
+    assert Box.load("box-deb").image == "debian-13"
+    assert Box.load("box-ubu").image == "ubuntu-24.04"
 
 
 def test_creating_on_an_image_that_does_not_exist_is_refused():
     """Otherwise it looks fine until the first start, which fails in vfkit."""
     assert cli.main(["create", "doomed", "--image", "no-such-image"]) == cli.EXIT_USAGE
-    from agentsandbox.env import Environment
+    from agentsandbox.box import Box
 
-    assert not Environment.exists("doomed")
+    assert not Box.exists("doomed")
 
 
 def test_an_environment_created_before_images_were_named_still_starts(asbx_home):
-    """Hosts built earlier have an unnamed images/golden.raw and environments
+    """Hosts built earlier have an unnamed images/golden.raw and boxes
     with no image field. Both must keep working."""
-    from agentsandbox.env import Environment
+    from agentsandbox.box import Box
     from agentsandbox.vm.vfkit import DEFAULT_IMAGE, image_path, resolve_image
 
     image_path(DEFAULT_IMAGE).unlink()
     legacy = asbx_home / "images" / "golden.raw"
     legacy.write_bytes(b"not a real disk")
 
-    env = Environment.from_dict({"name": "old"})  # no image key at all
-    assert env.image == DEFAULT_IMAGE
-    assert resolve_image(env.image) == legacy
+    box = Box.from_dict({"name": "old"})  # no image key at all
+    assert box.image == DEFAULT_IMAGE
+    assert resolve_image(box.image) == legacy

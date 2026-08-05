@@ -63,7 +63,7 @@ def short_id(token_hash_hex: str) -> str:
 class SecretRef:
     """Where the *real* credential lives. Never the credential itself."""
 
-    backend: str = "keychain"  # keychain | pass | env | file
+    backend: str = "keychain"  # keychain | pass | box | file
     service: str = ""
     account: str = ""
     #: Which store to look in, when the backend has more than one. For ``pass``
@@ -274,7 +274,7 @@ class CapabilitySpec:
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
     approval_required_methods: list[str] | None = None
     label: str = ""
-    #: Environment variable the placeholder is delivered as inside the guest,
+    #: Box variable the placeholder is delivered as inside the guest,
     #: e.g. ``GITHUB_TOKEN``. Without this the operator has to copy the
     #: placeholder by hand, and it changes every session.
     env_var: str = ""

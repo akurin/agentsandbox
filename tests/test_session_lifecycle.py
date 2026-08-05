@@ -170,7 +170,7 @@ def test_in_process_client_matches_the_core(broker, github_capability):
 
 def test_unix_transport_round_trip(tmp_path, session, broker, github_capability):
     if not unix_sockets_available(tmp_path):
-        pytest.skip("outbound unix sockets are blocked in this environment")
+        pytest.skip("outbound unix sockets are blocked in this box")
 
     token_path = session.paths.broker_token
     token = issue_token(token_path)

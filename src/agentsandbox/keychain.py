@@ -170,7 +170,7 @@ class EnvProvider(SecretProvider):
         name = ref.service or ref.account
         value = os.environ.get(name)
         if not value:
-            raise BrokerError(f"environment secret {name!r} is not set")
+            raise BrokerError(f"env secret {name!r} is not set")
         redactor.register_secret(value)
         return value
 

@@ -60,9 +60,9 @@ def images_dir() -> Path:
 DEFAULT_IMAGE = "debian-13"
 
 #: Where images lived before they were named. A single mutable file meant
-#: rebuilding it silently rebased every environment, and `asbx reset` gave you
+#: rebuilding it silently rebased every box, and `asbx reset` gave you
 #: whatever distro had been built most recently rather than the one the
-#: environment was created with. Named images fix that; this constant only
+#: box was created with. Named images fix that; this constant only
 #: exists so hosts built before the change keep working.
 LEGACY_IMAGE = "golden.raw"
 
@@ -76,10 +76,10 @@ def image_metadata_path(name: str) -> Path:
 
 
 def resolve_image(name: str) -> Path:
-    """Find the disk image an environment names.
+    """Find the disk image a box names.
 
     Falls back to the legacy unnamed image for the default name, so an
-    environment created before images were named still starts. The fallback is
+    box created before images were named still starts. The fallback is
     read-only - nothing is moved or rewritten behind the operator's back.
     """
     path = image_path(name)
@@ -126,11 +126,11 @@ class VmConfig:
     shares: list[Share] = field(default_factory=list)
     #: Guest vsock ports to bridge for forwards: {guest_port: unix socket path}
     vsock_ports: dict[int, Path] = field(default_factory=dict)
-    #: ``{ENV_VAR: placeholder}`` delivered to the agent as environment.
+    #: ``{ENV_VAR: placeholder}`` delivered to the agent as environment variables.
     #: Placeholders, never credentials - they are useless outside this session.
     capability_env: dict[str, str] = field(default_factory=dict)
     #: When set, boot this disk instead of a per-session clone, and keep it on
-    #: teardown. This is what makes an environment's packages survive.
+    #: teardown. This is what makes a box's packages survive.
     disk_override: Path | None = None
     efi_override: Path | None = None
     persist_disk: bool = False
@@ -205,7 +205,7 @@ class VfkitDriver:
     def provision_disk(self) -> Path:
         """Make sure a disk exists to boot from.
 
-        For a persistent environment the disk is reused as-is; the guest's
+        For a persistent box the disk is reused as-is; the guest's
         packages and caches are the whole point of keeping it. Otherwise the
         golden image is cloned with ``cp -c`` (an APFS copy-on-write clone -
         instant, and free until the guest writes).
@@ -425,7 +425,7 @@ class VfkitDriver:
             self.audit.emit("vm.stopped", **stats)
 
     def destroy(self) -> None:
-        """Stop the guest, and remove its disk unless it belongs to an environment."""
+        """Stop the guest, and remove its disk unless it belongs to a box."""
         self.stop()
         if self.vm.persist_disk:
             # The disk outlives the session by design; the identity and the

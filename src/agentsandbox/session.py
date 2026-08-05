@@ -57,8 +57,8 @@ class Session:
     wg_listen_host: str = "127.0.0.1"
     wg_listen_port: int = 51820
 
-    #: Environment this run belongs to, if any. Anonymous sessions have none.
-    env_name: str = ""
+    #: Box this run belongs to, if any. Anonymous sessions have none.
+    box_name: str = ""
     #: Host directory mounted into the guest, if any.
     project_path: str = ""
     #: Where the project share mounts inside the guest. Defaults to the host

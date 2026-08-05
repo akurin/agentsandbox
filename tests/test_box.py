@@ -1,6 +1,6 @@
-"""Environments: the long-lived half of the model.
+"""Boxes: the long-lived half of the model.
 
-An environment keeps a disk between runs; a session keeps an identity and a
+A box keeps a disk between runs; a session keeps an identity and a
 set of capabilities that die with it. These tests pin that split, because
 getting it wrong in either direction is a security or a usability bug.
 """
@@ -12,7 +12,7 @@ import time
 import pytest
 
 from agentsandbox import cli
-from agentsandbox.env import Environment, default_env_name, list_environments, validate_name
+from agentsandbox.box import Box, default_box_name, list_boxes, validate_name
 from agentsandbox.errors import SessionError
 from agentsandbox.session import Share
 
@@ -28,8 +28,8 @@ def project(tmp_path):
 # -- the model ---------------------------------------------------------------
 
 
-def test_an_environment_round_trips(project):
-    env = Environment(
+def test_a_box_round_trips(project):
+    box = Box(
         name="neo",
         project_path=str(project),
         profile="myprofile",
@@ -37,9 +37,9 @@ def test_an_environment_round_trips(project):
         shares=[Share(path=str(project), tag="extra", read_only=True)],
         cpus=4,
     )
-    env.save()
+    box.save()
 
-    loaded = Environment.load("neo")
+    loaded = Box.load("neo")
     assert loaded.project_path == str(project)
     assert loaded.profile == "myprofile"
     assert loaded.allow_hosts == ["api.github.com"]
@@ -47,57 +47,57 @@ def test_an_environment_round_trips(project):
     assert loaded.shares[0].tag == "extra"
 
 
-def test_environment_names_are_constrained():
+def test_box_names_are_constrained():
     assert validate_name("My-Env_1") == "my-env_1"
     for bad in ("", "has space", "slash/es", "dots.dots"):
         with pytest.raises(SessionError):
             validate_name(bad)
 
 
-def test_a_missing_environment_names_the_ones_that_exist():
-    Environment(name="alpha").save()
-    Environment(name="beta").save()
+def test_a_missing_box_names_the_ones_that_exist():
+    Box(name="alpha").save()
+    Box(name="beta").save()
     with pytest.raises(SessionError) as exc:
-        Environment.load("gamma")
+        Box.load("gamma")
     assert "alpha" in str(exc.value) and "beta" in str(exc.value)
 
 
 def test_default_name_comes_from_the_directory(tmp_path):
-    assert default_env_name(tmp_path / "my-project") == "my-project"
+    assert default_box_name(tmp_path / "my-project") == "my-project"
     # Anything unusable becomes a dash, and trailing dashes are trimmed.
-    assert default_env_name(tmp_path / "Weird Name!") == "weird-name"
+    assert default_box_name(tmp_path / "Weird Name!") == "weird-name"
 
 
 def test_rm_takes_the_disk_with_it(project):
-    env = Environment(name="neo", project_path=str(project))
-    env.save()
-    env.disk_path.write_bytes(b"disk")
-    assert env.has_disk
+    box = Box(name="neo", project_path=str(project))
+    box.save()
+    box.disk_path.write_bytes(b"disk")
+    assert box.has_disk
 
-    env.delete()
-    assert not env.disk_path.exists()
-    assert not env.config_path.exists()
+    box.delete()
+    assert not box.disk_path.exists()
+    assert not box.config_path.exists()
 
 
 def test_rm_can_keep_the_disk(project):
-    env = Environment(name="neo")
-    env.save()
-    env.disk_path.write_bytes(b"disk")
+    box = Box(name="neo")
+    box.save()
+    box.disk_path.write_bytes(b"disk")
 
-    env.delete(keep_disk=True)
-    assert env.disk_path.exists()
-    assert not env.config_path.exists()
-    env.disk_path.unlink()
+    box.delete(keep_disk=True)
+    assert box.disk_path.exists()
+    assert not box.config_path.exists()
+    box.disk_path.unlink()
 
 
 def test_reset_drops_the_disk_but_keeps_the_config(project):
-    env = Environment(name="neo", project_path=str(project))
-    env.save()
-    env.disk_path.write_bytes(b"disk")
+    box = Box(name="neo", project_path=str(project))
+    box.save()
+    box.disk_path.write_bytes(b"disk")
 
-    env.remove_disk()
-    assert not env.has_disk
-    assert Environment.load("neo").project_path == str(project)
+    box.remove_disk()
+    assert not box.has_disk
+    assert Box.load("neo").project_path == str(project)
 
 
 # -- what persists, and what must not ----------------------------------------
@@ -108,22 +108,22 @@ def test_the_disk_survives_a_session_but_the_identity_does_not(project, monkeypa
     from agentsandbox.manager import SessionManager
     from agentsandbox.vm.vfkit import VfkitDriver, VmConfig
 
-    env = Environment(name="neo", project_path=str(project))
-    env.save()
-    env.disk_path.write_bytes(b"pretend this is a built disk")
+    box = Box(name="neo", project_path=str(project))
+    box.save()
+    box.disk_path.write_bytes(b"pretend this is a built disk")
 
-    first = SessionManager.create(allow_hosts=["*"], project=project, env_name="neo")
+    first = SessionManager.create(allow_hosts=["*"], project=project, box_name="neo")
     driver = VfkitDriver(
         first.session,
-        VmConfig(disk_override=env.disk_path, efi_override=env.efi_store, persist_disk=True),
+        VmConfig(disk_override=box.disk_path, efi_override=box.efi_store, persist_disk=True),
     )
     driver.destroy()
 
     # The disk is still there for the next run...
-    assert env.disk_path.read_bytes() == b"pretend this is a built disk"
+    assert box.disk_path.read_bytes() == b"pretend this is a built disk"
 
     # ...but a second run gets a different tunnel identity.
-    second = SessionManager.create(allow_hosts=["*"], project=project, env_name="neo")
+    second = SessionManager.create(allow_hosts=["*"], project=project, box_name="neo")
     assert (
         first.session.paths.wireguard_conf.read_text()
         != second.session.paths.wireguard_conf.read_text()
@@ -131,7 +131,7 @@ def test_the_disk_survives_a_session_but_the_identity_does_not(project, monkeypa
 
 
 def test_an_anonymous_session_still_throws_its_disk_away(session, tmp_path):
-    """Without an environment, teardown must delete everything as before."""
+    """Without a box, teardown must delete everything as before."""
     from agentsandbox.vm.vfkit import VfkitDriver, VmConfig
 
     driver = VfkitDriver(session, VmConfig(persist_disk=False))
@@ -143,7 +143,7 @@ def test_an_anonymous_session_still_throws_its_disk_away(session, tmp_path):
 
 
 def test_a_persistent_disk_is_not_reclaimed_from_golden(session, tmp_path):
-    """An existing environment disk is booted as-is, packages and all."""
+    """An existing box disk is booted as-is, packages and all."""
     from agentsandbox.vm.vfkit import VfkitDriver, VmConfig
 
     disk = tmp_path / "neo.raw"
@@ -174,7 +174,7 @@ def test_cli_create_inspect_and_rm(project, capsys):
 
     assert cli.main(["rm", "neo"]) == 0
     capsys.readouterr()
-    assert list_environments() == []
+    assert list_boxes() == []
 
 
 def test_cli_create_refuses_to_clobber(project, capsys):
@@ -194,7 +194,7 @@ def test_cli_ls_reports_build_state(project, capsys):
     assert cli.main(["ls"]) == 0
     assert "not built" in capsys.readouterr().out
 
-    Environment.load("neo").disk_path.write_bytes(b"x")
+    Box.load("neo").disk_path.write_bytes(b"x")
     assert cli.main(["ls"]) == 0
     assert "stopped" in capsys.readouterr().out
 
@@ -207,13 +207,13 @@ def test_cli_ls_with_nothing_suggests_create(capsys):
 # -- ssh access --------------------------------------------------------------
 
 
-def test_each_environment_gets_its_own_keys(project):
-    """One environment's key must not open another's guest."""
-    from agentsandbox.env import SshIdentity
+def test_each_box_gets_its_own_keys(project):
+    """One box's key must not open another's guest."""
+    from agentsandbox.box import SshIdentity
 
-    first = Environment(name="one")
+    first = Box(name="one")
     first.save()
-    second = Environment(name="two")
+    second = Box(name="two")
     second.save()
 
     a, b = SshIdentity(first.ssh_dir), SshIdentity(second.ssh_dir)
@@ -228,11 +228,11 @@ def test_each_environment_gets_its_own_keys(project):
 
 
 def test_key_generation_is_idempotent(project):
-    from agentsandbox.env import SshIdentity
+    from agentsandbox.box import SshIdentity
 
-    env = Environment(name="neo")
-    env.save()
-    identity = SshIdentity(env.ssh_dir)
+    box = Box(name="neo")
+    box.save()
+    identity = SshIdentity(box.ssh_dir)
     identity.generate("neo")
     original = identity.client_key.read_text()
 
@@ -242,11 +242,11 @@ def test_key_generation_is_idempotent(project):
 
 def test_the_ssh_config_pins_the_host_key(project):
     """No trust-on-first-use: a swapped guest must be refused, not accepted."""
-    from agentsandbox.env import SshIdentity
+    from agentsandbox.box import SshIdentity
 
-    env = Environment(name="neo")
-    env.save()
-    identity = SshIdentity(env.ssh_dir)
+    box = Box(name="neo")
+    box.save()
+    identity = SshIdentity(box.ssh_dir)
     identity.generate("neo")
     identity.write_client_config("neo", "/bin/true")
 
@@ -384,7 +384,7 @@ def test_a_supervisor_that_never_signals_times_out(tmp_path):
         spawn_supervisor(run, log_path=tmp_path / "sup.log", ready_timeout=1)
 
 
-def test_starting_an_already_running_environment_is_refused(project, capsys, monkeypatch):
+def test_starting_an_already_running_box_is_refused(project, capsys, monkeypatch):
     """Two guests would share one disk; vfkit's own error explains nothing."""
     import os
 
@@ -394,7 +394,7 @@ def test_starting_an_already_running_environment_is_refused(project, capsys, mon
     cli.main(["create", "neo", "--project", str(project)])
     capsys.readouterr()
 
-    manager = SessionManager.create(allow_hosts=["*"], env_name="neo")
+    manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
     manager.session.state = STATE_RUNNING
     manager.session.supervisor_pid = os.getpid()  # alive
     manager.session.save()
@@ -405,7 +405,7 @@ def test_starting_an_already_running_environment_is_refused(project, capsys, mon
     assert "asbx shell neo" in err
 
 
-def test_a_crashed_supervisor_does_not_block_the_environment(project, capsys):
+def test_a_crashed_supervisor_does_not_block_the_box(project, capsys):
     """A session left marked RUNNING by a crash must not wedge it forever."""
     from agentsandbox.cli import _running_session_for
     from agentsandbox.manager import SessionManager
@@ -414,7 +414,7 @@ def test_a_crashed_supervisor_does_not_block_the_environment(project, capsys):
     cli.main(["create", "neo", "--project", str(project)])
     capsys.readouterr()
 
-    manager = SessionManager.create(allow_hosts=["*"], env_name="neo")
+    manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
     manager.session.state = STATE_RUNNING
     manager.session.supervisor_pid = 999999  # long gone
     manager.session.vm_pid = 0
@@ -426,21 +426,21 @@ def test_a_crashed_supervisor_does_not_block_the_environment(project, capsys):
 
 
 def test_resizing_memory_does_not_touch_the_disk():
-    """The obvious worry about `asbx set --memory` is losing the environment.
+    """The obvious worry about `asbx set --memory` is losing the box.
 
     cpus and memory are vfkit boot arguments; the disk is a separate file, so
     the two cannot interact.
     """
-    env = Environment(name="resize-me", memory_mib=2048, cpus=2)
-    env.save()
-    env.disk_path.parent.mkdir(parents=True, exist_ok=True)
-    env.disk_path.write_bytes(b"pretend this is a root filesystem")
-    before = env.disk_path.read_bytes()
+    box = Box(name="resize-me", memory_mib=2048, cpus=2)
+    box.save()
+    box.disk_path.parent.mkdir(parents=True, exist_ok=True)
+    box.disk_path.write_bytes(b"pretend this is a root filesystem")
+    before = box.disk_path.read_bytes()
 
-    env.memory_mib = 8192
-    env.save()
+    box.memory_mib = 8192
+    box.save()
 
-    reloaded = Environment.load("resize-me")
+    reloaded = Box.load("resize-me")
     assert reloaded.memory_mib == 8192
     assert reloaded.cpus == 2
     assert reloaded.disk_path.read_bytes() == before
@@ -448,20 +448,20 @@ def test_resizing_memory_does_not_touch_the_disk():
 
 def test_the_rest_of_the_configuration_survives_a_resize():
     """A resize must not quietly reset anything else it did not ask about."""
-    env = Environment(
+    box = Box(
         name="keep-config",
         profile="wiremock",
         allow_hosts=["example.com"],
         approval_mode="file",
         project_path="/some/project",
     )
-    env.save()
+    box.save()
 
-    env = Environment.load("keep-config")
-    env.memory_mib = 4096
-    env.save()
+    box = Box.load("keep-config")
+    box.memory_mib = 4096
+    box.save()
 
-    reloaded = Environment.load("keep-config")
+    reloaded = Box.load("keep-config")
     assert reloaded.profile == "wiremock"
     assert reloaded.allow_hosts == ["example.com"]
     assert reloaded.approval_mode == "file"

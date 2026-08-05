@@ -34,7 +34,7 @@ trap 'rc=$?; log "FAILED at line $LINENO (exit $rc)"; exit $rc' ERR
 # checked rather than swallowed.
 CA_SRC=/usr/local/share/ca-certificates/asbx-session-ca.crt
 if [ -s "$CA_SRC" ]; then
-    # A stale CA from a previous run of this disk must go: environments reuse
+    # A stale CA from a previous run of this disk must go: boxes reuse
     # the disk but get a fresh CA every boot, so the old one is worthless and
     # its presence is confusing.
     find /etc/ssl/certs -name 'asbx-session-ca.pem' -delete 2>/dev/null || true
@@ -73,7 +73,7 @@ systemctl enable --now systemd-networkd >/dev/null 2>&1 || true
 systemctl enable --now nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
 
 log "bringing up the tunnel"
-# This script owns the tunnel's lifecycle, not systemd. On a reused environment
+# This script owns the tunnel's lifecycle, not systemd. On a reused box
 # disk an enabled wg-quick@wg0 unit would race us and bring wg0 up with the
 # previous run's config before cloud-init even starts.
 systemctl disable wg-quick@wg0.service >/dev/null 2>&1 || true

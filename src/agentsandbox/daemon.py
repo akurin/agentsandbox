@@ -1,6 +1,6 @@
 """Detaching the session supervisor, the way conmon does it for podman.
 
-There is no central asbx service. Each running environment has one supervisor
+There is no central asbx service. Each running box has one supervisor
 process that owns its guest: the vfkit child, the L2 gateway thread, the broker
 and the port forwards. The CLI forks it, the supervisor double-forks so it is
 re-parented away from the shell, and the CLI returns. Stopping is a signal to

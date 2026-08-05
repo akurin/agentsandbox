@@ -145,7 +145,7 @@ class MitmproxyProcess:
         env["ASBX_SESSION"] = self.session.session_id
         env["ASBX_HOME"] = str(home())
         # The addon imports agentsandbox; make sure it resolves even when
-        # mitmdump comes from a different environment.
+        # mitmdump comes from a different virtualenv.
         src_root = str(Path(__file__).resolve().parents[2])
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [src_root, env.get("PYTHONPATH", "")]))
 

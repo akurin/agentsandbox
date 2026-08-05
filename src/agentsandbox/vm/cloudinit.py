@@ -13,7 +13,7 @@ What the guest gets, and just as importantly what it does not:
   route out is the tunnel;
 * two accounts - ``agent`` runs the agent (with root in its own guest, which
   the host-side gateway makes harmless), and ``builder`` runs package installs
-  and tests with no access to the capability environment file.
+  and tests with no access to the capability box file.
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def render_user_data(
             "ExecStart=-/sbin/agetty --autologin agent --noclear %I 115200,38400,9600 vt220\n",
         ),
         _write_file("/etc/asbx/netcheck-mode", netcheck + "\n"),
-        # Capability placeholders, delivered as environment so the agent never
+        # Capability placeholders, delivered as environment variables so the agent never
         # hardcodes one. Readable by `agent` alone: `builder` (which runs
         # package installs) cannot see them. These are placeholders, not
         # credentials - they are worthless outside this session.
@@ -230,7 +230,7 @@ def render_user_data(
             },
             {
                 # Package installs and test runs happen here: no sudo, and no
-                # read access to the agent's capability environment file.
+                # read access to the agent's capability box file.
                 "name": "builder",
                 "shell": "/bin/bash",
                 "sudo": None,

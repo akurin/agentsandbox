@@ -73,8 +73,8 @@ def test_profiles_can_carry_non_secret_environment(profile_dir):
             {"provider": "wiremock", "hosts": ["wiremock.example.com"], "secret": "keychain:x:y"}
         ],
     }))
-    env = load_profile_env(resolve_profile("svc"))
-    assert env == {
+    box = load_profile_env(resolve_profile("svc"))
+    assert box == {
         "WIREMOCK_URL": "https://wiremock.example.com",
         "WIREMOCK_USER": "developer",
     }

@@ -1,13 +1,13 @@
 #!/bin/bash
-# Build a base disk image that environments clone from.
+# Build a base disk image that boxes clone from.
 #
 # Apple's Virtualization framework boots raw disks only, so this fetches a
 # cloud image, verifies it, converts it to raw and grows it. The result lands
 # in ~/.agentsandbox/images/<name>.raw and is read-only from then on: an
-# environment's disk is an APFS copy-on-write clone of it.
+# box's disk is an APFS copy-on-write clone of it.
 #
-# Images are named, and each environment records the one it was created with,
-# so building a new image never changes what an existing environment resets to.
+# Images are named, and each box records the one it was created with,
+# so building a new image never changes what an existing box resets to.
 #
 #   ./vm/build-image.sh                       # debian 13 arm64, the default
 #   ASBX_DISTRO=ubuntu ./vm/build-image.sh    # ubuntu 24.04 LTS arm64
@@ -55,8 +55,8 @@ IMAGE_URL="${ASBX_IMAGE_URL:-$DEFAULT_URL}"
 IMAGE_SHA_URL="${ASBX_IMAGE_SHA_URL:-$DEFAULT_SHA_URL}"
 IMAGE_SHA_ALGO="${ASBX_IMAGE_SHA_ALGO:-$DEFAULT_ALGO}"
 
-# Images are named, and environments record which one they were built from, so
-# rebuilding one distro cannot silently rebase environments on another.
+# Images are named, and boxes record which one they were built from, so
+# rebuilding one distro cannot silently rebase boxes onto another.
 IMAGE_NAME="${ASBX_IMAGE_NAME:-${DEFAULT_NAME:-$DISTRO}}"
 GOLDEN="$IMAGES_DIR/$IMAGE_NAME.raw"
 
@@ -140,9 +140,9 @@ cat <<EOF
         asbx create NAME --project DIR --image $IMAGE_NAME   for a new one
         asbx set NAME --image $IMAGE_NAME && asbx reset NAME  for an existing one
 
-    Only environments naming this image are affected. Existing environments
+    Only boxes naming this image are affected. Existing boxes
     keep the image they were created with until you change it - `asbx reset`
-    re-clones from whatever the environment names, not from whatever was
+    re-clones from whatever the box names, not from whatever was
     built most recently.
 
     prepare-image.sh boots the image once with ordinary networking to install

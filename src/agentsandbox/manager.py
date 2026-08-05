@@ -84,7 +84,7 @@ class SessionManager:
         shares: list[Share] | None = None,
         wg_listen_host: str = "127.0.0.1",
         wg_listen_port: int | None = None,
-        env_name: str = "",
+        box_name: str = "",
     ) -> SessionManager:
         """Mint a session: fresh identity, fresh CA, direct project mount."""
         project_shares = list(shares or [])
@@ -98,7 +98,7 @@ class SessionManager:
 
         session = Session(
             session_id=new_session_id(),
-            env_name=env_name,
+            box_name=box_name,
             label=label,
             policy=DestinationPolicy(allow_hosts=list(allow_hosts or ["*"])),
             approval_mode=approval_mode,
@@ -592,7 +592,7 @@ def check_ipc() -> list[str]:
     return problems
 
 
-def check_environment() -> list[str]:
+def check_host() -> list[str]:
     """Preflight: report what is missing before a session is attempted."""
     problems: list[str] = []
     from .proxy.launcher import mitmdump_path

@@ -152,7 +152,7 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
         credentials so the next brokered request re-reads them. The operator
         runs `asbx secret refresh` while present, which unlocks the store
         again; this is what lets a rotated credential land without restarting
-        an environment that has been running for days.
+        a box that has been running for days.
         """
         if command == "refresh-secrets":
             resolver = getattr(self.core, "resolver", None)

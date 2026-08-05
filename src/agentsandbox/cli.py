@@ -25,7 +25,7 @@ from .capabilities import CapabilitySpec, CapabilityStore, InjectionSpec, Secret
 from .config import DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
 from .errors import SandboxError
 from .keychain import KeychainProvider
-from .manager import SessionManager, check_environment, stop_session_by_id
+from .manager import SessionManager, check_host, stop_session_by_id
 from .session import STATE_STOPPED, Session, Share, list_sessions, resolve_session_id
 from .vm.vfkit import DEFAULT_IMAGE, VmConfig, default_golden_image, resolve_image
 
@@ -101,53 +101,53 @@ def _parse_secret_ref(value: str) -> SecretRef:
 # session
 
 
-def cmd_env_start(args: argparse.Namespace) -> int:
-    """Boot an environment: fresh identity and capabilities, existing disk."""
-    from .env import Environment
+def cmd_box_start(args: argparse.Namespace) -> int:
+    """Boot a box: fresh identity and capabilities, existing disk."""
+    from .box import Box
 
-    env = Environment.load(args.name)
+    box = Box.load(args.name)
 
-    # One guest per environment: they share a disk, and a second vfkit opening
+    # One guest per box: they share a disk, and a second vfkit opening
     # it fails deep inside Virtualization.framework with "the storage device
     # attachment is invalid", which says nothing about the real cause.
-    if existing := _running_session_for(env.name):
-        print(f"!! {env.name} is already running (session {existing.session_id})", file=sys.stderr)
-        print(f"   asbx shell {env.name}    open a shell in it", file=sys.stderr)
-        print(f"   asbx stop {env.name}     stop it first to restart", file=sys.stderr)
+    if existing := _running_session_for(box.name):
+        print(f"!! {box.name} is already running (session {existing.session_id})", file=sys.stderr)
+        print(f"   asbx shell {box.name}    open a shell in it", file=sys.stderr)
+        print(f"   asbx stop {box.name}     stop it first to restart", file=sys.stderr)
         return EXIT_USAGE
 
-    if args.fresh and env.has_disk:
-        env.remove_disk()
-        print(f"reset {env.name}'s disk")
+    if args.fresh and box.has_disk:
+        box.remove_disk()
+        print(f"reset {box.name}'s disk")
 
-    # Everything the environment holds becomes this run's session, except the
+    # Everything the box holds becomes this run's session, except the
     # things that must be new every time: keys, CA, capabilities.
-    args.allow = env.allow_hosts
-    args.project = env.project_path or None
-    args.mount_path = env.project_mount
-    args.share = list(env.shares)
-    args.profile = env.profile or None
-    args.approvals = env.approval_mode
-    args.cpus = env.cpus
-    args.memory = env.memory_mib
-    args.label = env.name
+    args.allow = box.allow_hosts
+    args.project = box.project_path or None
+    args.mount_path = box.project_mount
+    args.share = list(box.shares)
+    args.profile = box.profile or None
+    args.approvals = box.approval_mode
+    args.cpus = box.cpus
+    args.memory = box.memory_mib
+    args.label = box.name
     args.purge_on_stop = False
 
-    env.last_started = time.time()
-    env.save()
+    box.last_started = time.time()
+    box.save()
 
     if args.attach:
         # Foreground: this terminal owns the guest, and Ctrl-C stops it. Useful
         # when the guest is broken enough that ssh never comes up.
         args.console = True
-        return _start_session(args, env=env)
+        return _start_session(args, box=box)
 
     # Unlock every secret the profile needs while we still have a terminal,
     # and carry the loaded resolver across the fork. The supervisor has no
     # terminal, so a pinentry fired from there has nowhere to draw itself.
     resolver = None
-    if env.profile:
-        resolver, problem = _warm_secrets(env.profile)
+    if box.profile:
+        resolver, problem = _warm_secrets(box.profile)
         if problem:
             print(f"!! {problem}", file=sys.stderr)
             return EXIT_DENIED
@@ -159,15 +159,15 @@ def cmd_env_start(args: argparse.Namespace) -> int:
 
     try:
         spawn_supervisor(
-            lambda: _start_session(args, env=env, resolver=resolver),
-            log_path=envs_supervisor_log(env),
+            lambda: _start_session(args, box=box, resolver=resolver),
+            log_path=box_supervisor_log(box),
         )
     except StartupFailed as exc:
-        print(f"!! {env.name} failed to start: {exc}", file=sys.stderr)
-        print(f"   log: {envs_supervisor_log(env)}", file=sys.stderr)
+        print(f"!! {box.name} failed to start: {exc}", file=sys.stderr)
+        print(f"   log: {box_supervisor_log(box)}", file=sys.stderr)
         return 1
 
-    _report_started(env)
+    _report_started(box)
     return 0
 
 
@@ -206,8 +206,8 @@ def _warm_secrets(profile_name: str):
     return resolver, None
 
 
-def _running_session_for(env_name: str) -> Session | None:
-    """The live session for an environment, if there is one.
+def _running_session_for(box_name: str) -> Session | None:
+    """The live session for a box, if there is one.
 
     A session file can say RUNNING after a crash, so the supervisor's pid is
     what decides - otherwise a killed run would block every future start.
@@ -216,30 +216,30 @@ def _running_session_for(env_name: str) -> Session | None:
     from .session import STATE_RUNNING, STATE_STOPPED
 
     for session in list_sessions():
-        if session.env_name != env_name or session.state != STATE_RUNNING:
+        if session.box_name != box_name or session.state != STATE_RUNNING:
             continue
         if _is_alive(session.supervisor_pid) or _is_alive(session.vm_pid):
             return session
         # Stale: the supervisor died without tidying up. Record that rather
-        # than leaving a corpse that blocks the environment forever.
+        # than leaving a corpse that blocks the box forever.
         session.state = STATE_STOPPED
         session.save()
     return None
 
 
-def envs_supervisor_log(env) -> Path:
-    return env.ssh_dir.parent / f"{env.name}.log"
+def box_supervisor_log(box) -> Path:
+    return box.ssh_dir.parent / f"{box.name}.log"
 
 
-def _report_started(env) -> None:
-    """Summarise a detached environment, since its own output went to a log."""
+def _report_started(box) -> None:
+    """Summarise a detached box, since its own output went to a log."""
     from .session import STATE_RUNNING
 
     session = next(
-        (s for s in list_sessions() if s.env_name == env.name and s.state == STATE_RUNNING),
+        (s for s in list_sessions() if s.box_name == box.name and s.state == STATE_RUNNING),
         None,
     )
-    print(f"{env.name} started")
+    print(f"{box.name} started")
     if session is None:
         return
     print(f"  session    {session.session_id}")
@@ -250,28 +250,28 @@ def _report_started(env) -> None:
     caps = CapabilityStore(session.paths.capabilities, session.session_id).list()
     for cap in caps:
         print(f"  cap        {cap.cap_id}  {cap.provider} ({', '.join(cap.hosts)})")
-    if env.profile and not caps:
-        print(f"  !! profile {env.profile!r} issued no capabilities - see {envs_supervisor_log(env)}")
+    if box.profile and not caps:
+        print(f"  !! profile {box.profile!r} issued no capabilities - see {box_supervisor_log(box)}")
 
     for port, info in session.forwards.items():
         print(f"  forward    guest:{port} -> {info['url']}")
-    print(f"\n  asbx shell {env.name}      open a shell (as many as you like)")
-    print(f"  asbx stop {env.name}       shut it down")
+    print(f"\n  asbx shell {box.name}      open a shell (as many as you like)")
+    print(f"  asbx stop {box.name}       shut it down")
 
 
 def cmd_session_start(args: argparse.Namespace) -> int:
-    return _start_session(args, env=None)
+    return _start_session(args, box=None)
 
 
-def _ssh_vm_config(env, session) -> dict:
+def _ssh_vm_config(box, session) -> dict:
     """SSH key material for the guest, or nothing for an anonymous session."""
-    if env is None:
+    if box is None:
         return {}
-    from .env import SshIdentity
+    from .box import SshIdentity
 
-    identity = SshIdentity(env.ssh_dir)
+    identity = SshIdentity(box.ssh_dir)
     if not identity.exists:
-        identity.generate(env.name)
+        identity.generate(box.name)
     return {
         "ssh_host_key": identity.host_key.read_text(),
         "ssh_host_pub": identity.host_key.with_suffix(".pub").read_text(),
@@ -280,8 +280,8 @@ def _ssh_vm_config(env, session) -> dict:
     }
 
 
-def _start_session(args: argparse.Namespace, env=None, resolver=None) -> int:
-    problems = check_environment() if args.vm else []
+def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
+    problems = check_host() if args.vm else []
     if problems and args.vm:
         for problem in problems:
             print(f"!! {problem}", file=sys.stderr)
@@ -295,12 +295,12 @@ def _start_session(args: argparse.Namespace, env=None, resolver=None) -> int:
         label=args.label,
         approval_mode=args.approvals,
         shares=args.share or [],
-        env_name=env.name if env else "",
+        box_name=box.name if box else "",
     )
     session = manager.session
-    if env:
-        print(f"starting {env.name} (session {session.session_id})")
-        print(f"  disk       {env.disk_path}" + ("" if env.has_disk else " (building from golden)"))
+    if box:
+        print(f"starting {box.name} (session {session.session_id})")
+        print(f"  disk       {box.disk_path}" + ("" if box.has_disk else " (building from golden)"))
     else:
         print(f"session {session.session_id} created")
     if session.policy.allow_hosts == ["*"]:
@@ -314,7 +314,7 @@ def _start_session(args: argparse.Namespace, env=None, resolver=None) -> int:
         print(f"  share      {share.path} -> guest:/mnt/{share.tag} ({mode})")
 
     # Capabilities are minted before the guest boots so their placeholders can
-    # be delivered as environment in cloud-init, rather than pasted by hand.
+    # be delivered as environment variables in cloud-init, rather than pasted by hand.
     capability_env: dict[str, str] = {}
     if args.profile:
         from .profiles import load_profile, load_profile_env, resolve_profile
@@ -322,7 +322,7 @@ def _start_session(args: argparse.Namespace, env=None, resolver=None) -> int:
         profile_path = resolve_profile(args.profile)
         capability_env.update(load_profile_env(profile_path))
         for name in sorted(load_profile_env(profile_path)):
-            print(f"  env {name}")
+            print(f"  box {name}")
         for spec in load_profile(profile_path):
             token, cap = manager.issue_capability(spec)
             label = spec.label or spec.provider
@@ -331,7 +331,7 @@ def _start_session(args: argparse.Namespace, env=None, resolver=None) -> int:
                 capability_env[spec.env_var] = token
                 print(f"    guest env: ${spec.env_var}")
             else:
-                print(f"    placeholder: {token}  (add \"env\" to the profile to inject it)")
+                print(f"    placeholder: {token}  (add \"box\" to the profile to inject it)")
 
     vm_config = VmConfig(
         cpus=args.cpus,
@@ -340,18 +340,18 @@ def _start_session(args: argparse.Namespace, env=None, resolver=None) -> int:
         console="stdio" if args.console else "log",
         netcheck=args.netcheck,
         capability_env=capability_env,
-        # An environment boots its own disk and keeps it; an anonymous session
+        # A box boots its own disk and keeps it; an anonymous session
         # gets a throwaway clone.
-        disk_override=env.disk_path if env else None,
-        efi_override=env.efi_store if env else None,
-        persist_disk=bool(env),
-        # The environment names its own base image, so `asbx reset` rebuilds
+        disk_override=box.disk_path if box else None,
+        efi_override=box.efi_store if box else None,
+        persist_disk=bool(box),
+        # The box names its own base image, so `asbx reset` rebuilds
         # from what it was created with rather than from whatever was built
         # on this host most recently.
-        golden_image=resolve_image(env.image) if env else default_golden_image(),
-        # sshd only exists in an environment, where `asbx shell` needs it. A
+        golden_image=resolve_image(box.image) if box else default_golden_image(),
+        # sshd only exists in a box, where `asbx shell` needs it. A
         # one-off session keeps the smaller surface of console-only access.
-        **_ssh_vm_config(env, session),
+        **_ssh_vm_config(box, session),
     )
     dev_targets = dict(pair.split(":", 1) for pair in args.dev_target) if args.dev_target else {}
     dev_targets = {int(k): int(v) for k, v in dev_targets.items()}
@@ -728,7 +728,7 @@ def cmd_secret_set(args: argparse.Namespace) -> int:
 
 
 def cmd_secret_refresh(args: argparse.Namespace) -> int:
-    """Pick up a rotated credential without restarting the environment.
+    """Pick up a rotated credential without restarting the box.
 
     Unlocks the store here, where you can answer the prompt, then tells the
     running broker to drop what it cached. Its next brokered request re-reads
@@ -736,13 +736,13 @@ def cmd_secret_refresh(args: argparse.Namespace) -> int:
     interrupting an agent that has been working for days.
     """
     from .broker.server import send_command
-    from .env import Environment
+    from .box import Box
 
     session = _resolve_session(args.session)
-    if session.env_name and Environment.exists(session.env_name):
-        env = Environment.load(session.env_name)
-        if env.profile:
-            _, problem = _warm_secrets(env.profile)
+    if session.box_name and Box.exists(session.box_name):
+        box = Box.load(session.box_name)
+        if box.profile:
+            _, problem = _warm_secrets(box.profile)
             if problem:
                 print(f"!! {problem}", file=sys.stderr)
                 return EXIT_DENIED
@@ -753,7 +753,7 @@ def cmd_secret_refresh(args: argparse.Namespace) -> int:
     if not answer.get("ok"):
         print(f"!! {answer.get('error', 'refresh failed')}", file=sys.stderr)
         return 1
-    print(f"refreshed credentials for {session.env_name or session.session_id}")
+    print(f"refreshed credentials for {session.box_name or session.session_id}")
     return 0
 
 
@@ -900,16 +900,16 @@ def cmd_diag(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# environments
+# boxes
 
 
-def cmd_env_create(args: argparse.Namespace) -> int:
-    """Define an environment. Nothing boots until `asbx start`."""
-    from .env import Environment, validate_name
+def cmd_box_create(args: argparse.Namespace) -> int:
+    """Define a box. Nothing boots until `asbx start`."""
+    from .box import Box, validate_name
 
     name = validate_name(args.name)
-    if Environment.exists(name) and not args.force:
-        print(f"!! environment {name!r} already exists (--force to redefine)", file=sys.stderr)
+    if Box.exists(name) and not args.force:
+        print(f"!! box {name!r} already exists (--force to redefine)", file=sys.stderr)
         return EXIT_USAGE
 
     project = Path(args.project).expanduser().resolve() if args.project else None
@@ -920,14 +920,14 @@ def cmd_env_create(args: argparse.Namespace) -> int:
     from .vm.vfkit import image_path, resolve_image as _resolve_image
 
     if not _resolve_image(args.image).exists():
-        # Creating an environment on an image that does not exist would look
+        # Creating a box on an image that does not exist would look
         # fine until the first start, which fails inside vfkit.
         print(f"!! no image named {args.image!r} at {image_path(args.image)}", file=sys.stderr)
         print("   asbx image ls                       what is built", file=sys.stderr)
         print("   ASBX_DISTRO=ubuntu ./vm/build-image.sh   build another", file=sys.stderr)
         return EXIT_USAGE
 
-    env = Environment(
+    box = Box(
         name=name,
         project_path=str(project) if project else "",
         project_mount=args.mount_path or "",
@@ -939,142 +939,142 @@ def cmd_env_create(args: argparse.Namespace) -> int:
         memory_mib=args.memory,
         image=args.image,
     )
-    from .env import SshIdentity
+    from .box import SshIdentity
 
-    SshIdentity(env.ssh_dir).generate(name)
-    env.save()
-    print(f"environment {name} created")
+    SshIdentity(box.ssh_dir).generate(name)
+    box.save()
+    print(f"box {name} created")
     if project:
-        print(f"  project  {project} -> guest:{env.project_mount or project}")
-    if env.profile:
-        print(f"  profile  {env.profile}")
-    print(f"  image    {env.image}")
-    print(f"  disk     {env.disk_path} (built on first start)")
+        print(f"  project  {project} -> guest:{box.project_mount or project}")
+    if box.profile:
+        print(f"  profile  {box.profile}")
+    print(f"  image    {box.image}")
+    print(f"  disk     {box.disk_path} (built on first start)")
     print(f"\nStart it with:  asbx start {name}")
     return 0
 
 
-def cmd_env_set(args: argparse.Namespace) -> int:
-    """Change an environment's hardware. The disk is untouched.
+def cmd_box_set(args: argparse.Namespace) -> int:
+    """Change a box's hardware. The disk is untouched.
 
     cpus and memory are arguments to vfkit at boot, not state on the disk, so
     resizing costs nothing but a restart - which is worth saying out loud,
     because "will I lose my work?" is the obvious worry and the answer is no.
     """
-    from .env import Environment
+    from .box import Box
 
-    env = Environment.load(args.name)
+    box = Box.load(args.name)
     changes = []
     if args.memory is not None:
         if args.memory < 512:
             print(f"!! {args.memory} MiB is too little to boot; 512 is the floor", file=sys.stderr)
             return EXIT_USAGE
-        changes.append(f"memory  {env.memory_mib} -> {args.memory} MiB")
-        env.memory_mib = args.memory
+        changes.append(f"memory  {box.memory_mib} -> {args.memory} MiB")
+        box.memory_mib = args.memory
     if args.cpus is not None:
         if args.cpus < 1:
             print("!! --cpus must be at least 1", file=sys.stderr)
             return EXIT_USAGE
-        changes.append(f"cpus    {env.cpus} -> {args.cpus}")
-        env.cpus = args.cpus
+        changes.append(f"cpus    {box.cpus} -> {args.cpus}")
+        box.cpus = args.cpus
     if args.image is not None:
         if not resolve_image(args.image).exists():
             print(f"!! no image named {args.image!r} - see `asbx image ls`", file=sys.stderr)
             return EXIT_USAGE
-        changes.append(f"image   {env.image} -> {args.image}")
-        env.image = args.image
+        changes.append(f"image   {box.image} -> {args.image}")
+        box.image = args.image
 
     if not changes:
         print("nothing to change: pass --memory, --cpus or --image", file=sys.stderr)
         return EXIT_USAGE
 
-    env.save()
-    print(f"{env.name} updated")
+    box.save()
+    print(f"{box.name} updated")
     for line in changes:
         print(f"  {line}")
-    print(f"  disk    {env.disk_path} (untouched)")
+    print(f"  disk    {box.disk_path} (untouched)")
 
-    if args.image is not None and env.has_disk:
-        # Changing the image does not re-clone: the environment already has a
+    if args.image is not None and box.has_disk:
+        # Changing the image does not re-clone: the box already has a
         # disk, and start boots that. Saying nothing here would leave the
         # config claiming a distro the guest is not running.
-        print(f"\n  the disk still holds the old image; `asbx reset {env.name}` re-clones")
+        print(f"\n  the disk still holds the old image; `asbx reset {box.name}` re-clones")
 
-    if _running_session_for(env.name):
+    if _running_session_for(box.name):
         # Silently writing config a running guest is not using would look like
         # it worked and change nothing.
-        print(f"\n{env.name} is running with the old settings. To apply:")
-        print(f"  asbx stop {env.name} && asbx start {env.name}")
+        print(f"\n{box.name} is running with the old settings. To apply:")
+        print(f"  asbx stop {box.name} && asbx start {box.name}")
     return 0
 
 
-def cmd_env_list(args: argparse.Namespace) -> int:
-    from .env import list_environments
+def cmd_box_list(args: argparse.Namespace) -> int:
+    from .box import list_boxes
     from .session import STATE_RUNNING
 
-    envs = list_environments()
-    if not envs:
-        print("no environments; create one with `asbx create NAME --project DIR`")
+    boxes = list_boxes()
+    if not boxes:
+        print("no boxes; create one with `asbx create NAME --project DIR`")
         return 0
 
-    running = {s.env_name for s in list_sessions() if s.state == STATE_RUNNING and s.env_name}
-    for env in envs:
-        state = "running" if env.name in running else ("stopped" if env.has_disk else "not built")
-        size = f"{env.disk_size() / 1e9:.1f}G" if env.has_disk else "-"
-        print(f"{env.name:<20} {state:<10} {size:>6}  {env.project_path}")
+    running = {s.box_name for s in list_sessions() if s.state == STATE_RUNNING and s.box_name}
+    for box in boxes:
+        state = "running" if box.name in running else ("stopped" if box.has_disk else "not built")
+        size = f"{box.disk_size() / 1e9:.1f}G" if box.has_disk else "-"
+        print(f"{box.name:<20} {state:<10} {size:>6}  {box.project_path}")
     return 0
 
 
-def cmd_env_inspect(args: argparse.Namespace) -> int:
-    from .env import Environment
+def cmd_box_inspect(args: argparse.Namespace) -> int:
+    from .box import Box
 
-    _print(Environment.load(args.name).public_view())
+    _print(Box.load(args.name).public_view())
     return 0
 
 
-def cmd_env_rm(args: argparse.Namespace) -> int:
-    from .env import Environment
+def cmd_box_rm(args: argparse.Namespace) -> int:
+    from .box import Box
 
-    env = Environment.load(args.name)
-    size = f" ({env.disk_size() / 1e9:.1f}G)" if env.has_disk else ""
-    env.delete(keep_disk=args.keep_disk)
-    print(f"removed environment {env.name}{'' if args.keep_disk else size}")
+    box = Box.load(args.name)
+    size = f" ({box.disk_size() / 1e9:.1f}G)" if box.has_disk else ""
+    box.delete(keep_disk=args.keep_disk)
+    print(f"removed box {box.name}{'' if args.keep_disk else size}")
     return 0
 
 
 def cmd_shell(args: argparse.Namespace) -> int:
-    """Open a shell in a running environment, over ssh-on-vsock.
+    """Open a shell in a running box, over ssh-on-vsock.
 
     Any number of these can run at once, which is the point - the console is a
     single seat, this is not.
     """
-    from .env import Environment, SshIdentity
+    from .box import Box, SshIdentity
     from .session import STATE_RUNNING
 
-    env = Environment.load(args.name) if args.name else None
+    box = Box.load(args.name) if args.name else None
     running = [s for s in list_sessions() if s.state == STATE_RUNNING]
-    if env:
-        running = [s for s in running if s.env_name == env.name]
+    if box:
+        running = [s for s in running if s.box_name == box.name]
     if not running:
         target = args.name or "anything"
         print(f"!! {target} is not running; start it with `asbx start`", file=sys.stderr)
         return EXIT_USAGE
     if len(running) > 1:
-        listed = "\n".join(f"  {s.env_name or s.session_id}" for s in running)
+        listed = "\n".join(f"  {s.box_name or s.session_id}" for s in running)
         print(f"!! several are running - name one:\n{listed}", file=sys.stderr)
         return EXIT_USAGE
 
     session = running[0]
-    env = env or Environment.load(session.env_name)
-    identity = SshIdentity(env.ssh_dir)
+    box = box or Box.load(session.box_name)
+    identity = SshIdentity(box.ssh_dir)
     if not identity.exists:
-        print(f"!! {env.name} has no ssh keys; recreate it with `asbx create`", file=sys.stderr)
+        print(f"!! {box.name} has no ssh keys; recreate it with `asbx create`", file=sys.stderr)
         return EXIT_USAGE
 
     socket_path = session.paths.run / "ssh.sock"
     if not socket_path.exists():
         print(
-            f"!! {env.name} is running but has no ssh channel at {socket_path}.\n"
+            f"!! {box.name} is running but has no ssh channel at {socket_path}.\n"
             "   It was probably started before ssh support existed - restart it.",
             file=sys.stderr,
         )
@@ -1083,9 +1083,9 @@ def cmd_shell(args: argparse.Namespace) -> int:
     # ProxyCommand shells out to us: a tiny stdio<->unix relay, so we do not
     # depend on which netcat flavour happens to be installed.
     proxy = f"{shlex.quote(sys.executable)} -m agentsandbox.cli vsock-proxy {shlex.quote(str(socket_path))}"
-    identity.write_client_config(env.name, proxy)
+    identity.write_client_config(box.name, proxy)
 
-    argv = ["ssh", "-F", str(identity.config), f"asbx-{env.name}"]
+    argv = ["ssh", "-F", str(identity.config), f"asbx-{box.name}"]
     if args.command:
         argv += ["--", *args.command]
     os.execvp("ssh", argv)  # replace ourselves; ssh owns the terminal from here
@@ -1130,13 +1130,13 @@ def cmd_vsock_proxy(args: argparse.Namespace) -> int:
         sock.close()
 
 
-def cmd_env_stop(args: argparse.Namespace) -> int:
-    """Stop the run belonging to an environment (or the only running one)."""
+def cmd_box_stop(args: argparse.Namespace) -> int:
+    """Stop the run belonging to a box (or the only running one)."""
     from .session import STATE_RUNNING
 
     running = [s for s in list_sessions() if s.state == STATE_RUNNING]
     if args.name:
-        running = [s for s in running if s.env_name == args.name]
+        running = [s for s in running if s.box_name == args.name]
         if not running:
             print(f"!! {args.name} is not running", file=sys.stderr)
             return EXIT_USAGE
@@ -1144,7 +1144,7 @@ def cmd_env_stop(args: argparse.Namespace) -> int:
         print("nothing is running")
         return 0
     elif len(running) > 1:
-        listed = "\n".join(f"  {s.env_name or s.session_id}" for s in running)
+        listed = "\n".join(f"  {s.box_name or s.session_id}" for s in running)
         print(f"!! several are running - name one:\n{listed}", file=sys.stderr)
         return EXIT_USAGE
 
@@ -1152,25 +1152,25 @@ def cmd_env_stop(args: argparse.Namespace) -> int:
     if session.supervisor_pid and session.supervisor_pid != os.getpid():
         try:
             os.kill(session.supervisor_pid, signal.SIGTERM)
-            print(f"asked {session.env_name or session.session_id} to stop")
+            print(f"asked {session.box_name or session.session_id} to stop")
             return 0
         except ProcessLookupError:
             pass
     stop_session_by_id(session.session_id, purge=args.purge)
-    print(f"stopped {session.env_name or session.session_id}")
+    print(f"stopped {session.box_name or session.session_id}")
     return 0
 
 
-def cmd_env_reset(args: argparse.Namespace) -> int:
+def cmd_box_reset(args: argparse.Namespace) -> int:
     """Throw the guest filesystem away; the next start rebuilds from golden."""
-    from .env import Environment
+    from .box import Box
 
-    env = Environment.load(args.name)
-    if not env.has_disk:
-        print(f"{env.name} has no disk yet; nothing to reset")
+    box = Box.load(args.name)
+    if not box.has_disk:
+        print(f"{box.name} has no disk yet; nothing to reset")
         return 0
-    env.remove_disk()
-    print(f"reset {env.name}; the next start rebuilds it from the golden image")
+    box.remove_disk()
+    print(f"reset {box.name}; the next start rebuilds it from the golden image")
     return 0
 
 
@@ -1194,19 +1194,19 @@ def cmd_image_list(args: argparse.Namespace) -> int:
         print(line)
 
     used = {}
-    from .env import list_environments
+    from .box import list_boxes
 
-    for env in list_environments():
-        used.setdefault(env.image, []).append(env.name)
+    for box in list_boxes():
+        used.setdefault(box.image, []).append(box.name)
     if used:
         print("\nin use by:")
-        for name, envs in sorted(used.items()):
-            print(f"  {name:<28} {', '.join(sorted(envs))}")
+        for name, boxes in sorted(used.items()):
+            print(f"  {name:<28} {', '.join(sorted(boxes))}")
     return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    problems = check_environment()
+    problems = check_host()
     if not problems:
         print("all good: mitmproxy, vfkit and a golden image are present")
         for line in _describe_images():
@@ -1220,7 +1220,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def _describe_images() -> list[str]:
     """One line per built image, for `doctor`.
 
-    Which distro an environment runs is a property of the image it names, so
+    Which distro a box runs is a property of the image it names, so
     this lists what exists rather than asserting a single answer.
     """
     from .vm.vfkit import list_images
@@ -1255,8 +1255,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session", help="session id (default: the newest running session)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # -- environments (the everyday path) -----------------------------------
-    create = sub.add_parser("create", help="define an environment (does not boot it)")
+    # -- boxes (the everyday path) -----------------------------------
+    create = sub.add_parser("create", help="define a box (does not boot it)")
     create.add_argument("name")
     create.add_argument("--project", help="host directory to mount in the guest")
     create.add_argument("--mount-path", help="where it mounts inside (default: same as host)")
@@ -1273,10 +1273,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_IMAGE,
         help=f"base image to clone the disk from (default: {DEFAULT_IMAGE}); see `asbx image ls`",
     )
-    create.add_argument("--force", action="store_true", help="redefine an existing environment")
-    create.set_defaults(func=cmd_env_create)
+    create.add_argument("--force", action="store_true", help="redefine an existing box")
+    create.set_defaults(func=cmd_box_create)
 
-    start = sub.add_parser("start", help="boot an environment")
+    start = sub.add_parser("start", help="boot a box")
     start.add_argument("name")
     start.add_argument("--fresh", action="store_true", help="discard the disk and rebuild it")
     start.add_argument("--forward", action="append", type=_parse_forward, default=[],
@@ -1288,22 +1288,22 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("-a", "--attach", action="store_true",
                        help="keep it in the foreground with the guest console attached")
     start.add_argument("--netcheck", choices=["halt", "warn"], default="halt")
-    start.set_defaults(func=cmd_env_start, vm=True, console=False)
+    start.set_defaults(func=cmd_box_start, vm=True, console=False)
 
-    ls = sub.add_parser("ls", help="list environments")
-    ls.set_defaults(func=cmd_env_list)
+    ls = sub.add_parser("ls", help="list boxes")
+    ls.set_defaults(func=cmd_box_list)
 
-    inspect = sub.add_parser("inspect", help="show an environment's configuration")
+    inspect = sub.add_parser("inspect", help="show a box's configuration")
     inspect.add_argument("name")
-    inspect.set_defaults(func=cmd_env_inspect)
+    inspect.set_defaults(func=cmd_box_inspect)
 
-    rm = sub.add_parser("rm", help="delete an environment and its disk")
+    rm = sub.add_parser("rm", help="delete a box and its disk")
     rm.add_argument("name")
     rm.add_argument("--keep-disk", action="store_true")
-    rm.set_defaults(func=cmd_env_rm)
+    rm.set_defaults(func=cmd_box_rm)
 
-    shell = sub.add_parser("shell", help="open a shell in a running environment")
-    shell.add_argument("name", nargs="?", help="environment (default: the only running one)")
+    shell = sub.add_parser("shell", help="open a shell in a running box")
+    shell.add_argument("name", nargs="?", help="box (default: the only running one)")
     shell.add_argument("command", nargs=argparse.REMAINDER, help="run this instead of a shell")
     shell.set_defaults(func=cmd_shell)
 
@@ -1311,31 +1311,31 @@ def build_parser() -> argparse.ArgumentParser:
     proxy.add_argument("socket")
     proxy.set_defaults(func=cmd_vsock_proxy)
 
-    stop_env = sub.add_parser("stop", help="stop a running environment")
-    stop_env.add_argument("name", nargs="?", help="environment name (default: the only running one)")
+    stop_env = sub.add_parser("stop", help="stop a running box")
+    stop_env.add_argument("name", nargs="?", help="box name (default: the only running one)")
     stop_env.add_argument("--purge", action="store_true", help="also erase the run's audit trail")
-    stop_env.set_defaults(func=cmd_env_stop)
+    stop_env.set_defaults(func=cmd_box_stop)
 
     prune_top = sub.add_parser("prune", help="delete leftover state from finished runs")
     prune_top.add_argument("--older-than", type=int, metavar="DAYS")
     prune_top.add_argument("--dry-run", action="store_true")
     prune_top.set_defaults(func=cmd_session_prune)
 
-    set_cmd = sub.add_parser("set", help="change an environment's cpus or memory")
+    set_cmd = sub.add_parser("set", help="change a box's cpus or memory")
     set_cmd.add_argument("name")
     set_cmd.add_argument("--memory", type=int, metavar="MIB", help="guest RAM in MiB")
     set_cmd.add_argument("--cpus", type=int)
     set_cmd.add_argument("--image", help="base image; takes effect on the next `asbx reset`")
-    set_cmd.set_defaults(func=cmd_env_set)
+    set_cmd.set_defaults(func=cmd_box_set)
 
-    image_parser = sub.add_parser("image", help="base images environments clone from")
+    image_parser = sub.add_parser("image", help="base images boxes clone from")
     image_sub = image_parser.add_subparsers(dest="subcommand", required=True)
     image_ls = image_sub.add_parser("ls", help="list built images")
     image_ls.set_defaults(func=cmd_image_list)
 
-    reset = sub.add_parser("reset", help="discard an environment's disk, keeping its config")
+    reset = sub.add_parser("reset", help="discard a box's disk, keeping its config")
     reset.add_argument("name")
-    reset.set_defaults(func=cmd_env_reset)
+    reset.set_defaults(func=cmd_box_reset)
 
     # -- session ------------------------------------------------------------
     session_parser = sub.add_parser("session", help="session lifecycle")
@@ -1507,7 +1507,7 @@ def build_parser() -> argparse.ArgumentParser:
     secret = sub.add_parser("secret", help="credentials in the macOS keychain")
     secret_sub = secret.add_subparsers(dest="subcommand", required=True)
     secret_refresh = secret_sub.add_parser(
-        "refresh", help="re-read credentials into a running environment"
+        "refresh", help="re-read credentials into a running box"
     )
     secret_refresh.set_defaults(func=cmd_secret_refresh)
 
