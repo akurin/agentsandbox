@@ -29,7 +29,7 @@ def test_create_makes_a_complete_private_session(tmp_path):
     project.mkdir()
     (project / "main.py").write_text("x = 1\n")
 
-    manager = SessionManager.create(allow_hosts=["api.github.com"], project=project, label="demo")
+    manager = SessionManager.create(allow_hosts=["api.github.com"], project=project)
     paths = manager.session.paths
 
     assert paths.root.stat().st_mode & 0o077 == 0
@@ -182,7 +182,7 @@ def test_client_fails_closed_when_the_broker_is_absent(session):
 
 
 def test_cli_issue_list_and_revoke(capsys, monkeypatch):
-    manager = SessionManager.create(allow_hosts=["api.github.com"], label="cli-test")
+    manager = SessionManager.create(allow_hosts=["api.github.com"])
     monkeypatch.setenv("ASBX_SESSION", manager.session.session_id)
 
     assert cli.main(
@@ -216,7 +216,7 @@ def test_cli_issue_list_and_revoke(capsys, monkeypatch):
 
 
 def test_cli_session_list_and_status(capsys, monkeypatch):
-    manager = SessionManager.create(allow_hosts=["example.com"], label="statustest")
+    manager = SessionManager.create(allow_hosts=["example.com"])
     monkeypatch.setenv("ASBX_SESSION", manager.session.session_id)
 
     assert cli.main(["system", "sessions"]) == 0
@@ -230,7 +230,7 @@ def test_cli_session_list_and_status(capsys, monkeypatch):
 
 def test_cli_session_with_project_adds_a_share(capsys):
     """`--project` mounts the directory directly, no copy step."""
-    manager = SessionManager.create(allow_hosts=["example.com"], label="projtest")
+    manager = SessionManager.create(allow_hosts=["example.com"])
     assert manager.session.project_path == ""
     assert not any(s.tag == "project" for s in manager.session.shares)
     # With --project, a share is added
@@ -408,8 +408,8 @@ def test_ambiguous_session_is_an_error_not_a_guess(monkeypatch):
     from agentsandbox.session import STATE_RUNNING, resolve_session_id
 
     monkeypatch.delenv("ASBX_SESSION", raising=False)
-    for label in ("frontend", "backend"):
-        m = SessionManager.create(allow_hosts=["example.com"], label=label)
+    for name in ("frontend", "backend"):
+        m = SessionManager.create(allow_hosts=["example.com"], box_name=name)
         m.session.state = STATE_RUNNING
         m.session.supervisor_pid = os.getpid()
         m.session.save()
@@ -436,8 +436,8 @@ def test_explicit_session_wins_over_ambiguity(monkeypatch):
     from agentsandbox.session import STATE_RUNNING, resolve_session_id
 
     monkeypatch.delenv("ASBX_SESSION", raising=False)
-    first = SessionManager.create(allow_hosts=["example.com"], label="a")
-    second = SessionManager.create(allow_hosts=["example.com"], label="b")
+    first = SessionManager.create(allow_hosts=["example.com"])
+    second = SessionManager.create(allow_hosts=["example.com"])
     for m in (first, second):
         m.session.state = STATE_RUNNING
         m.session.supervisor_pid = os.getpid()
@@ -457,8 +457,8 @@ def test_no_sessions_says_so_plainly(monkeypatch):
 def test_cap_list_works_across_sessions_without_a_target(capsys, monkeypatch):
     """Listing is read-only, so it does not need the session that issuing does."""
     monkeypatch.delenv("ASBX_SESSION", raising=False)
-    first = SessionManager.create(allow_hosts=["api.github.com"], label="one")
-    second = SessionManager.create(allow_hosts=["api.github.com"], label="two")
+    first = SessionManager.create(allow_hosts=["api.github.com"])
+    second = SessionManager.create(allow_hosts=["api.github.com"])
     cli_issue(first)
     cli_issue(second)
 
@@ -478,9 +478,9 @@ def test_prune_removes_only_stopped_sessions(monkeypatch):
     from agentsandbox.session import STATE_RUNNING, list_sessions
 
     monkeypatch.delenv("ASBX_SESSION", raising=False)
-    dead = SessionManager.create(allow_hosts=["example.com"], label="dead")
+    dead = SessionManager.create(allow_hosts=["example.com"])
     dead.stop()
-    alive = SessionManager.create(allow_hosts=["example.com"], label="alive")
+    alive = SessionManager.create(allow_hosts=["example.com"])
     alive.session.state = STATE_RUNNING
     # A session is running only if something holds it up; without a live pid
     # it is reconciled to stopped, and prune would rightly take it.

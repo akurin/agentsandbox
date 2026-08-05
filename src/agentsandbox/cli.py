@@ -158,7 +158,6 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     args.profile = box.profile or None
     args.cpus = box.cpus
     args.memory = box.memory_mib
-    args.label = box.name
     args.purge_on_stop = False
 
     box.last_started = time.time()
@@ -316,7 +315,6 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         allow_hosts=args.allow,
         project=Path(args.project) if args.project else None,
         project_mount=args.mount_path or "",
-        label=args.label,
         shares=args.share or [],
         box_name=box.name if box else "",
     )
@@ -494,7 +492,7 @@ def cmd_system_sessions(args: argparse.Namespace) -> int:
         age = _human_age(view["age_s"])
         if session.state == STATE_STOPPED:
             stopped += 1
-        detail = session.label or session.project_path or ""
+        detail = session.box_name or session.project_path or ""
         print(f"{view['session']}  {view['state']:<8} {age:>6}  {detail}")
 
     if stopped:
@@ -580,7 +578,7 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
 
     # Say which session this landed in. It is resolved implicitly when only one
     # is running, and "it worked but where?" is a fair thing to wonder.
-    where = session.label or session.project_path or "no label"
+    where = session.box_name or session.project_path or "no box"
     print(f"capability {cap.cap_id} issued for {spec.provider}")
     print(f"  in session {session.session_id} ({where})")
     lifetime = f"expires in {args.ttl}s, and is" if args.ttl else "does not expire, but is"

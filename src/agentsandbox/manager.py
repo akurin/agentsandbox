@@ -114,7 +114,6 @@ class SessionManager:
         allow_hosts: list[str] | None = None,
         project: Path | None = None,
         project_mount: str = "",
-        label: str = "",
         shares: list[Share] | None = None,
         wg_listen_host: str = "127.0.0.1",
         wg_listen_port: int | None = None,
@@ -133,7 +132,6 @@ class SessionManager:
         session = Session(
             session_id=new_session_id(),
             box_name=box_name,
-            label=label,
             policy=DestinationPolicy(allow_hosts=list(allow_hosts or ["*"])),
             shares=project_shares,
             wg_listen_host=wg_listen_host,
@@ -165,7 +163,7 @@ class SessionManager:
         manager = cls(session)
         manager.audit.emit(
             "session.created",
-            label=label,
+            box_name=box_name,
             allow_hosts=session.policy.allow_hosts,
             project=session.project_path,
             wg_port=session.wg_listen_port,

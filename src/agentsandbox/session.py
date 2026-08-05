@@ -47,7 +47,6 @@ class Session:
     session_id: str
     created_at: float = field(default_factory=time.time)
     state: str = STATE_CREATED
-    label: str = ""
 
     #: Session-wide egress rules. Empty allowlist = nothing is reachable.
     policy: DestinationPolicy = field(default_factory=DestinationPolicy)
@@ -122,7 +121,7 @@ class Session:
         return {
             "session": self.session_id,
             "state": self.state,
-            "label": self.label,
+            "box_name": self.box_name,
             "age_s": int(time.time() - self.created_at),
             "allow_hosts": self.policy.allow_hosts,
             "project": self.project_path,
@@ -219,7 +218,7 @@ def resolve_session_id(explicit: str | None = None) -> str:
         return running[0].session_id
     if len(running) > 1:
         listed = "\n".join(
-            f"  {s.session_id}  {s.label or s.project_path or '(no label)'}" for s in running
+            f"  {s.session_id}  {s.box_name or s.project_path or '(no box)'}" for s in running
         )
         raise SessionError(
             f"{len(running)} sessions are running - name the box:\n{listed}"
