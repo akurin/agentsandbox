@@ -423,3 +423,46 @@ def test_a_crashed_supervisor_does_not_block_the_environment(project, capsys):
     assert _running_session_for("neo") is None
     # ...and the stale record is corrected rather than left to confuse.
     assert Session.load(manager.session.session_id).state != STATE_RUNNING
+
+
+def test_resizing_memory_does_not_touch_the_disk():
+    """The obvious worry about `asbx set --memory` is losing the environment.
+
+    cpus and memory are vfkit boot arguments; the disk is a separate file, so
+    the two cannot interact.
+    """
+    env = Environment(name="resize-me", memory_mib=2048, cpus=2)
+    env.save()
+    env.disk_path.parent.mkdir(parents=True, exist_ok=True)
+    env.disk_path.write_bytes(b"pretend this is a root filesystem")
+    before = env.disk_path.read_bytes()
+
+    env.memory_mib = 8192
+    env.save()
+
+    reloaded = Environment.load("resize-me")
+    assert reloaded.memory_mib == 8192
+    assert reloaded.cpus == 2
+    assert reloaded.disk_path.read_bytes() == before
+
+
+def test_the_rest_of_the_configuration_survives_a_resize():
+    """A resize must not quietly reset anything else it did not ask about."""
+    env = Environment(
+        name="keep-config",
+        profile="wiremock",
+        allow_hosts=["example.com"],
+        approval_mode="file",
+        project_path="/some/project",
+    )
+    env.save()
+
+    env = Environment.load("keep-config")
+    env.memory_mib = 4096
+    env.save()
+
+    reloaded = Environment.load("keep-config")
+    assert reloaded.profile == "wiremock"
+    assert reloaded.allow_hosts == ["example.com"]
+    assert reloaded.approval_mode == "file"
+    assert reloaded.project_path == "/some/project"

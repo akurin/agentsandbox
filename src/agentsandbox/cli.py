@@ -938,6 +938,48 @@ def cmd_env_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_env_set(args: argparse.Namespace) -> int:
+    """Change an environment's hardware. The disk is untouched.
+
+    cpus and memory are arguments to vfkit at boot, not state on the disk, so
+    resizing costs nothing but a restart - which is worth saying out loud,
+    because "will I lose my work?" is the obvious worry and the answer is no.
+    """
+    from .env import Environment
+
+    env = Environment.load(args.name)
+    changes = []
+    if args.memory is not None:
+        if args.memory < 512:
+            print(f"!! {args.memory} MiB is too little to boot; 512 is the floor", file=sys.stderr)
+            return EXIT_USAGE
+        changes.append(f"memory  {env.memory_mib} -> {args.memory} MiB")
+        env.memory_mib = args.memory
+    if args.cpus is not None:
+        if args.cpus < 1:
+            print("!! --cpus must be at least 1", file=sys.stderr)
+            return EXIT_USAGE
+        changes.append(f"cpus    {env.cpus} -> {args.cpus}")
+        env.cpus = args.cpus
+
+    if not changes:
+        print("nothing to change: pass --memory, --cpus, or both", file=sys.stderr)
+        return EXIT_USAGE
+
+    env.save()
+    print(f"{env.name} updated")
+    for line in changes:
+        print(f"  {line}")
+    print(f"  disk    {env.disk_path} (untouched)")
+
+    if _running_session_for(env.name):
+        # Silently writing config a running guest is not using would look like
+        # it worked and change nothing.
+        print(f"\n{env.name} is running with the old settings. To apply:")
+        print(f"  asbx stop {env.name} && asbx start {env.name}")
+    return 0
+
+
 def cmd_env_list(args: argparse.Namespace) -> int:
     from .env import list_environments
     from .session import STATE_RUNNING
@@ -1188,6 +1230,12 @@ def build_parser() -> argparse.ArgumentParser:
     prune_top.add_argument("--older-than", type=int, metavar="DAYS")
     prune_top.add_argument("--dry-run", action="store_true")
     prune_top.set_defaults(func=cmd_session_prune)
+
+    set_cmd = sub.add_parser("set", help="change an environment's cpus or memory")
+    set_cmd.add_argument("name")
+    set_cmd.add_argument("--memory", type=int, metavar="MIB", help="guest RAM in MiB")
+    set_cmd.add_argument("--cpus", type=int)
+    set_cmd.set_defaults(func=cmd_env_set)
 
     reset = sub.add_parser("reset", help="discard an environment's disk, keeping its config")
     reset.add_argument("name")
