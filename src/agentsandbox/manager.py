@@ -16,11 +16,14 @@ capability cannot outlive the moment we decide to stop.
 from __future__ import annotations
 
 import os
+import shlex
 import signal
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .audit import AuditLog, redactor
 from .broker.approvals import AllowAll, ApprovalGate, DenyAll, FileApprovalGate
@@ -46,13 +49,46 @@ from .vm.gateway import GatewayConfig
 from .vm.vfkit import VfkitDriver, VmConfig
 from .wireguard import WireGuardIdentity
 
+if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for typing
+    from .guestexec import GuestResult
+
 
 def _free_udp_port(host: str = "127.0.0.1") -> int:
-    import socket
-
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind((host, 0))
         return sock.getsockname()[1]
+
+
+#: Clear the guest's WireGuard session with the host, and change nothing else.
+#:
+#: Removing a peer discards its ephemeral keys; adding it back restores the
+#: configuration it had, with no session attached. The next packet out of the
+#: guest therefore starts a handshake immediately rather than being encrypted
+#: under keys the host has already forgotten.
+#:
+#: The endpoint is read back from the running interface rather than passed in
+#: from the host, so this cannot re-add the peer pointing somewhere the guest
+#: was not already pointing. And `wg showconf` is captured first: if the re-add
+#: fails, the whole interface configuration goes back exactly as it was, because
+#: the one outcome worse than a fifteen-second blackout is a guest left with no
+#: peer at all.
+_REHANDSHAKE = r"""
+set -u
+conf=$(wg showconf wg0) || exit 2
+peer=$(wg show wg0 peers | head -n1)
+[ -n "$peer" ] || { echo "wg0 has no peer" >&2; exit 3; }
+endpoint=$(wg show wg0 endpoints | head -n1 | cut -f2)
+case "$endpoint" in
+    ""|"(none)") echo "wg0 peer has no endpoint yet" >&2; exit 4 ;;
+esac
+wg set wg0 peer "$peer" remove || exit 5
+if ! wg set wg0 peer "$peer" endpoint "$endpoint" \
+        allowed-ips 0.0.0.0/0 persistent-keepalive 25; then
+    printf '%s\n' "$conf" | wg setconf wg0 /dev/stdin
+    echo "could not re-add the peer; restored the previous config" >&2
+    exit 6
+fi
+"""
 
 
 @dataclass
@@ -233,13 +269,26 @@ class SessionManager:
         WireGuard keys are a file (``paths.wireguard_conf``), the listen port
         is on the session record, and the CA is in a per-session confdir. So a
         replacement listens on the same port with the same keys and the same
-        certificate authority - the guest re-handshakes on its next keepalive
-        and its trust store still matches.
+        certificate authority, and the guest's trust store still matches.
 
-        What does not survive is connections in flight. They are reset, and
-        anything mid-download in the guest sees a broken pipe and has to retry.
-        That is the price of not restarting the whole box, and it is worth
-        stating rather than discovering.
+        What the replacement does *not* have is the WireGuard session. Those
+        keys are ephemeral and lived in the process we just killed, so the
+        guest - which has no way to know any of this happened - carries on
+        encrypting under a session the new process cannot authenticate, and
+        every packet is dropped as noise. WireGuard only notices when its own
+        timers run out: KEEPALIVE_TIMEOUT plus REKEY_TIMEOUT, fifteen seconds
+        of a tunnel that is up in the guest and dead in fact. `PersistentKeepalive`
+        does not help, because those keepalives go out under the dead session too.
+
+        Fifteen seconds is long enough to fail a name lookup - the guest's
+        resolver gives up after four - so the first request after an attach or
+        a detach used to fail with "Could not resolve host". This clears the
+        guest's session instead of waiting for it to expire, and the next
+        packet the guest sends handshakes afresh, one round trip.
+
+        What still does not survive is connections in flight. They are reset,
+        and anything mid-download sees a broken pipe and has to retry. That is
+        the price of not restarting the whole box.
         """
         if self.mitm is not None and self.mitm.web == web:
             return {"ok": True, "message": f"already {'attached' if web else 'detached'}",
@@ -248,13 +297,57 @@ class SessionManager:
         previous = self.mitm
         if previous is not None:
             previous.stop()
+            if not self._await_wg_listener(present=False, timeout=5.0):
+                raise SessionError(
+                    f"the previous mitmproxy is still holding "
+                    f"{self.session.wg_listen_host}:{self.session.wg_listen_port}; "
+                    f"the replacement could not have the port, so nothing was changed"
+                )
         self.start_proxy(web=web, web_port=web_port)
-        self.audit.emit("proxy.reattached", web=web, url=self.mitm.web_url if web else "")
+        tunnel = self.renegotiate_tunnel()
+        self.audit.emit(
+            "proxy.reattached",
+            web=web,
+            url=self.mitm.web_url if web else "",
+            tunnel_renegotiated=tunnel.ok,
+        )
         return {
             "ok": True,
             "message": "mitmweb attached" if web else "mitmweb detached",
             "url": self.mitm.web_url if web else "",
+            "tunnel": "renegotiated" if tunnel.ok else "waiting for the guest to re-handshake",
         }
+
+    def renegotiate_tunnel(self) -> GuestResult:
+        """Drop the guest's WireGuard session so its next packet re-handshakes.
+
+        Removing the peer and putting it back is deliberately narrower than
+        ``wg-quick down && wg-quick up``: it throws away the ephemeral keys and
+        nothing else. The interface, its routes, the nftables ruleset and the
+        resolver configuration the bootstrap put in place all stay exactly as
+        they were, and none of them has to be rebuilt correctly a second time.
+
+        Best-effort by design. If the guest cannot be reached - a session with
+        no box has no sshd at all - the caller carries on and the guest
+        re-handshakes on WireGuard's own timers, which is what it did before.
+        """
+        from .guestexec import run_in_guest
+
+        result = run_in_guest(
+            self.session, f"sudo sh -c {shlex.quote(_REHANDSHAKE)}", timeout=15.0
+        )
+        if not result.reached:
+            self.audit.emit("tunnel.renegotiate_skipped", detail=result.stderr)
+        elif not result.ok:
+            # Never fatal: the fallback is the fifteen seconds we were trying
+            # to avoid, not a broken guest - the script restores the peer it
+            # removed if it cannot put it back itself.
+            self.audit.emit(
+                "tunnel.renegotiate_failed", rc=result.returncode, detail=result.stderr
+            )
+        else:
+            self.audit.emit("tunnel.renegotiated")
+        return result
 
     def start_proxy(self, wait: float = 20.0, *, web: bool = False, web_port: int = 0) -> MitmproxyProcess:
         """Start mitmproxy and wait for it to mint this session's CA.
@@ -284,11 +377,60 @@ class SessionManager:
                 f"anything.\n{log}"
             )
 
+        # The CA is not evidence on a *restart*: it was minted by the first
+        # start and the file is already there, so the wait above returns on its
+        # first pass, before the replacement has bound anything - and without
+        # ever reaching the poll() that would notice it had died. Wait for the
+        # listener itself, which is the thing the guest actually needs.
+        if not self._await_wg_listener(present=True, timeout=wait, mitm=mitm):
+            log = mitm.log_path.read_text()[-2000:] if mitm.log_path.exists() else ""
+            mitm.stop()
+            raise SessionError(
+                f"mitmproxy is not listening on "
+                f"{self.session.wg_listen_host}:{self.session.wg_listen_port} "
+                f"after {wait:.0f}s; the guest would have nowhere to send packets.\n{log}"
+            )
+
         self.mitm = mitm
         self.session.mitm_pid = mitm.pid
         self.session.save()
         self.audit.emit("proxy.started", pid=mitm.pid, port=self.session.wg_listen_port)
         return mitm
+
+    # -- the WireGuard listener, observed from outside -----------------------
+
+    def wg_listener_present(self) -> bool:
+        """Is anything holding the session's WireGuard port?
+
+        Asked by binding it ourselves. A UDP socket without ``SO_REUSEPORT``
+        cannot share a port with one that has it, so a bind that succeeds means
+        the port is genuinely free - and we drop it again immediately, before
+        the process that wants it is started.
+
+        This is deliberately about the *port*, not about our child process:
+        after a restart, "the old one has let go" and "the new one has taken
+        over" are the two facts that matter, and a pid answers neither.
+        """
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.bind((self.session.wg_listen_host, self.session.wg_listen_port))
+        except OSError:
+            return True
+        finally:
+            probe.close()
+        return False
+
+    def _await_wg_listener(
+        self, *, present: bool, timeout: float, mitm: MitmproxyProcess | None = None
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if mitm is not None and mitm.process is not None and mitm.process.poll() is not None:
+                return False  # it exited; waiting out the timeout tells us nothing more
+            if self.wg_listener_present() is present:
+                return True
+            time.sleep(0.05)
+        return False
 
     def start_forwards(
         self,

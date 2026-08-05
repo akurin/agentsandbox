@@ -291,3 +291,93 @@ def test_the_prepare_boot_keeps_its_own_networking():
 
     flat = " ".join(" ".join(c) if isinstance(c, list) else str(c) for c in document["runcmd"])
     assert "05-asbx-prepare-dhcp.network" in flat  # and is cleaned up
+
+
+# -- the tunnel re-handshake, run against a stub `wg` --------------------------
+
+
+WG_STUB = """#!/bin/sh
+echo "$*" >> "$WG_LOG"
+case "$1 $3" in
+    "showconf ")  echo "[Interface]"; echo "PrivateKey = KEY"; echo "[Peer]" ;;
+esac
+case "$1 $3" in
+    "show peers")      echo "PEERPUBKEY" ;;
+    "show endpoints")  printf 'PEERPUBKEY\\t192.168.127.1:51820\\n' ;;
+esac
+case "$1" in
+    set) [ "${WG_FAIL_SET:-}" = "$2$5" ] && exit 1 ;;
+esac
+exit 0
+"""
+
+
+def _run_rehandshake(tmp_path, **env):
+    """Run the re-handshake script with `wg` stubbed out, and return the log."""
+    import os
+
+    from agentsandbox.manager import _REHANDSHAKE
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "wg"
+    stub.write_text(WG_STUB)
+    stub.chmod(0o755)
+    log = tmp_path / "wg.log"
+    log.write_text("")
+
+    environ = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "WG_LOG": str(log), **env}
+    done = subprocess.run(
+        ["sh", "-c", _REHANDSHAKE], capture_output=True, text=True, env=environ, check=False
+    )
+    return done, [line for line in log.read_text().splitlines() if line]
+
+
+def test_the_rehandshake_drops_the_session_and_puts_the_peer_back(tmp_path):
+    """Removing the peer is what discards the ephemeral keys. Re-adding it
+    with the endpoint read back off the interface is what keeps this narrower
+    than `wg-quick down && up` - no routes, no resolver, no nftables."""
+    done, log = _run_rehandshake(tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    removed = [i for i, line in enumerate(log) if line.startswith("set wg0 peer PEERPUBKEY remove")]
+    added = [i for i, line in enumerate(log) if "endpoint 192.168.127.1:51820" in line]
+    assert removed and added and removed[0] < added[0]
+    assert "allowed-ips 0.0.0.0/0" in log[added[0]]
+    assert "persistent-keepalive 25" in log[added[0]]
+
+
+def test_a_failed_re_add_restores_the_configuration_it_captured(tmp_path):
+    """The one outcome worse than a fifteen-second blackout is a guest left
+    with no peer at all."""
+    done, log = _run_rehandshake(tmp_path, WG_FAIL_SET="wg0endpoint")
+
+    assert done.returncode == 6
+    assert any(line.startswith("setconf wg0") for line in log)
+    assert "restored the previous config" in done.stderr
+
+
+def test_the_rehandshake_stops_before_touching_anything_it_cannot_read(tmp_path):
+    """A peer with no endpoint yet is a guest that has never handshaked. There
+    is no session to drop and nothing to put back."""
+    no_endpoint = WG_STUB.replace("printf 'PEERPUBKEY\\t192.168.127.1:51820\\n'", "echo '(none)'")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "wg").write_text(no_endpoint)
+    (bin_dir / "wg").chmod(0o755)
+    log = tmp_path / "wg.log"
+    log.write_text("")
+
+    import os
+
+    from agentsandbox.manager import _REHANDSHAKE
+
+    done = subprocess.run(
+        ["sh", "-c", _REHANDSHAKE],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "WG_LOG": str(log)},
+        check=False,
+    )
+    assert done.returncode == 4
+    assert not any("remove" in line for line in log.read_text().splitlines())

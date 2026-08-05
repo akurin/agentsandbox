@@ -550,3 +550,62 @@ def test_a_live_guest_keeps_a_session_running_without_its_supervisor(monkeypatch
     monkeypatch.delenv("ASBX_SESSION", raising=False)
     Session(session_id="has-guest", state=STATE_RUNNING, vm_pid=os.getpid()).save()
     assert [s.state for s in list_sessions()] == [STATE_RUNNING]
+
+
+# -- attaching and detaching mitmweb ------------------------------------------
+#
+# Both are a mitmproxy restart, and a restart takes the WireGuard session with
+# it: the guest keeps encrypting under keys the replacement never negotiated,
+# and does not find out for fifteen seconds. That was one failed name lookup
+# per attach and per detach.
+
+
+def test_the_wireguard_port_is_observed_not_assumed():
+    """A restart has two facts worth waiting for - the old process has let go
+    of the port, and the new one has taken it - and a pid answers neither."""
+    import socket
+
+    manager = SessionManager.create(allow_hosts=["example.com"])
+    assert manager.wg_listener_present() is False
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    holder.bind((manager.session.wg_listen_host, manager.session.wg_listen_port))
+    try:
+        assert manager.wg_listener_present() is True
+    finally:
+        holder.close()
+    assert manager.wg_listener_present() is False
+
+
+def test_waiting_for_the_listener_gives_up_when_the_proxy_dies(monkeypatch):
+    """`start_proxy`'s CA check passes instantly on a restart - the CA is
+    already on disk from the first start - so it never reached the poll() that
+    would notice a replacement which failed to start. A dead process must end
+    the wait, not run it out."""
+    import subprocess
+    import time
+
+    from agentsandbox.proxy.launcher import MitmproxyProcess
+
+    manager = SessionManager.create(allow_hosts=["example.com"])
+    dead = MitmproxyProcess(manager.session)
+    dead.process = subprocess.Popen(["/usr/bin/true"])
+    dead.process.wait()
+
+    started = time.monotonic()
+    assert manager._await_wg_listener(present=True, timeout=30.0, mitm=dead) is False
+    assert time.monotonic() - started < 1.0
+
+
+def test_renegotiating_the_tunnel_is_skipped_when_there_is_no_guest_to_ask():
+    """A session started without a box has no sshd. Best-effort means the
+    reattach carries on and WireGuard's own timers take over - not an
+    exception out of `asbx web detach`."""
+    manager = SessionManager.create(allow_hosts=["example.com"])
+    result = manager.renegotiate_tunnel()
+
+    assert result.reached is False
+    assert result.ok is False
+    assert [e["event"] for e in manager.audit.read() if e["event"].startswith("tunnel.")] == [
+        "tunnel.renegotiate_skipped"
+    ]

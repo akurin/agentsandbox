@@ -1460,7 +1460,8 @@ def cmd_web(args: argparse.Namespace) -> int:
     Everything the guest depends on outlives the proxy process - the WireGuard
     keys are a file, the port is on the session record, the CA is in a
     per-session confdir - so a replacement listens on the same port with the
-    same identity and the guest re-handshakes on its next keepalive.
+    same identity. The one thing that does not survive is the WireGuard
+    session, which is why the supervisor clears the guest's before returning.
     """
     from .broker.server import read_token, send_command
 
@@ -1483,12 +1484,19 @@ def cmd_web(args: argparse.Namespace) -> int:
     print(reply.get("message", ""))
     if url := reply.get("url"):
         print(f"  {url}")
+    # Say what it cost, rather than leaving it to be noticed. Both directions
+    # restart mitmproxy, so both reset connections in flight.
+    print("  connections in flight were reset")
+    if reply.get("tunnel") == "renegotiated":
+        print("  the guest's tunnel was renegotiated; it is usable now")
+    else:
+        print(
+            "  the guest could not be asked to renegotiate its tunnel - expect\n"
+            "  up to 15s of dropped packets before it re-handshakes on its own"
+        )
     if attach:
         print()
         print(_mitmweb_warning(), file=sys.stderr)
-    else:
-        # Say what it cost, rather than leaving it to be noticed.
-        print("  connections in flight were reset; the tunnel re-handshakes itself")
     return 0
 
 
