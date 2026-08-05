@@ -14,9 +14,30 @@ set -euo pipefail
 
 # Everything this script prints also lands on the host, via the virtio-fs share
 # at /var/log/asbx - the guest's journal does not survive a poweroff.
+#
+# The console is the other copy, and the more reliable one: it is a virtio
+# device the host reads directly, so it works even when the share does not.
+# Writing only to the share meant a failed mount produced no bootstrap.log on
+# the host at all, which looks exactly like a bootstrap that never ran - two
+# very different problems with one symptom.
 mkdir -p /var/log/asbx 2>/dev/null || true
-mountpoint -q /var/log/asbx || mount -t virtiofs asbxlog /var/log/asbx 2>/dev/null || true
-exec > >(tee -a /var/log/asbx/bootstrap.log) 2>&1
+if ! mountpoint -q /var/log/asbx; then
+    if ! mount -t virtiofs asbxlog /var/log/asbx 2>/dev/null; then
+        # virtiofs is a module on some images; try once more with it loaded.
+        modprobe virtiofs 2>/dev/null || true
+        mount -t virtiofs asbxlog /var/log/asbx 2>/dev/null || true
+    fi
+fi
+if mountpoint -q /var/log/asbx; then
+    exec > >(tee -a /var/log/asbx/bootstrap.log | tee -a /dev/hvc0 2>/dev/null) 2>&1
+else
+    # No share: the console is the only way out. Say so, loudly, rather than
+    # logging into a directory the host will never read.
+    exec > >(tee -a /var/log/asbx/bootstrap.log 2>/dev/null | tee -a /dev/hvc0 2>/dev/null) 2>&1
+    echo "[asbx-bootstrap] WARNING: virtio-fs share 'asbxlog' did not mount."
+    echo "[asbx-bootstrap] Logs below reach the console only; the host will see"
+    echo "[asbx-bootstrap] no bootstrap.log for this boot."
+fi
 
 log() { echo "[asbx-bootstrap] $*"; }
 

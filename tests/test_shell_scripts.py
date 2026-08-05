@@ -91,3 +91,21 @@ def test_the_prepared_flag_is_not_written_through_a_silenced_failure():
         if 's/"prepared": false' in line:
             assert "|| true" not in line
             assert "2>/dev/null" not in line
+
+
+def test_the_bootstrap_mirrors_its_log_to_the_console():
+    """The share can fail to mount; the console cannot.
+
+    Logging only into /var/log/asbx meant a failed virtio-fs mount produced no
+    bootstrap.log on the host - identical, from the outside, to a bootstrap
+    that never ran. Two very different problems, one symptom, and no way to
+    tell them apart without attaching a console by hand.
+    """
+    text = (REPO / "src/agentsandbox/vm/guest/bootstrap.sh").read_text()
+    assert "/dev/hvc0" in text
+    assert "did not mount" in text
+
+
+def test_the_bootstrap_does_not_swallow_the_mount_failure():
+    text = (REPO / "src/agentsandbox/vm/guest/bootstrap.sh").read_text()
+    assert "mountpoint -q /var/log/asbx || mount" not in text
