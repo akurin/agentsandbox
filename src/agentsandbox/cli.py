@@ -1160,15 +1160,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # parser
 
 
+def _hidden_parser(sub, name: str) -> argparse.ArgumentParser:
+    """Register a subcommand that does not appear in help at all.
+
+    ``help=argparse.SUPPRESS`` is not enough on its own: argparse still keeps
+    the entry and renders it as a literal "==SUPPRESS==" line. Dropping the
+    pseudo-action is what actually hides it - from the usage line and the
+    command list both.
+    """
+    parser = sub.add_parser(name, help=argparse.SUPPRESS)
+    sub._choices_actions.pop()
+    return parser
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asbx", description=__doc__)
     parser.add_argument("--session", help="session id (default: the newest running session)")
-    sub = parser.add_subparsers(
-        dest="command",
-        required=True,
-        metavar="{create,start,stop,shell,ls,inspect,rm,reset,cap,profile,secret,"
-        "approvals,approve,audit,diag,doctor,prune}",
-    )
+    sub = parser.add_subparsers(dest="command", required=True)
 
     # -- environments (the everyday path) -----------------------------------
     create = sub.add_parser("create", help="define an environment (does not boot it)")
@@ -1217,7 +1225,7 @@ def build_parser() -> argparse.ArgumentParser:
     shell.add_argument("command", nargs=argparse.REMAINDER, help="run this instead of a shell")
     shell.set_defaults(func=cmd_shell)
 
-    proxy = sub.add_parser("vsock-proxy", help=argparse.SUPPRESS)
+    proxy = _hidden_parser(sub, "vsock-proxy")
     proxy.add_argument("socket")
     proxy.set_defaults(func=cmd_vsock_proxy)
 
@@ -1450,6 +1458,15 @@ def build_parser() -> argparse.ArgumentParser:
     diag.set_defaults(func=cmd_diag)
 
     sub.add_parser("doctor", help="check the host prerequisites").set_defaults(func=cmd_doctor)
+    # Spell the usage line from the commands that are actually registered.
+    # It used to be a hand-written string, which meant a new subcommand was
+    # invisible in `asbx` until someone remembered to edit it in two places -
+    # the command worked, but nobody could find it.
+    #
+    # Commands registered through _hidden_parser are already absent from
+    # _choices_actions, so this lists exactly what the help body lists.
+    visible = [a.dest for a in sub._choices_actions if a.help is not argparse.SUPPRESS]
+    sub.metavar = "{" + ",".join(visible) + "}"
     return parser
 
 
