@@ -84,7 +84,11 @@ export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
 EOF
     chmod 0644 /etc/profile.d/asbx-ca.sh
 else
-    log "FATAL: no session CA at $CA_SRC - https will fail for everything"
+    # Stop. Continuing produces a guest that looks healthy - tunnel up, netcheck
+    # green - and fails certificate verification on every https request, which
+    # is a much harder thing to diagnose than a boot that refused to finish.
+    log "FATAL: no session CA at $CA_SRC - https would fail for everything"
+    exit 1
 fi
 
 # -- kernel and network --------------------------------------------------------

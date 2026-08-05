@@ -99,6 +99,18 @@ def render_user_data(
     ssh_host_pub: str = "",
     ssh_authorized_key: str = "",
 ) -> str:
+    # Checked first, before anything is built. Without the session CA every
+    # https call inside the guest fails certificate verification, surfacing as
+    # "certificate verify failed" from apt, curl and pip at once - a long way
+    # from the empty string that caused it. The caller waits for mitmproxy to
+    # write the CA before getting here, so an empty value means that guarantee
+    # broke and there is nothing useful to render.
+    if not ca_cert.strip():
+        raise ValueError(
+            "refusing to render cloud-init without a session CA certificate: "
+            "the guest would fail every https request"
+        )
+
     vsock_ports = vsock_ports or {}
     shares = shares or []
 
@@ -192,10 +204,9 @@ def render_user_data(
             ),
         ]
 
-    if ca_cert:
-        write_files.append(
-            _write_file("/usr/local/share/ca-certificates/asbx-session-ca.crt", ca_cert, "0644")
-        )
+    write_files.append(
+        _write_file("/usr/local/share/ca-certificates/asbx-session-ca.crt", ca_cert, "0644")
+    )
 
     # Guest diagnostics go to the host, so a guest that powers itself off still
     # leaves an explanation behind.
@@ -211,19 +222,27 @@ def render_user_data(
     runcmd = [
         ["systemctl", "daemon-reload"],
         ["systemctl", "restart", "serial-getty@hvc0.service"],
-        ["/usr/local/bin/asbx-bootstrap"],
     ]
-    # Hand writable mounts to the agent. The mount points are known here, so
-    # the guest does not have to work them out for itself.
-    for tag, mount_point, _fs, options, *_ in mounts:
-        if tag != "asbxlog" and "ro," not in options:
-            runcmd.append(["chown", "agent:agent", mount_point])
+    # The operator's way in comes up *before* the bootstrap, not after.
+    #
+    # cloud-init stops at the first runcmd that fails, so with ssh last, any
+    # bootstrap failure took ssh down with it - and the one thing you want when
+    # the bootstrap has failed is a shell in the guest to find out why. This
+    # ordering costs nothing: sshd listens on loopback and is reachable only
+    # over vsock, which the host alone can dial, so it is no more exposed for
+    # having started earlier.
     if ssh_host_key and ssh_authorized_key:
         runcmd += [
             ["systemctl", "unmask", "ssh.socket"],
             ["systemctl", "enable", "--now", "ssh.service"],
             ["systemctl", "enable", "--now", "asbx-sshd-vsock.service"],
         ]
+    runcmd.append(["/usr/local/bin/asbx-bootstrap"])
+    # Hand writable mounts to the agent. The mount points are known here, so
+    # the guest does not have to work them out for itself.
+    for tag, mount_point, _fs, options, *_ in mounts:
+        if tag != "asbxlog" and "ro," not in options:
+            runcmd.append(["chown", "agent:agent", mount_point])
     for guest_port in sorted(vsock_ports):
         runcmd.append(["systemctl", "enable", "--now", f"asbx-forward@{guest_port}.service"])
 

@@ -12,6 +12,8 @@ import json
 
 import pytest
 
+FAKE_CA = "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+
 from agentsandbox.session import Share
 from agentsandbox.vm.cloudinit import render_network, render_user_data
 from agentsandbox.vm.gateway import GatewayConfig, guest_network_facts
@@ -26,7 +28,7 @@ def driver(session, tmp_path):
     identity.write_mitm_conf(session.paths.wireguard_conf)
     identity.write_guest_config(session.paths.guest_wireguard_conf, endpoint_host="192.168.127.1")
     session.paths.ca_cert.parent.mkdir(parents=True, exist_ok=True)
-    session.paths.ca_cert.write_text("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
+    session.paths.ca_cert.write_text(FAKE_CA)
     session.paths.ca_key.write_text("-----BEGIN PRIVATE KEY-----\nCA-SECRET\n-----END PRIVATE KEY-----\n")
     return VfkitDriver(session, VmConfig(), GatewayConfig())
 
@@ -244,7 +246,7 @@ def test_project_mounts_at_the_host_path_by_default(session, tmp_path):
     rendered = render_user_data(
         session=manager.session,
         wg_config=manager.session.paths.guest_wireguard_conf.read_text(),
-        ca_cert="",
+        ca_cert=FAKE_CA,
         net=guest_network_facts(GatewayConfig()),
         shares=list(manager.session.shares),
     )
@@ -266,7 +268,7 @@ def test_project_mount_point_is_adjustable(session, tmp_path):
     rendered = render_user_data(
         session=manager.session,
         wg_config=manager.session.paths.guest_wireguard_conf.read_text(),
-        ca_cert="",
+        ca_cert=FAKE_CA,
         net=guest_network_facts(GatewayConfig()),
         shares=list(manager.session.shares),
     )
@@ -286,7 +288,7 @@ def test_capability_placeholders_are_delivered_as_guest_environment(session, dri
     rendered = render_user_data(
         session=session,
         wg_config=session.paths.guest_wireguard_conf.read_text(),
-        ca_cert="",
+        ca_cert=FAKE_CA,
         net=guest_network_facts(GatewayConfig()),
         capability_env={"GITHUB_TOKEN": "cap_v1_abc", "OPENAI_API_KEY": "cap_v1_def"},
     )
@@ -312,7 +314,7 @@ def test_no_capabilities_means_an_empty_env_file(session, driver):
         render_user_data(
             session=session,
             wg_config=session.paths.guest_wireguard_conf.read_text(),
-            ca_cert="",
+            ca_cert=FAKE_CA,
             net=guest_network_facts(GatewayConfig()),
         )
     )
@@ -331,7 +333,7 @@ def test_writable_mounts_are_handed_to_the_agent(session, tmp_path):
         render_user_data(
             session=manager.session,
             wg_config=manager.session.paths.guest_wireguard_conf.read_text(),
-            ca_cert="",
+            ca_cert=FAKE_CA,
             net=guest_network_facts(GatewayConfig()),
             shares=list(manager.session.shares),
         ).split("\n", 1)[1]
@@ -346,7 +348,7 @@ def test_read_only_shares_are_not_chowned(session, driver, tmp_path):
         render_user_data(
             session=session,
             wg_config=session.paths.guest_wireguard_conf.read_text(),
-            ca_cert="",
+            ca_cert=FAKE_CA,
             net=guest_network_facts(GatewayConfig()),
             shares=[Share(path=str(docs), tag="docs", read_only=True)],
         ).split("\n", 1)[1]
@@ -412,3 +414,36 @@ def test_the_guest_link_is_not_required_for_network_online():
     assert "[Link]" in unit
     # The reason it is safe: still no default route, only the endpoint route.
     assert "Gateway=" not in unit
+
+
+def test_rendering_without_a_session_ca_is_refused():
+    """A guest with no CA boots healthily and fails every https request.
+
+    The bootstrap said FATAL and carried on, so the symptom arrived later as
+    "certificate verify failed" from apt, curl and pip at once - a long way
+    from the empty string that caused it. Both ends now refuse: this one so it
+    cannot be rendered, and the bootstrap so it cannot be booted.
+    """
+    from agentsandbox.vm.cloudinit import render_user_data
+
+    with pytest.raises(ValueError, match="session CA"):
+        render_user_data(
+            session=None, wg_config="", ca_cert="   ", net={"address": "1.2.3.4/24", "gateway": "1.2.3.1"}
+        )
+
+
+def test_ssh_starts_before_the_bootstrap(session, driver):
+    """cloud-init stops at the first failing runcmd, so with ssh last a failed
+    bootstrap took away the shell you need to diagnose it."""
+    rendered = user_data(
+        session,
+        ssh_host_key="HOSTKEY",
+        ssh_host_pub="ssh-ed25519 AAAA host",
+        ssh_authorized_key="ssh-ed25519 AAAA client",
+    )
+    runcmd = json.loads(rendered.split("\n", 1)[1])["runcmd"]
+    flat = [" ".join(entry) if isinstance(entry, list) else str(entry) for entry in runcmd]
+
+    ssh_at = next(i for i, c in enumerate(flat) if "asbx-sshd-vsock" in c)
+    boot_at = next(i for i, c in enumerate(flat) if "asbx-bootstrap" in c)
+    assert ssh_at < boot_at
