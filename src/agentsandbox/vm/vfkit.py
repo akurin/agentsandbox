@@ -98,15 +98,18 @@ def list_images() -> list[dict]:
     found: list[dict] = []
     for raw in sorted(images_dir().glob("*.raw")):
         name = raw.stem
-        entry = {"name": name, "path": raw, "bytes": raw.stat().st_size, "prepared": None}
-        if name == Path(LEGACY_IMAGE).stem:
-            entry["name"] = f"{DEFAULT_IMAGE} (unnamed legacy image)"
+        entry = {"path": raw, "bytes": raw.stat().st_size, "prepared": None}
         meta = image_metadata_path(name)
         if meta.exists():
             try:
                 entry.update(json.loads(meta.read_text()))
             except (OSError, ValueError):
                 entry["distro"] = "unreadable metadata"
+        # After the merge: the file's own "name" must not decide what this is
+        # called on disk, which is the only identity boxes refer to.
+        entry["name"] = name
+        if name == Path(LEGACY_IMAGE).stem:
+            entry["name"] = f"{DEFAULT_IMAGE} (unnamed legacy image)"
         found.append(entry)
     return found
 

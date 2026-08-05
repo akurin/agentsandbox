@@ -141,24 +141,38 @@ echo ""
 console_report="$(grep -a "ASBX-PREPARED" "$WORK/console.log" 2>/dev/null | tail -1 || true)"
 
 if [ -f "$WORK/signal/prepared" ] || [ -n "$console_report" ]; then
-    echo "==> golden image prepared: $GOLDEN"
-    # Flip the flag build-image.sh left false. An unprepared image boots and
-    # then fails at the tunnel, with nothing on the console explaining why -
-    # so it is worth being able to answer "was this ever prepared?" directly.
-    if [ -f "$IMAGES_DIR/$IMAGE_NAME.json" ]; then
-        sed -i '' 's/"prepared": false/"prepared": true/' "$IMAGES_DIR/$IMAGE_NAME.json" 2>/dev/null || true
-    fi
+    echo "==> provisioning boot finished: $GOLDEN"
     [ -f "$WORK/signal/prepared" ] && sed 's/^/    /' "$WORK/signal/prepared"
     [ -n "$console_report" ] && echo "    $console_report"
+
+    # Nothing above this line may mark the image prepared. An earlier version
+    # set the flag here and checked for MISSING afterwards, so an image whose
+    # packages failed to install was recorded as prepared and *then* the script
+    # exited 1. Every later boot of it fails at the tunnel - no wg, no socat,
+    # no bootstrap - while `asbx image ls` insists it is fine.
     if echo "$console_report" | grep -q MISSING; then
         echo ""
-        echo "!! but something did not install - see MISSING above." >&2
-        echo "   The provisioning boot probably had no working network." >&2
+        echo "!! packages are missing - see MISSING above." >&2
+        echo "   NOT marking this image prepared; re-run once the provisioning" >&2
+        echo "   boot has working network." >&2
         exit 1
     fi
+    if [ -z "$console_report" ]; then
+        echo ""
+        echo "!! the guest finished but never reported which packages it has," >&2
+        echo "   so this image is NOT being marked prepared. Check the console:" >&2
+        echo "       tail -60 $WORK/console.log" >&2
+        exit 1
+    fi
+
+    # Only now: the guest said, in its own words, that all three are present.
+    if [ -f "$IMAGES_DIR/$IMAGE_NAME.json" ]; then
+        sed -i '' 's/"prepared": false/"prepared": true/' "$IMAGES_DIR/$IMAGE_NAME.json"
+    fi
+
     echo ""
-    echo "    Every session now clones an image that can bring up its tunnel."
-    echo "    Next: .venv/bin/asbx session start --allow <host> --project <dir>"
+    echo "    $IMAGE_NAME can now bring up its tunnel."
+    echo "    Next: asbx create NAME --project DIR --image $IMAGE_NAME"
 else
     cat >&2 <<EOF
 

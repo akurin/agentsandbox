@@ -1229,8 +1229,13 @@ def cmd_image_list(args: argparse.Namespace) -> int:
         line = f"{image['name']:<28} {size:>6.1f} GiB"
         if image.get("built_at"):
             line += f"  built {image['built_at']}"
+        # Unknown is not the same as fine. An image with no metadata has never
+        # been through prepare-image.sh as far as anything here can tell, and
+        # saying nothing would read as a clean bill of health.
         if image.get("prepared") is False:
-            line += "  !! not prepared"
+            line += "  !! not prepared - run ./vm/prepare-image.sh"
+        elif image.get("prepared") is not True:
+            line += "  ?  prepared state unknown"
         print(line)
 
     used = {}

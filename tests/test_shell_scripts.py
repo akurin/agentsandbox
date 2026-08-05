@@ -67,3 +67,27 @@ def test_the_build_banner_still_names_the_commands_it_recommends():
     banner = (REPO / "vm/build-image.sh").read_text()
     for command in ("asbx create", "asbx set", "asbx reset", "prepare-image.sh"):
         assert command in banner
+
+
+def test_an_image_is_marked_prepared_only_after_the_packages_are_confirmed():
+    """The flag said "prepared" for an image with no wireguard-tools.
+
+    prepare-image.sh used to set prepared=true and *then* check the guest's
+    report for MISSING, so a failed provisioning boot left the image recorded
+    as good and exited 1. Every later boot died at the tunnel while
+    `asbx image ls` insisted the image was fine - the flag is only worth
+    having if it cannot lie.
+    """
+    text = (REPO / "vm/prepare-image.sh").read_text()
+    flip = text.index('s/"prepared": false/"prepared": true/')
+    missing_check = text.index('grep -q MISSING')
+    assert missing_check < flip, "the prepared flag is set before MISSING is checked"
+
+
+def test_the_prepared_flag_is_not_written_through_a_silenced_failure():
+    """`|| true` on the write would put the lie back, quietly."""
+    text = (REPO / "vm/prepare-image.sh").read_text()
+    for line in text.splitlines():
+        if 's/"prepared": false' in line:
+            assert "|| true" not in line
+            assert "2>/dev/null" not in line
