@@ -1189,7 +1189,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
     proxy = f"{shlex.quote(sys.executable)} -m agentsandbox.cli vsock-proxy {shlex.quote(str(socket_path))}"
     identity.write_client_config(box.name, proxy)
 
-    if not _wait_for_sshd(socket_path):
+    if not _wait_for_sshd(socket_path, ready_marker=session.paths.guest_logs / "ready"):
         print(
             f"!! {box.name} is up but its sshd never answered.\n"
             f"   `asbx diag` shows the guest console; the bootstrap may have failed.",
@@ -1204,7 +1204,9 @@ def cmd_shell(args: argparse.Namespace) -> int:
     return 0  # unreachable
 
 
-def _wait_for_sshd(socket_path: Path, timeout: float = 180.0) -> bool:
+def _wait_for_sshd(
+    socket_path: Path, timeout: float = 180.0, ready_marker: Path | None = None
+) -> bool:
     """Wait until the guest's sshd answers, by looking for its banner.
 
     ssh's own ConnectionAttempts does not help here: with a ProxyCommand, a
@@ -1228,7 +1230,13 @@ def _wait_for_sshd(socket_path: Path, timeout: float = 180.0) -> bool:
         try:
             sock.connect(str(socket_path))
             if sock.recv(4).startswith(b"SSH-"):
-                return True
+                # Reachable is not ready. sshd starts before the bootstrap, so
+                # that a failed bootstrap still leaves a way in; a shell taken
+                # in that window has no tunnel and no capability placeholders,
+                # because the file holding them is still root-owned and the
+                # profile script skips what it cannot read.
+                if ready_marker is None or ready_marker.exists():
+                    return True
         except OSError:
             pass
         finally:

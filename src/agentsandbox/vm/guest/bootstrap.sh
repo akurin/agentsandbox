@@ -166,4 +166,11 @@ if ! /usr/local/bin/asbx-netcheck; then
     systemctl poweroff
 fi
 
+# A marker the host can see. sshd is started before this script runs, so that
+# a failed bootstrap still leaves a way in - which means a shell can be opened
+# while the guest is only half configured: tunnel not up, capability
+# placeholders still root-owned and therefore skipped by the profile script.
+# `asbx shell` waits for this file, so the shell you get is one where the
+# sandbox is actually in force.
+date -Is > /var/log/asbx/ready 2>/dev/null || true
 log "ready"

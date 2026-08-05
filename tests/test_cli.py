@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 import pytest
 
@@ -254,3 +255,53 @@ def test_diag_still_prefers_a_running_session():
     Session(session_id="s-live", state=STATE_RUNNING, created_at=100.0).save()
 
     assert cli._diag_session(None).session_id == "s-live"
+
+
+def test_reachable_is_not_ready(tmp_path):
+    """sshd starts before the bootstrap so a failed boot stays debuggable.
+
+    The cost is a window where a shell can be opened into a half-configured
+    guest: no tunnel, and capability placeholders still root-owned, so the
+    profile script skips the file it cannot read and `env | grep WIREMOCK`
+    comes back empty. The marker closes that window.
+    """
+    import socket
+    import threading
+
+    from helpers import unix_sockets_available
+
+    if not unix_sockets_available(tmp_path):
+        pytest.skip("outbound unix sockets are blocked in this box")
+
+    path = tmp_path / "ssh.sock"
+    marker = tmp_path / "ready"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen(8)
+
+    def _greet():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            conn.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+            conn.close()
+
+    threading.Thread(target=_greet, daemon=True).start()
+    try:
+        # sshd answers, but the bootstrap has not finished.
+        assert cli._wait_for_sshd(path, timeout=3.0, ready_marker=marker) is False
+        marker.write_text("2026-08-05T09:00:00Z")
+        assert cli._wait_for_sshd(path, timeout=10.0, ready_marker=marker) is True
+    finally:
+        server.close()
+
+
+def test_the_bootstrap_writes_the_marker_last():
+    """It must mean "everything above succeeded", so it goes after netcheck."""
+    text = (
+        Path(cli.__file__).parent / "vm" / "guest" / "bootstrap.sh"
+    ).read_text()
+    assert "/var/log/asbx/ready" in text
+    assert text.index("asbx-netcheck") < text.index("/var/log/asbx/ready")
