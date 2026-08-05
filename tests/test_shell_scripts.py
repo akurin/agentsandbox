@@ -209,14 +209,20 @@ def test_the_provisioning_cloud_config_renders_and_parses():
     assert "wireguard-tools" in document["packages"]
 
 
-def test_the_wait_online_mask_is_verified_not_hoped_for():
-    """It was masked with `2>/dev/null || true`, so a failed mask said nothing
-    and produced a two-minute boot indistinguishable from a slow guest."""
+def test_wait_online_is_bounded_rather_than_masked():
+    """Masking it stopped the guest booting at all.
+
+    Units that require network-online.target fail outright when the unit
+    behind it is masked, instead of waiting - and cloud-init-network is one of
+    them, so runcmd never ran and no sshd ever appeared. A bounded timeout
+    keeps the dependency chain intact and simply stops waiting. The unmask is
+    needed because images built by the earlier version carry the mask, and a
+    masked unit ignores drop-ins.
+    """
     text = (REPO / "vm/prepare-image.sh").read_text()
-    mask = next(
-        line for line in text.splitlines()
-        if "systemctl mask systemd-networkd-wait-online.service" in line
-    )
-    assert "|| true" not in mask and "2>/dev/null" not in mask
+    assert "systemctl mask systemd-networkd-wait-online.service" not in text
+    assert "systemctl unmask systemd-networkd-wait-online.service" in text
+    assert "--timeout=5" in text
     assert "ASBX-WAITONLINE" in text
-    assert "grep -q masked" in text
+
+

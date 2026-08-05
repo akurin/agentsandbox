@@ -96,22 +96,25 @@ runcmd:
   - [ sh, -c, "systemctl disable --now ssh 2>/dev/null || true" ]
   - [ sh, -c, "systemctl disable --now ssh.socket 2>/dev/null || true" ]
   - [ sh, -c, "systemctl enable systemd-networkd 2>/dev/null || true" ]
-  # Nothing in a session guest is allowed to wait for "the network to be
-  # online". The interface never gets a default route - wg-quick installs the
-  # only route there is - so wait-online can never call the link routable and
-  # burns its full two-minute timeout every boot. That delay lands before
-  # cloud-init's runcmd, which is what starts the bootstrap that brings up the
-  # tunnel, so the guest sits there with no tunnel and no sshd looking dead.
+  # The interface never gets a default route - wg-quick installs the only route
+  # there is - so systemd-networkd-wait-online can never call the link routable
+  # and burns its full two-minute timeout on every boot. That delay lands before
+  # cloud-init's runcmd, which starts the bootstrap that brings up the tunnel.
   #
-  # Masked in the image rather than configured by cloud-init: cloud-init is
-  # what the stall delays, so anything it writes arrives too late to prevent
-  # it. RequiredForOnline=no in the .network unit covers later boots; this
-  # covers the first one.
-  - [ sh, -c, "systemctl mask systemd-networkd-wait-online.service" ]
-  - [ sh, -c, "systemctl mask systemd-networkd-wait-online@.service || true" ]
-  # Report it, like the console setting. A mask that silently failed produced
-  # a two-minute boot and no way to tell it from a slow guest.
-  - [ sh, -c, "echo \"ASBX-WAITONLINE \$(systemctl is-enabled systemd-networkd-wait-online.service 2>&1)\" > /dev/hvc0" ]
+  # Bounded rather than masked. Masking looks tidier and is worse: units that
+  # require network-online.target then fail outright instead of waiting, and
+  # cloud-init-network is one of them - so the guest never reaches runcmd at
+  # all and no sshd ever appears. A short timeout keeps the dependency chain
+  # intact and simply stops waiting.
+  # Undo the mask an earlier version of this script applied. A masked unit
+  # ignores drop-ins entirely, so without this the image keeps the behaviour
+  # that stopped the guest reaching runcmd.
+  - [ sh, -c, "systemctl unmask systemd-networkd-wait-online.service || true" ]
+  - [ sh, -c, "systemctl unmask systemd-networkd-wait-online@.service || true" ]
+  - [ mkdir, -p, /etc/systemd/system/systemd-networkd-wait-online.service.d ]
+  - [ sh, -c, "printf '[Service]\\nExecStart=\\nExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any --timeout=5\\nSuccessExitStatus=0 1 2\\n' > /etc/systemd/system/systemd-networkd-wait-online.service.d/10-asbx-timeout.conf" ]
+  - [ sh, -c, "systemctl daemon-reload" ]
+  - [ sh, -c, "echo \"ASBX-WAITONLINE \$(systemctl cat systemd-networkd-wait-online.service | grep -c 'timeout=5')\" > /dev/hvc0" ]
   # Report success where the host can see it.
   - [ sh, -c, "modprobe virtiofs 2>/dev/null || true" ]
   - [ mkdir, -p, /mnt/asbxprep ]
@@ -176,9 +179,9 @@ if [ -f "$WORK/signal/prepared" ] || [ -n "$console_report" ]; then
     [ -n "$console_report" ] && echo "    $console_report"
     [ -n "$console_verdict" ] && echo "    $console_verdict"
     [ -n "$waitonline_verdict" ] && echo "    $waitonline_verdict"
-    if [ -n "$waitonline_verdict" ] && ! echo "$waitonline_verdict" | grep -q masked; then
+    if [ -n "$waitonline_verdict" ] && echo "$waitonline_verdict" | grep -q "WAITONLINE 0"; then
         echo ""
-        echo "!! systemd-networkd-wait-online is not masked." >&2
+        echo "!! the systemd-networkd-wait-online timeout drop-in did not apply." >&2
         echo "   Every boot of this image will stall two minutes waiting for a" >&2
         echo "   default route the guest is designed never to have." >&2
         exit 1
