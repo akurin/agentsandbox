@@ -1457,14 +1457,14 @@ def _mitmweb_warning() -> str:
     return (
         "!! mitmweb keeps every flow it sees - headers and bodies - in memory.\n"
         "   Nothing else in this sandbox stores traffic, and the UI is readable\n"
-        "   by anything on this Mac. It is capped at 2000 flows, but detach it\n"
-        "   when you are done rather than leaving it attached for a long run:\n"
-        "       asbx box web detach"
+        "   by anything on this Mac. It is capped at 2000 flows, but turn it\n"
+        "   off when you are done rather than leaving it on for a long run:\n"
+        "       asbx box web NAME --off"
     )
 
 
 def cmd_web(args: argparse.Namespace) -> int:
-    """Attach or detach mitmweb without restarting the box.
+    """Turn mitmweb on or off without restarting the box.
 
     Everything the guest depends on outlives the proxy process - the WireGuard
     keys are a file, the port is on the session record, the CA is in a
@@ -1475,7 +1475,7 @@ def cmd_web(args: argparse.Namespace) -> int:
     from .broker.server import read_token, send_command
 
     session = _resolve_session(args.name)
-    attach = args.action == "attach"
+    attach = args.on
     try:
         reply = send_command(
             session.paths.broker_socket,
@@ -1736,14 +1736,18 @@ def build_parser() -> argparse.ArgumentParser:
     reset.add_argument("name")
     reset.set_defaults(func=cmd_box_reset)
 
-    web = box_sub.add_parser("web", help="attach or detach the mitmweb traffic inspector")
-    web.add_argument("action", choices=["attach", "detach"])
-    # Trailing, not leading like `shell`/`stop`'s `name`: `action` already
-    # occupies the first positional and its choices are fixed, so there is no
-    # ambiguity in putting a free-text box name after it - putting it before
-    # would (`asbx box web neo attach` needing `name` first) make plain
-    # `asbx box web attach` bind "attach" to `name` and leave `action` unfilled.
+    web = box_sub.add_parser("web", help="turn the mitmweb traffic inspector on or off")
     web.add_argument("name", nargs="?", help="box (default: the only one running)")
+    # A required choice, not a toggle: which way "asbx box web neo" would flip
+    # depends on state the command line does not show, and getting it wrong is
+    # silent - the opposite of what you want for something that starts keeping
+    # every flow, headers and bodies, in memory. --on/--off are flags rather
+    # than a second positional (`web attach`/`web detach`) so the command
+    # stays `box web NAME [args]` - three words, like every other box command
+    # - instead of reading as a fourth, verb-shaped argument.
+    onoff = web.add_mutually_exclusive_group(required=True)
+    onoff.add_argument("--on", action="store_true", help="turn mitmweb on")
+    onoff.add_argument("--off", dest="on", action="store_false", help="turn mitmweb off")
     web.add_argument(
         "--port", type=int, default=0, metavar="N", help="fixed port (default: random)"
     )
@@ -1765,10 +1769,10 @@ def build_parser() -> argparse.ArgumentParser:
     approvals.add_argument("name", nargs="?", help="box (default: the only one running)")
     approvals.set_defaults(func=cmd_approvals)
 
-    # `request_id` leads and `name` trails, same shape as `web`'s `action`
-    # then `name`: the required, command-specific positional goes first, and
-    # the optional box name fills in after it, so there is nothing for
-    # argparse - or a reader - to disambiguate by position.
+    # `request_id` leads and `name` trails: the required, command-specific
+    # positional goes first, and the optional box name fills in after it, so
+    # there is nothing for argparse - or a reader - to disambiguate by
+    # position.
     approve = box_sub.add_parser("approve", help="answer a pending approval")
     approve.add_argument("request_id")
     approve.add_argument("name", nargs="?", help="box (default: the only one running)")

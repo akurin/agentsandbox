@@ -409,24 +409,31 @@ def test_attaching_mitmweb_warns_that_it_retains_traffic():
     behind a loopback UI anything on the Mac can read."""
     warning = cli._mitmweb_warning()
     assert "memory" in warning
-    assert "asbx box web detach" in warning
+    assert "asbx box web NAME --off" in warning
 
 
-def test_web_attach_and_detach_are_reachable():
-    for action in ("attach", "detach"):
-        args = cli.build_parser().parse_args(["box", "web", action])
+def test_web_on_and_off_are_reachable():
+    for flag, on in (("--on", True), ("--off", False)):
+        args = cli.build_parser().parse_args(["box", "web", flag])
         assert args.func is cli.cmd_web
-        assert args.action == action
+        assert args.on is on
         assert args.name is None
 
 
+def test_web_direction_is_a_required_flag_not_a_toggle():
+    """Which way a bare `asbx box web neo` would flip depends on state the
+    command line does not show - wrong, silently, for something that starts
+    keeping every flow in memory. --on/--off has to be explicit."""
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["box", "web", "neo"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["box", "web", "neo", "--on", "--off"])
+
+
 def test_web_takes_a_trailing_box_name_like_approve_takes_a_trailing_one():
-    """`name` trails `action` here only because `action` already owns the
-    first positional and its choices are fixed - a free-text `name` ahead of
-    it would swallow `attach`/`detach` on the no-name-given form. Same shape
-    `box approve` uses for `request_id` then `name`."""
-    args = cli.build_parser().parse_args(["box", "web", "attach", "neo"])
-    assert args.action == "attach"
+    args = cli.build_parser().parse_args(["box", "web", "neo", "--on"])
+    assert args.on is True
     assert args.name == "neo"
 
 
@@ -443,8 +450,8 @@ def test_mitmweb_is_not_a_start_time_flag():
 
 
 def test_the_web_port_moved_to_the_command_that_starts_it():
-    args = cli.build_parser().parse_args(["box", "web", "attach", "--port", "8081"])
-    assert args.action == "attach"
+    args = cli.build_parser().parse_args(["box", "web", "--on", "--port", "8081"])
+    assert args.on is True
     assert args.port == 8081
 
 

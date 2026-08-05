@@ -556,7 +556,7 @@ def test_a_failing_command_is_reported_not_fatal(session, broker, tmp_path):
 
 def test_a_session_whose_supervisor_died_is_not_running(monkeypatch):
     """Three failed starts left three sessions marked running with nothing
-    behind them, and `asbx box web attach` refused with "3 sessions are
+    behind them, and `asbx box web --on` refused with "3 sessions are
     running - name the box". The state on disk is written by a supervisor
     that may not have survived to write STOPPED."""
     from agentsandbox.session import (
@@ -633,7 +633,7 @@ def test_waiting_for_the_listener_gives_up_when_the_proxy_dies(monkeypatch):
 def test_renegotiating_the_tunnel_is_skipped_when_there_is_no_guest_to_ask():
     """A session started without a box has no sshd. Best-effort means the
     reattach carries on and WireGuard's own timers take over - not an
-    exception out of `asbx box web detach`."""
+    exception out of `asbx box web --off`."""
     manager = SessionManager.create(allow_hosts=["example.com"])
     result = manager.renegotiate_tunnel()
 
