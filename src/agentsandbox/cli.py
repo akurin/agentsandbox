@@ -935,7 +935,7 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
         secret = autosign.signing_secret
         print("\n  aws_autosign: every AWS request the guest signs gets re-signed by the broker")
         print("    guest env:    $AWS_ACCESS_KEY_ID, $AWS_SECRET_ACCESS_KEY (dummy - minted per session)")
-        print(f"    signing_secret: {secret.backend}:{secret.service}"
+        print(f"    secret:       {secret.backend}:{secret.service}"
               f"{':' + secret.account if secret.account else ''}")
 
     for spec in specs:
