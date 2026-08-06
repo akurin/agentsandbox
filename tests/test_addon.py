@@ -140,11 +140,17 @@ def test_capability_in_the_url_is_refused_before_it_leaves(addon, broker_stub):
     assert broker_stub.requests == []
 
 
-def test_capability_in_the_body_is_refused(addon, broker_stub):
+def test_capability_in_the_body_is_brokered_not_refused_here(addon, broker_stub):
+    """The addon can't yet know the capability's injection kind - that means
+    resolving it, which is the broker's job - so a body placement is passed
+    through rather than refused at this layer. `sigv4` legitimately needs it;
+    every other kind is still refused, but by the broker (see test_broker.py),
+    which is the one that knows what it's holding.
+    """
     flow = http_flow(method=b"POST", content=f'{{"key":"{TOKEN}"}}'.encode())
     addon.request(flow)
-    assert flow.response.headers["X-Asbx-Reason"] == "capability_misplaced"
-    assert broker_stub.requests == []
+    assert len(broker_stub.requests) == 1
+    assert broker_stub.requests[0].capability == TOKEN
 
 
 def test_capability_in_a_cookie_is_refused(addon, broker_stub):

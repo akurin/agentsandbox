@@ -43,7 +43,7 @@ from .netpolicy import Destination, any_host_matches
 #: Injection strategies the broker knows how to perform safely. Anything else
 #: is refused rather than approximated - "deny unsupported authenticated
 #: protocols by default".
-SUPPORTED_INJECTIONS = frozenset({"bearer", "header", "basic"})
+SUPPORTED_INJECTIONS = frozenset({"bearer", "header", "basic", "sigv4"})
 
 
 def new_placeholder() -> str:
@@ -97,6 +97,18 @@ class InjectionSpec:
     #: build a matching Basic-auth header without the value being written
     #: twice in the profile. Basic auth only, and only alongside `username`.
     username_guest_env: str | None = None
+    #: AWS region/service the signature is scoped to. Kept explicit rather
+    #: than inferred from the destination host: S3's virtual-hosted URLs put
+    #: the bucket first, API Gateway puts the service second, and global
+    #: services often carry no region in the hostname at all - there is no
+    #: single rule to invert. sigv4 only.
+    region: str | None = None
+    service: str | None = None
+    #: The IAM credential used to *sign* the request - distinct from `secret`
+    #: above, which is the value substituted into the placeholder. The broker
+    #: never picks up ambient/host AWS credentials; this is the only way it
+    #: gets any. sigv4 only.
+    signing_secret: SecretRef | None = None
 
     def validate(self) -> None:
         if self.kind not in SUPPORTED_INJECTIONS:
@@ -114,18 +126,34 @@ class InjectionSpec:
             raise PolicyDenied(
                 "invalid_injection", "username.guest_env requires username.value to be set"
             )
+        sigv4_fields = (self.region, self.service, self.signing_secret)
+        if self.kind == "sigv4":
+            if not all(sigv4_fields):
+                raise PolicyDenied(
+                    "invalid_injection",
+                    "sigv4 injection requires region, service and signing_secret",
+                )
+        elif any(sigv4_fields):
+            raise PolicyDenied(
+                "invalid_injection",
+                "region/service/signing_secret only make sense for sigv4 injection",
+            )
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> InjectionSpec:
+        signing_secret = data.get("signing_secret")
         return cls(
             kind=data.get("kind", "bearer"),
             header=data.get("header", "Authorization"),
             template=data.get("template", "Bearer {secret}"),
             username=data.get("username"),
             username_guest_env=data.get("username_guest_env"),
+            region=data.get("region"),
+            service=data.get("service"),
+            signing_secret=SecretRef.from_dict(signing_secret) if signing_secret else None,
         )
 
 

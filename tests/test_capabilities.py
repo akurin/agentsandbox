@@ -143,6 +143,47 @@ def test_header_injection_requires_a_secret_placeholder():
         InjectionSpec(kind="header", header="X-Api-Key", template="constant").validate()
 
 
+def test_sigv4_requires_region_service_and_signing_secret():
+    with pytest.raises(PolicyDenied) as exc:
+        InjectionSpec(kind="sigv4").validate()
+    assert exc.value.reason == "invalid_injection"
+
+    with pytest.raises(PolicyDenied):
+        InjectionSpec(kind="sigv4", region="us-east-1").validate()
+
+    with pytest.raises(PolicyDenied):
+        InjectionSpec(
+            kind="sigv4", region="us-east-1", service="cloudformation"
+        ).validate()
+
+    InjectionSpec(
+        kind="sigv4",
+        region="us-east-1",
+        service="cloudformation",
+        signing_secret=SecretRef(service="aws-signing"),
+    ).validate()
+
+
+def test_sigv4_fields_are_refused_on_other_injection_kinds():
+    with pytest.raises(PolicyDenied) as exc:
+        InjectionSpec(kind="bearer", region="us-east-1").validate()
+    assert exc.value.reason == "invalid_injection"
+
+    with pytest.raises(PolicyDenied):
+        InjectionSpec(kind="bearer", signing_secret=SecretRef(service="x")).validate()
+
+
+def test_sigv4_injection_round_trips_through_to_dict():
+    spec = InjectionSpec(
+        kind="sigv4",
+        region="us-east-1",
+        service="cloudformation",
+        signing_secret=SecretRef(service="aws-signing", account="ci"),
+    )
+    restored = InjectionSpec.from_dict(spec.to_dict())
+    assert restored == spec
+
+
 def test_public_view_never_contains_the_token(store, github_capability):
     token, cap = github_capability
     assert token not in json.dumps(cap.public_view())

@@ -276,6 +276,25 @@ class SecretResolver:
         token, _ = _resolve_token(raw, provider, ref)
         return token
 
+    def fetch_fresh(self, ref: SecretRef) -> str:
+        """Fetch a secret bypassing the cache, including a ``FOREVER`` hold.
+
+        For most secrets the cache is exactly right - one Keychain prompt per
+        session, not one per request. It is wrong for a credential that
+        carries its *own* validity window the broker does not control, like
+        an AWS signing credential refreshed by a host-side job outside
+        ``asbx`` entirely (``aws configure export-credentials`` on a timer,
+        say): once ``hold_for_session`` has fired, the cache never expires on
+        its own, so the broker would keep signing with whatever was first
+        read long after the file on disk moved on.
+        """
+        provider = self.providers.get(ref.backend)
+        if provider is None:
+            raise BrokerError(f"unknown secret backend {ref.backend!r}")
+        raw = provider.fetch(ref)
+        token, _ = _resolve_token(raw, provider, ref)
+        return token
+
 
 def _resolve_token(raw: str, provider: SecretProvider, ref: SecretRef) -> tuple[str, bool]:
     """Parse an OAuth bundle or return the raw value if it is a plain token."""
@@ -375,3 +394,6 @@ class StaticResolver(SecretResolver):
         if key not in self._secrets:
             raise BrokerError(f"no test secret for {key!r}")
         return self._secrets[key]
+
+    def fetch_fresh(self, ref: SecretRef) -> str:
+        return self.fetch(ref)

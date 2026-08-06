@@ -114,7 +114,13 @@ class SandboxAddon:
             self._forward_or_kill(flow, dest)
             return
 
-        if location != "header":
+        # The addon doesn't know the capability's injection kind yet - that
+        # requires resolving it, which is the broker's job - so it can only
+        # rule out the placements nothing ever needs (URL, cookie). A body
+        # placement is legitimate for `sigv4` (the secret is a request
+        # parameter, not a header) and refused for everything else; the
+        # broker makes that kind-aware call once it knows what it's holding.
+        if location not in ("header", "body"):
             self._deny(
                 flow,
                 "capability_misplaced",

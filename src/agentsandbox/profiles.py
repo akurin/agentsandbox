@@ -276,6 +276,10 @@ def _resolve_injection(data: dict) -> InjectionSpec:
     ...}`` when the guest's own tooling also needs it. Nested, not a second
     flat ``username_guest_env`` field, so there is nothing shaped like it to
     swap it with.
+
+    ``signing_secret`` (sigv4 only) is a secret reference in the same shape
+    as the top-level ``secret`` - compact string or explicit object - since
+    it names a credential the same way, it just plays a different role.
     """
     username_field = data.get("username")
     username: str | None = None
@@ -286,12 +290,20 @@ def _resolve_injection(data: dict) -> InjectionSpec:
     elif username_field is not None:
         username = str(username_field)
 
+    signing_secret_field = data.get("signing_secret")
+    signing_secret = (
+        _resolve_secret_ref(signing_secret_field) if signing_secret_field is not None else None
+    )
+
     return InjectionSpec(
         kind=data.get("kind", "bearer"),
         header=data.get("header", "Authorization"),
         template=data.get("template", "Bearer {secret}"),
         username=username,
         username_guest_env=username_guest_env,
+        region=data.get("region"),
+        service=data.get("service"),
+        signing_secret=signing_secret,
     )
 
 

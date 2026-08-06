@@ -268,6 +268,44 @@ def test_username_plain_string_still_works(profile_dir):
     assert spec.injection.username_guest_env is None
 
 
+def test_sigv4_injection_parses_region_service_and_signing_secret(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{
+            "label": "cfn",
+            "when": {"hosts": ["cloudformation.us-east-1.amazonaws.com"], "methods": ["POST"]},
+            "secret": "keychain:cfn-param",
+            "injection": {
+                "kind": "sigv4",
+                "region": "us-east-1",
+                "service": "cloudformation",
+                "signing_secret": {"backend": "keychain", "service": "aws-ci", "account": "deploy"},
+            },
+        }],
+    }))
+    spec = load_profile(resolve_profile("p"))[0]
+    assert spec.injection.kind == "sigv4"
+    assert spec.injection.region == "us-east-1"
+    assert spec.injection.service == "cloudformation"
+    assert spec.injection.signing_secret.backend == "keychain"
+    assert spec.injection.signing_secret.service == "aws-ci"
+    assert spec.injection.signing_secret.account == "deploy"
+
+
+def test_sigv4_without_signing_secret_is_an_error(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{
+            "label": "cfn",
+            "when": {"hosts": ["cloudformation.us-east-1.amazonaws.com"]},
+            "secret": "keychain:cfn-param",
+            "injection": {"kind": "sigv4", "region": "us-east-1", "service": "cloudformation"},
+        }],
+    }))
+    with pytest.raises(CapabilityError, match="signing_secret"):
+        load_profile(resolve_profile("p"))
+
+
 def test_username_guest_env_requires_basic_auth(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,

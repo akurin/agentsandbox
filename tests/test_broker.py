@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -18,7 +19,7 @@ from agentsandbox.audit import AuditLog
 from agentsandbox.broker.core import BrokerCore, BrokerRequest, BrokerResponse, scrub_secret
 from agentsandbox.broker.upstream import UpstreamResponse
 from agentsandbox.capabilities import CapabilitySpec, InjectionSpec, SecretRef
-from agentsandbox.errors import UpstreamError
+from agentsandbox.errors import BrokerError, UpstreamError
 from agentsandbox.keychain import SecretResolver, StaticResolver
 
 from helpers import RecordingExecutor, make_request
@@ -313,6 +314,414 @@ def test_basic_and_header_injection_shapes(session, store, executor, resolver):
     )
     core.handle(make_request(token2))
     assert executor.last["credential_headers"] == [("X-Api-Key", SECRET)]
+
+
+SIGV4_KEYS = {"access_key_id": "AKIDEXAMPLE", "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}
+
+
+def _sigv4_core(session, store, executor, *, extra_secrets: dict | None = None):
+    secrets = {"cfn-param": "the-real-param-value", "aws-signing": json.dumps(SIGV4_KEYS)}
+    secrets.update(extra_secrets or {})
+    resolver = StaticResolver(secrets)
+    return BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+
+
+def _issue_sigv4_capability(store, **overrides):
+    fields = {
+        "label": "cfn",
+        "hosts": ["api.github.com"],
+        "methods": ["POST"],
+        "secret": SecretRef(service="cfn-param"),
+        "injection": InjectionSpec(
+            kind="sigv4",
+            region="us-east-1",
+            service="cloudformation",
+            signing_secret=SecretRef(service="aws-signing"),
+        ),
+    }
+    fields.update(overrides)
+    return store.issue(CapabilitySpec(**fields))
+
+
+def test_sigv4_substitutes_the_body_and_signs_it(session, store, executor):
+    core = _sigv4_core(session, store, executor)
+    token, _ = _issue_sigv4_capability(store)
+    body = f"Action=UpdateStack&Param={token}".encode()
+
+    response = core.handle(
+        make_request(
+            token,
+            target="/",
+            method="POST",
+            headers=[("Content-Type", "application/x-www-form-urlencoded")],
+            body=body,
+        )
+    )
+
+    assert response.decision == "allow"
+    sent_body = executor.last["body"]
+    assert b"the-real-param-value" in sent_body
+    assert token.encode() not in sent_body
+
+    # Signing produces its own headers directly; there is nothing left for
+    # the generic credential_headers path to add.
+    assert executor.last["credential_headers"] == []
+    headers = dict(executor.last["headers"])
+    assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+    assert "us-east-1/cloudformation/aws4_request" in headers["Authorization"]
+    assert "X-Amz-Date" in headers
+    assert headers["Host"] == "api.github.com"
+
+
+def test_sigv4_placeholder_in_the_body_is_allowed_unlike_every_other_kind(session, store, executor):
+    core = _sigv4_core(session, store, executor)
+    token, _ = _issue_sigv4_capability(store)
+    body = f"Action=UpdateStack&Param={token}".encode()
+
+    response = core.handle(
+        make_request(
+            token,
+            target="/",
+            method="POST",
+            headers=[("Content-Type", "application/x-www-form-urlencoded")],
+            body=body,
+        )
+    )
+    assert response.decision == "allow"
+
+
+def test_sigv4_still_refuses_the_placeholder_in_the_url(session, store, executor):
+    core = _sigv4_core(session, store, executor)
+    token, _ = _issue_sigv4_capability(store)
+
+    response = core.handle(
+        make_request(
+            token,
+            target=f"/?Param={token}",
+            method="POST",
+        )
+    )
+    assert response.reason == "capability_in_url"
+
+
+def test_sigv4_stale_signing_headers_from_the_guest_are_dropped(session, store, executor):
+    core = _sigv4_core(session, store, executor)
+    token, _ = _issue_sigv4_capability(store)
+    body = f"Action=UpdateStack&Param={token}".encode()
+
+    core.handle(
+        make_request(
+            token,
+            target="/",
+            method="POST",
+            headers=[
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("X-Amz-Date", "20200101T000000Z"),
+                ("X-Amz-Content-Sha256", "deadbeef"),
+                ("X-Amz-Checksum-Sha256", "deadbeef"),
+                ("X-Amz-Sdk-Checksum-Algorithm", "SHA256"),
+                ("X-Amz-Trailer", "x-amz-checksum-sha256"),
+            ],
+            body=body,
+        )
+    )
+    headers = {k.lower(): v for k, v in executor.last["headers"]}
+    assert headers["x-amz-date"] != "20200101T000000Z"
+    assert "x-amz-content-sha256" not in headers
+    assert "x-amz-checksum-sha256" not in headers
+    # A dangling algorithm name (or trailer announcement) with no checksum
+    # to back it up is not harmless metadata - S3 itself rejects it:
+    # "x-amz-sdk-checksum-algorithm specified, but no corresponding
+    # x-amz-checksum-* or x-amz-trailer headers were found."
+    assert "x-amz-sdk-checksum-algorithm" not in headers
+    assert "x-amz-trailer" not in headers
+
+
+def test_sigv4_uses_the_signing_secret_never_the_app_secret(session, store, executor):
+    """The credential that signs and the value substituted into the body are
+    different secrets, fetched from different refs - conflating them would
+    mean the broker signs with whatever it happens to be injecting, which is
+    not what an AWS credential is."""
+    core = _sigv4_core(session, store, executor)
+    token, _ = _issue_sigv4_capability(store)
+    body = f"Action=UpdateStack&Param={token}".encode()
+
+    core.handle(
+        make_request(
+            token,
+            target="/",
+            method="POST",
+            body=body,
+        )
+    )
+    headers = dict(executor.last["headers"])
+    assert "the-real-param-value" not in headers["Authorization"]
+    assert "AKIDEXAMPLE" in headers["Authorization"]
+
+
+def test_sigv4_signing_secret_must_be_a_json_bundle(session, store, executor):
+    core = _sigv4_core(session, store, executor, extra_secrets={"aws-signing": "not-json"})
+    token, _ = _issue_sigv4_capability(store)
+
+    response = core.handle(
+        make_request(
+            token,
+            target="/",
+            method="POST",
+            body=f"Param={token}".encode(),
+        )
+    )
+    assert response.reason == "invalid_signing_secret"
+
+
+def test_sigv4_signing_secret_needs_both_key_fields(session, store, executor):
+    core = _sigv4_core(
+        session, store, executor, extra_secrets={"aws-signing": json.dumps({"access_key_id": "AKID"})}
+    )
+    token, _ = _issue_sigv4_capability(store)
+
+    response = core.handle(
+        make_request(
+            token,
+            target="/",
+            method="POST",
+            body=f"Param={token}".encode(),
+        )
+    )
+    assert response.reason == "invalid_signing_secret"
+
+
+def test_sigv4_accepts_the_aws_cli_export_credentials_shape(session, store, executor):
+    """`aws configure export-credentials` emits PascalCase keys - the same
+    shape a host-side refresh job would write to a file verbatim. Both that
+    and this profile format's own snake_case are accepted."""
+    core = _sigv4_core(
+        session,
+        store,
+        executor,
+        extra_secrets={
+            "aws-signing": json.dumps(
+                {
+                    "Version": 1,
+                    "AccessKeyId": "AKIDCLIEXPORT",
+                    "SecretAccessKey": "cli-secret",
+                    "SessionToken": "cli-session-token",
+                }
+            )
+        },
+    )
+    token, _ = _issue_sigv4_capability(store)
+
+    response = core.handle(
+        make_request(token, target="/", method="POST", body=f"Param={token}".encode())
+    )
+    assert response.decision == "allow"
+    headers = dict(executor.last["headers"])
+    assert "AKIDCLIEXPORT" in headers["Authorization"]
+    assert headers["X-Amz-Security-Token"] == "cli-session-token"
+
+
+def test_sigv4_signing_secret_already_expired_is_refused(session, store, executor):
+    expired = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    core = _sigv4_core(
+        session,
+        store,
+        executor,
+        extra_secrets={"aws-signing": json.dumps({**SIGV4_KEYS, "Expiration": expired})},
+    )
+    token, _ = _issue_sigv4_capability(store)
+
+    response = core.handle(
+        make_request(token, target="/", method="POST", body=f"Param={token}".encode())
+    )
+    assert response.reason == "signing_secret_expired"
+
+
+def test_sigv4_signing_secret_not_yet_expired_is_accepted(session, store, executor):
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    core = _sigv4_core(
+        session,
+        store,
+        executor,
+        extra_secrets={"aws-signing": json.dumps({**SIGV4_KEYS, "Expiration": future})},
+    )
+    token, _ = _issue_sigv4_capability(store)
+
+    response = core.handle(
+        make_request(token, target="/", method="POST", body=f"Param={token}".encode())
+    )
+    assert response.decision == "allow"
+
+
+class _DictProvider:
+    """Fetches a fixed value per `ref.service` - a `keychain`-shaped stand-in
+    that doesn't shell out."""
+
+    def __init__(self, values: dict[str, str]):
+        self.values = values
+
+    def fetch(self, ref):
+        return self.values[ref.service]
+
+
+class _MutableProvider:
+    """Its answer can change between calls - stands in for a file a
+    host-side refresh job rewrites while the broker keeps running."""
+
+    def __init__(self, value: str):
+        self.value = value
+        self.calls = 0
+
+    def fetch(self, ref):
+        self.calls += 1
+        return self.value
+
+
+class _FailingProvider:
+    """Raises like a real backend does for a bad setup - a missing Keychain
+    item, a `pass` timeout, a signing-credential file with the wrong
+    permissions."""
+
+    def __init__(self, message: str):
+        self.message = message
+
+    def fetch(self, ref):
+        raise BrokerError(self.message)
+
+
+def test_a_secret_backend_failure_is_a_clean_denial_not_a_dead_connection(
+    session, store, executor
+):
+    """A Keychain item missing, a `pass` timeout, a signing-credential file
+    with the wrong permissions - none of that is a policy decision about the
+    request, but left uncaught it propagated straight through `handle()`,
+    which only ever caught `PolicyDenied`/`UpstreamError`. In the real
+    server that killed the connection thread outright, and the guest saw
+    "broker unavailable" for what was actually a precise, fixable error one
+    exception up."""
+    resolver = SecretResolver(
+        providers={"keychain": _FailingProvider("keychain item not found for service='x'")}
+    )
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    token, _ = store.issue(
+        CapabilitySpec(label="x", hosts=["api.github.com"], secret=SecretRef(service="x"))
+    )
+
+    response = core.handle(make_request(token))
+    assert response.status_code == 502
+    assert response.reason == "secret_unavailable"
+    assert "keychain item not found" in json.loads(response.body)["message"]
+
+
+def test_sigv4_signing_secret_backend_failure_is_a_clean_denial(session, store, executor):
+    param_provider = _DictProvider({"cfn-param": "the-real-param-value"})
+    resolver = SecretResolver(
+        providers={
+            "keychain": param_provider,
+            "file": _FailingProvider("secret file is group/world readable (644)"),
+        }
+    )
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="cfn",
+            hosts=["api.github.com"],
+            methods=["POST"],
+            secret=SecretRef(service="cfn-param"),
+            injection=InjectionSpec(
+                kind="sigv4",
+                region="us-east-1",
+                service="cloudformation",
+                signing_secret=SecretRef(backend="file", service="aws-signing"),
+            ),
+        )
+    )
+
+    response = core.handle(
+        make_request(token, target="/", method="POST", body=f"Param={token}".encode())
+    )
+    assert response.status_code == 502
+    assert response.reason == "secret_unavailable"
+    assert "group/world readable" in json.loads(response.body)["message"]
+
+
+def test_sigv4_signing_secret_is_refetched_every_request_even_when_held_forever(
+    session, store, executor
+):
+    """Every other secret is cached, including - once `hold_for_session` has
+    fired - forever. The signing credential must not be: it's the one secret
+    most likely to carry its own short expiration outside the broker's
+    control, and a resolver held forever would otherwise pin it to whatever
+    was first read even after a refresh job replaced it."""
+    param_provider = _DictProvider({"cfn-param": "the-real-param-value"})
+    signing_provider = _MutableProvider(
+        json.dumps({"access_key_id": "AKID1", "secret_access_key": "secret1"})
+    )
+    resolver = SecretResolver(providers={"keychain": param_provider, "file": signing_provider})
+    resolver.hold_for_session()
+
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="cfn",
+            hosts=["api.github.com"],
+            methods=["POST"],
+            secret=SecretRef(service="cfn-param"),
+            injection=InjectionSpec(
+                kind="sigv4",
+                region="us-east-1",
+                service="cloudformation",
+                signing_secret=SecretRef(backend="file", service="aws-signing"),
+            ),
+        )
+    )
+
+    core.handle(make_request(token, target="/", method="POST", body=f"Param={token}".encode()))
+    assert "AKID1" in dict(executor.last["headers"])["Authorization"]
+
+    signing_provider.value = json.dumps(
+        {"access_key_id": "AKID2", "secret_access_key": "secret2"}
+    )
+
+    core.handle(make_request(token, target="/", method="POST", body=f"Param={token}".encode()))
+    assert "AKID2" in dict(executor.last["headers"])["Authorization"]
+    assert signing_provider.calls == 2
+
+
+def test_sigv4_signature_reflects_the_substituted_body(session, store, executor):
+    """Two different secret values substituted into the same request shape
+    must produce two different signatures - proof the broker signs the body
+    it actually sends, and not something fixed or shaped like the
+    placeholder."""
+    core = _sigv4_core(session, store, executor, extra_secrets={"cfn-param-2": "a-totally-different-value"})
+    token_a, _ = _issue_sigv4_capability(store, label="cfn-a")
+    token_b, _ = _issue_sigv4_capability(
+        store, label="cfn-b", secret=SecretRef(service="cfn-param-2")
+    )
+
+    core.handle(
+        make_request(
+            token_a,
+            target="/",
+            method="POST",
+            body=f"Param={token_a}".encode(),
+        )
+    )
+    assert executor.last["body"] == b"Param=the-real-param-value"
+    sig_a = dict(executor.last["headers"])["Authorization"]
+
+    core.handle(
+        make_request(
+            token_b,
+            target="/",
+            method="POST",
+            body=f"Param={token_b}".encode(),
+        )
+    )
+    assert executor.last["body"] == b"Param=a-totally-different-value"
+    sig_b = dict(executor.last["headers"])["Authorization"]
+
+    assert sig_a != sig_b
 
 
 def test_upstream_failure_becomes_a_502_without_leaking_detail(session, store, resolver):
