@@ -86,7 +86,7 @@ asbx cap issue --box neo \
     --secret keychain:asbx-github:bot --ttl 3600
 
 asbx box start neo
-asbx box shell neo
+asbx box ssh neo
 ```
 
 Inside the guest, the agent uses the placeholder exactly like a real token —
@@ -132,7 +132,7 @@ safe to check into a repo.
 ## Commands
 
 `asbx <resource> <action>`. A command that acts *on a box* (`box start`,
-`box shell`) takes the box name as its own positional; a command that acts on
+`box ssh`) takes the box name as its own positional; a command that acts on
 something *belonging to* a box (a capability, a secret) takes `--box` instead.
 
 ### `box` — create, boot and manage sandboxed VMs
@@ -142,7 +142,7 @@ something *belonging to* a box (a capability, a secret) takes `--box` instead.
 | `box create NAME [--mount HOST:GUEST[:ro\|rw]]... [--allow HOST]... [--profile NAME] [--cpus N] [--memory MIB] [--image NAME]` | define a box; does not boot it |
 | `box start NAME [--forward [HOST:]GUEST]... [--fresh] [--attach] [--netcheck halt\|warn]` | boot it |
 | `box stop NAME [--purge] [--no-wait]` | shut it down |
-| `box shell [NAME] [COMMAND...]` | ssh in — any number of shells at once |
+| `box ssh [NAME] [SSH_ARGS...] [-- COMMAND...]` | ssh in — real ssh, real sshd, over vsock (see below); any number at once |
 | `box ls` / `box inspect NAME` / `box status [NAME]` | list boxes / a box's config / its live session |
 | `box set NAME [--cpus N] [--memory MIB] [--image NAME] [--mount-add HOST:GUEST[:ro\|rw]] [--mount-rm GUEST]` | change hardware or mounts — takes effect on the next start |
 | `box reset NAME` | discard the disk, keep the config |
@@ -150,6 +150,16 @@ something *belonging to* a box (a capability, a secret) takes `--box` instead.
 | `box web [NAME] --on\|--off [--port N]` | swap in mitmweb, the full-detail flow inspector, without restarting the box |
 | `box audit [NAME] [--tail N] [--follow]` | the audit trail: every proxy decision, no bodies or headers |
 | `box diag [NAME] [--tail N]` | one-shot bundle — gateway stats, guest console, audit tail — for a misbehaving session |
+
+`box ssh` really is `ssh` — a real per-box keypair, real host-key pinning, a
+real `sshd` in the guest — just carried over vsock instead of IP, since
+sshd binds loopback-only inside the guest and vsock is the only way to
+reach it from the host. Anything before an optional `--` is relayed
+straight into ssh's own argv, ahead of the destination — `-L`, `-o`, `-v`,
+whatever a normal ssh invocation takes; anything after `--` runs as the
+remote command. Naming the box is required once you're passing anything
+that starts with `-`, since otherwise there's no way to tell a flag from an
+omitted name: `box ssh neo -o ConnectTimeout=5 -- git status`.
 
 ### `image` — base images boxes clone from
 `image ls` · `image rm NAME [--force]` · `image gc [--dry-run]`
@@ -211,11 +221,15 @@ pipes straight to a guest port over vsock — a raw byte pipe, not an HTTP
 proxy, so anything TCP works through it. Like mounts, forwards are fixed at
 boot.
 
-For a port only known at runtime (an OAuth callback, say), use the SSH
-channel `box shell` already sets up instead: it writes a real `ssh_config` to
-`~/.agentsandbox/boxes/NAME.ssh/config`, so `ssh -F that-file -L
-PORT:127.0.0.1:PORT asbx-NAME` (or `ssh -O forward` against an
-already-open, multiplexed connection) adds a tunnel on demand, no restart.
+For a port only known at runtime (an OAuth callback, say), use `box ssh`
+instead: `box ssh NAME -N -L PORT:127.0.0.1:PORT` adds a tunnel on demand,
+no restart, because it rides the SSH channel rather than a device declared
+at boot. `box ssh` also writes a real `ssh_config` to
+`~/.agentsandbox/boxes/NAME.ssh/config`, so the equivalent raw `ssh -F
+that-file -L PORT:127.0.0.1:PORT asbx-NAME` works too — useful for `-O
+forward` against an already-open, multiplexed connection, which needs a
+plain `ssh` invocation rather than one that execs and hands over the
+terminal.
 
 ## Two ways to see what the proxy is doing
 

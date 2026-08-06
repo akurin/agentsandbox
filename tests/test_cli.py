@@ -170,8 +170,8 @@ def test_diag_collects_the_guest_console():
 
 
 def test_start_waits_for_the_ssh_channel_before_reporting_ready():
-    """`asbx box start neo && asbx box shell neo` must not lose a race with
-    its own advice. start prints "asbx box shell NAME" as the next step, so
+    """`asbx box start neo && asbx box ssh neo` must not lose a race with
+    its own advice. start prints "asbx box ssh NAME" as the next step, so
     it has to be true by the time it prints it."""
     import inspect
 
@@ -202,17 +202,67 @@ def test_waiting_returns_as_soon_as_the_socket_appears(tmp_path):
     assert time.monotonic() - started < 1.0
 
 
-def test_shell_waits_for_the_sshd_banner_not_just_the_socket():
+def test_ssh_is_reachable_and_wired_up():
+    args = cli.build_parser().parse_args(["box", "ssh", "neo"])
+    assert args.func is cli.cmd_ssh
+    assert args.name == "neo"
+
+
+def test_shell_is_gone_from_the_box_subcommands():
+    """Renamed to `ssh`, which is what it always actually was."""
+    parser = cli.build_parser()
+    top = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    box_parser = top.choices["box"]
+    box_sub = next(a for a in box_parser._actions if isinstance(a, argparse._SubParsersAction))
+
+    assert "shell" not in box_sub.choices
+    assert "ssh" in box_sub.choices
+    assert not hasattr(cli, "cmd_shell")
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["box", "shell", "neo"])
+
+
+@pytest.mark.parametrize(
+    "raw_tail,name,expected",
+    [
+        # no name given: nothing to strip off the front
+        (["box", "ssh"], None, ([], [])),
+        (["box", "ssh", "-v"], None, (["-v"], [])),
+        # name only
+        (["box", "ssh", "neo"], "neo", ([], [])),
+        # the case argparse's own REMAINDER gets wrong: a lone "--" right
+        # after the name, no ssh flags in front of it, is the one argparse
+        # silently drops - this must still come out as an empty ssh_opts and
+        # a real command, not the other way around.
+        (["box", "ssh", "neo", "--", "ls", "-la"], "neo", ([], ["ls", "-la"])),
+        # ssh flags only, no command
+        (["box", "ssh", "neo", "-L", "8080:127.0.0.1:8080"], "neo", (["-L", "8080:127.0.0.1:8080"], [])),
+        # ssh flags AND a command
+        (
+            ["box", "ssh", "neo", "-o", "X=y", "--", "tail", "-f", "x"],
+            "neo",
+            (["-o", "X=y"], ["tail", "-f", "x"]),
+        ),
+        # "--" with nothing after it: an explicitly empty command, not "no --"
+        (["box", "ssh", "neo", "--"], "neo", ([], [])),
+    ],
+)
+def test_split_ssh_tail_recovers_the_double_dash_argparse_would_eat(raw_tail, name, expected):
+    assert cli._split_ssh_tail(raw_tail, name) == expected
+
+
+def test_ssh_waits_for_the_sshd_banner_not_just_the_socket():
     """Connecting to ssh.sock proves nothing: vfkit accepts, then fails to
     dial the guest's vsock port and closes. Only the banner means sshd is
     listening - and ssh's own ConnectionAttempts cannot cover the gap, because
     with a ProxyCommand a proxy that exits is fatal rather than retryable.
-    That is why `asbx box shell` returned instantly with no output at all."""
+    That is why `asbx box ssh` returned instantly with no output at all."""
     import inspect
 
     source = inspect.getsource(cli._wait_for_sshd)
     assert 'b"SSH-"' in source
-    assert "ConnectionAttempts" not in inspect.getsource(cli.cmd_shell)
+    assert "ConnectionAttempts" not in inspect.getsource(cli.cmd_ssh)
 
 
 def test_the_sshd_probe_gives_up_rather_than_hanging(tmp_path):

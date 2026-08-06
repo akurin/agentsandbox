@@ -170,7 +170,7 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     # attachment is invalid", which says nothing about the real cause.
     if existing := _running_session_for(box.name):
         print(f"!! {box.name} is already running (session {existing.session_id})", file=sys.stderr)
-        print(f"   asbx box shell {box.name}    open a shell in it", file=sys.stderr)
+        print(f"   asbx box ssh {box.name}      ssh into it", file=sys.stderr)
         print(f"   asbx box stop {box.name}     stop it first to restart", file=sys.stderr)
         return EXIT_USAGE
 
@@ -216,7 +216,7 @@ def cmd_box_start(args: argparse.Namespace) -> int:
             return EXIT_DENIED
 
     # Detached, like `podman start`: the supervisor outlives this terminal, so
-    # `asbx box shell` from anywhere keeps working and closing the window is safe.
+    # `asbx box ssh` from anywhere keeps working and closing the window is safe.
     args.console = False
     from .daemon import StartupFailed, spawn_supervisor
 
@@ -318,7 +318,7 @@ def _report_started(box) -> None:
 
     for port, info in session.forwards.items():
         print(f"  forward    guest:{port} -> {info['url']}")
-    print(f"\n  asbx box shell {box.name}      open a shell (as many as you like)")
+    print(f"\n  asbx box ssh {box.name}        ssh in (as many as you like)")
     print(f"  asbx box stop {box.name}       shut it down")
 
 
@@ -402,7 +402,7 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         # from what it was created with rather than from whatever was built
         # on this host most recently.
         golden_image=resolve_image(box.image) if box else default_golden_image(),
-        # sshd only exists in a box, where `asbx box shell` needs it. A
+        # sshd only exists in a box, where `asbx box ssh` needs it. A
         # one-off session keeps the smaller surface of console-only access.
         **_ssh_vm_config(box, session),
     )
@@ -445,7 +445,7 @@ def _await_ssh_channel(manager, timeout: float = 20.0) -> None:
     never coming.
 
     Not waiting for *sshd* - that is inside the guest and takes as long as the
-    boot takes. `asbx box shell` retries for it.
+    boot takes. `asbx box ssh` retries for it.
     """
     driver = getattr(manager, "vm", None)
     socket_path = getattr(getattr(driver, "vm", None), "ssh_socket", None)
@@ -477,9 +477,9 @@ def _supervise(manager: SessionManager, *, purge: bool = False) -> None:
     signal.signal(signal.SIGINT, _handle)
 
     # Do not report ready until the box is usable. `asbx box start` prints
-    # "asbx box shell NAME" as the next step, and vfkit creates that socket a
+    # "asbx box ssh NAME" as the next step, and vfkit creates that socket a
     # moment after the guest process exists - so signalling here immediately
-    # meant `asbx box start neo && asbx box shell neo` lost a race with its
+    # meant `asbx box start neo && asbx box ssh neo` lost a race with its
     # own advice, and failed claiming the session predated ssh support.
     _await_ssh_channel(manager)
 
@@ -1197,11 +1197,18 @@ def cmd_box_rm(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_shell(args: argparse.Namespace) -> int:
-    """Open a shell in a running box, over ssh-on-vsock.
+def cmd_ssh(args: argparse.Namespace) -> int:
+    """ssh into a running box, over ssh-on-vsock.
 
     Any number of these can run at once, which is the point - the console is a
     single seat, this is not.
+
+    ``args.ssh_opts``/``args.remote_command`` come from ``main()``, not from
+    argparse's own parse of the ``ssh_args`` REMAINDER - see
+    ``_split_ssh_tail`` for why. Anything in ``ssh_opts`` is relayed straight
+    into ssh's own argv, ahead of the destination (``-L``, ``-o``, ``-v``,
+    whatever a normal ssh invocation would take); ``command``, if any, runs
+    as the remote command, exactly as ``-- COMMAND`` does for ssh itself.
     """
     from .box import Box, SshIdentity
     from .session import STATE_RUNNING
@@ -1255,9 +1262,9 @@ def cmd_shell(args: argparse.Namespace) -> int:
         )
         return EXIT_USAGE
 
-    argv = ["ssh", "-F", str(identity.config), f"asbx-{box.name}"]
-    if args.command:
-        argv += ["--", *args.command]
+    argv = ["ssh", "-F", str(identity.config), *args.ssh_opts, f"asbx-{box.name}"]
+    if args.remote_command:
+        argv += ["--", *args.remote_command]
     os.execvp("ssh", argv)  # replace ourselves; ssh owns the terminal from here
     return 0  # unreachable
 
@@ -1291,7 +1298,7 @@ def _wait_for_sshd(
     ssh's own ConnectionAttempts does not help here: with a ProxyCommand, a
     proxy that exits is a fatal error rather than a retryable connect failure,
     so ssh gives up on the first try. And it gives up quietly - the symptom is
-    `asbx box shell` returning instantly with no output at all.
+    `asbx box ssh` returning instantly with no output at all.
 
     Connecting to the socket proves nothing either: vfkit accepts, then fails
     to dial the guest's vsock port and closes. Only the banner means sshd is
@@ -1679,7 +1686,7 @@ def _hide_suppressed_from_usage(sub) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """``asbx <resource> <action> [args]``, with one rule for naming a box:
 
-    A command that *is* a box action (``box start``, ``box shell``, ...) takes
+    A command that *is* a box action (``box start``, ``box ssh``, ...) takes
     the box name as its own bare positional - it is the thing being acted on.
     A command that acts on something *belonging to* a box (a capability, a
     secret) takes ``--box`` instead, because its positional slot already
@@ -1751,12 +1758,27 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("--keep-disk", action="store_true")
     rm.set_defaults(func=cmd_box_rm)
 
-    shell = box_sub.add_parser("shell", help="open a shell in a running box")
-    shell.add_argument("name", nargs="?", help="box (default: the only running one)")
-    shell.add_argument("command", nargs=argparse.REMAINDER, help="run this instead of a shell")
-    shell.set_defaults(func=cmd_shell)
+    ssh_cmd = box_sub.add_parser("ssh", help="ssh into a running box")
+    ssh_cmd.add_argument(
+        "name",
+        nargs="?",
+        help="box (default: the only running one; required if any ssh args follow)",
+    )
+    # REMAINDER only to make argparse accept a dash-prefixed tail without
+    # erroring "unrecognized arguments" - main() throws this value away and
+    # re-derives ssh_opts/command from the raw argv instead. Reason: argparse
+    # silently drops a lone "--" when nothing unrecognized precedes it, which
+    # is exactly the common "box ssh NAME -- COMMAND, no ssh flags" case; see
+    # _split_ssh_tail.
+    ssh_cmd.add_argument(
+        "ssh_args",
+        nargs=argparse.REMAINDER,
+        metavar="[SSH_ARGS...] [-- COMMAND...]",
+        help="ssh options, inserted ahead of the destination; anything after -- runs as the remote command",
+    )
+    ssh_cmd.set_defaults(func=cmd_ssh)
 
-    # `asbx box shell` shells out to us as ssh's ProxyCommand: `python -m
+    # `asbx box ssh` shells out to us as ssh's ProxyCommand: `python -m
     # agentsandbox.cli vsock-proxy <socket>`, argv and all, so this has to
     # keep working as a top-level subcommand - moving it under `box` would
     # silently break every shell without a syntax error to point at why.
@@ -1971,9 +1993,38 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _split_ssh_tail(raw_argv: list[str], name: str | None) -> tuple[list[str], list[str]]:
+    """Recover ``(ssh_opts, command)`` from the real argv, not from argparse's
+    own parse of the ``ssh_args`` REMAINDER.
+
+    argparse drops the first literal ``--`` in argv, but only when nothing
+    unrecognized precedes it - so ``box ssh neo -- ls -la`` loses its ``--``
+    (there is nothing before it argparse doesn't recognize) while
+    ``box ssh neo -o X=y -- ls -la`` keeps it (``-o`` already forced argparse
+    off its normal path). That inconsistency lands on exactly the plain
+    "just run one command" case, which is the one this most has to get right,
+    so the split is redone here against the untouched argv instead of trusted
+    from the parsed value.
+    """
+    tail = raw_argv[2:]  # past "box", "ssh"
+    if name is not None and tail[:1] == [name]:
+        tail = tail[1:]
+    if "--" in tail:
+        idx = tail.index("--")
+        return tail[:idx], tail[idx + 1 :]
+    return tail, []
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
+    if args.command == "box" and args.subcommand == "ssh":
+        # Not args.command: that's the top-level dispatch field (dest="command"
+        # on the outermost subparsers, holding "box"), already read on this
+        # line - overwriting it here would be a landmine for the next command
+        # that reads it after this point.
+        args.ssh_opts, args.remote_command = _split_ssh_tail(raw_argv, args.name)
     try:
         return args.func(args)
     except SandboxError as exc:

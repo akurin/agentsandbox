@@ -80,7 +80,7 @@ The short version, for anyone just trying to reach a booted guest fast:
 make install && .venv/bin/asbx doctor
 ./vm/build-image.sh && ./vm/prepare-image.sh
 asbx box create neo --mount ~/code/my-project:/home/agent/my-project
-asbx box start neo && asbx box shell neo
+asbx box start neo && asbx box ssh neo
 ```
 
 ## Design decisions worth knowing
@@ -207,7 +207,7 @@ A guest booted under vfkit on macOS 26 / Apple silicon, Debian 13 cloud image:
 
 Since then, in ordinary interactive use rather than a formal test pass: real
 `--mount` shares into a running guest, and the vsock-based SSH channel
-(`box shell`, plus ad-hoc `ssh -L` tunnels riding the same connection) reaching
+(`box ssh`, plus ad-hoc `ssh -L` tunnels riding the same connection) reaching
 a real process listening inside the guest - including forwarding a port an
 in-guest process chose at runtime, which `--forward` itself can't do since it
 needs the port named at `box start`.
@@ -244,7 +244,7 @@ security-relevant rather than merely broken:
    no session has used a real Keychain credential from inside a booted guest.
 2. **`--forward`'s actual proxied connection.** The listener and its
    `[HOST:]GUEST` parsing are tested; the vsock hop to a real guest-side
-   listener has been exercised via `box shell`'s SSH channel, not via
+   listener has been exercised via `box ssh`'s SSH channel, not via
    `--forward` itself.
 3. **HTTP/3 over QUIC.** Enabled and configured, but everything exercised so
    far negotiated HTTP/2 or HTTP/1.1.

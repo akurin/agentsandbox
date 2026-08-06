@@ -406,7 +406,55 @@ def test_starting_an_already_running_box_is_refused(project, capsys, monkeypatch
     assert cli.main(["box", "start", "neo"]) == cli.EXIT_USAGE
     err = capsys.readouterr().err
     assert "already running" in err
-    assert "asbx box shell neo" in err
+    assert "asbx box ssh neo" in err
+
+
+@pytest.mark.parametrize(
+    "extra,expected_tail",
+    [
+        ([], ["asbx-neo"]),
+        (["--", "ls", "-la"], ["asbx-neo", "--", "ls", "-la"]),
+        (["-o", "X=y", "--", "tail", "-f", "x"], ["-o", "X=y", "asbx-neo", "--", "tail", "-f", "x"]),
+        (["-L", "8080:127.0.0.1:8080"], ["-L", "8080:127.0.0.1:8080", "asbx-neo"]),
+    ],
+)
+def test_cli_ssh_places_flags_before_the_destination_and_command_after(
+    project, capsys, monkeypatch, extra, expected_tail
+):
+    """`box ssh neo -o X=y -- tail -f x` must reach the real ssh binary as
+    `ssh -F config -o X=y asbx-neo -- tail -f x` - flags ahead of the
+    destination, the remote command behind it - not as one undifferentiated
+    blob."""
+    import os
+
+    from agentsandbox.manager import SessionManager
+    from agentsandbox.session import STATE_RUNNING
+
+    cli.main(["box", "create", "neo", "--mount", f"{project}:{project}"])
+    capsys.readouterr()
+
+    manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
+    manager.session.state = STATE_RUNNING
+    manager.session.supervisor_pid = os.getpid()
+    manager.session.save()
+    (manager.session.paths.run).mkdir(parents=True, exist_ok=True)
+    (manager.session.paths.run / "ssh.sock").write_text("")
+
+    captured = {}
+
+    def fake_execvp(_file, argv):
+        captured["argv"] = argv
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execvp", fake_execvp)
+    monkeypatch.setattr(cli, "_wait_for_sshd", lambda *a, **k: True)
+
+    with pytest.raises(SystemExit):
+        cli.main(["box", "ssh", "neo", *extra])
+
+    assert captured["argv"][0] == "ssh"
+    assert captured["argv"][1] == "-F"
+    assert captured["argv"][3:] == expected_tail
 
 
 def test_a_crashed_supervisor_does_not_block_the_box(project, capsys):
