@@ -1,7 +1,9 @@
 # Implementation notes
 
-What was built against `README.md`, how to run it, and - just as important -
-what is verified by tests versus what still needs a real guest boot.
+The design rationale behind what's in `src/`, and what's actually been
+verified — by the test suite, and separately on real hardware — versus what
+still hasn't. See `README.md` for how to install and use it; this file is
+about why it's built the way it is.
 
 ## Shape of the system
 
@@ -23,20 +25,32 @@ Three separate processes, three separate trust levels: the guest is hostile,
 mitmproxy is exposed to hostile input, and the broker - the only thing holding
 credentials - talks to mitmproxy over a unix socket and never returns a secret.
 
-## Deliverables (README §6)
+## Where each piece lives
 
-| # | Deliverable | Where |
-|---|---|---|
-| 1 | macOS session launcher | `src/agentsandbox/manager.py`, `cli.py` |
-| 2 | Minimal Linux VM image + bootstrap | `vm/build-image.sh`, `src/agentsandbox/vm/cloudinit.py`, `vm/guest/*` |
-| 3 | WireGuard session configuration | `src/agentsandbox/wireguard.py` |
-| 4 | Hardened mitmproxy configuration | `src/agentsandbox/proxy/launcher.py` |
-| 5 | Credential-detection addon | `src/agentsandbox/proxy/addon.py` |
-| 6 | Secrets broker with Keychain | `src/agentsandbox/broker/`, `keychain.py` |
-| 7 | Capability policy model | `src/agentsandbox/capabilities.py`, `netpolicy.py` |
-| 8 | Workspace import and validated export | `src/agentsandbox/workspace.py` |
-| 9 | Localhost preview gateway | `src/agentsandbox/preview.py` |
-| 10 | Integration and bypass-resistance tests | `tests/`, esp. `test_bypass_resistance.py` |
+| Piece | Where |
+|---|---|
+| CLI, box/session lifecycle, argument parsing | `src/agentsandbox/cli.py`, `manager.py`, `box.py`, `session.py` |
+| Golden image build + guest bootstrap | `vm/build-image.sh`, `vm/prepare-image.sh`, `src/agentsandbox/vm/cloudinit.py`, `vm/guest/*` |
+| vfkit driver (disk, NIC socket, vsock devices) | `src/agentsandbox/vm/vfkit.py` |
+| L2 gateway - the actual fail-closed control | `src/agentsandbox/vm/gateway.py` |
+| Per-session WireGuard identity | `src/agentsandbox/wireguard.py` |
+| Hardened mitmproxy launch + policy addon | `src/agentsandbox/proxy/launcher.py`, `addon.py` |
+| mitmweb flow-count cap (`box web`) | `src/agentsandbox/proxy/viewcap.py` |
+| Secrets broker + Keychain | `src/agentsandbox/broker/`, `keychain.py` |
+| Capability model, destination policy | `src/agentsandbox/capabilities.py`, `netpolicy.py` |
+| Capability profiles | `src/agentsandbox/profiles.py` |
+| Mounts (`--mount`) | `Mount` in `session.py`; tag derivation shared by `vm/vfkit.py` and `vm/cloudinit.py` |
+| Host↔guest port forwarding (`--forward`) | `src/agentsandbox/forward.py`, `manager.ForwardSupervisor` |
+| Audit log | `src/agentsandbox/audit.py` |
+| Bypass-resistance and integration tests | `tests/`, esp. `test_bypass_resistance.py` |
+
+There's no `workspace.py` and no `preview.py`. Both were in the original
+design sketch this project started from - a copy-diff-validate-export step
+for the project directory, and a token-gated random-port preview URL - and
+neither survived contact with implementation. What replaced them is simpler:
+`--mount` is a live, direct virtio-fs share (see "Design decisions" below),
+and `--forward` is an explicit loopback port with no token, secured by being
+loopback-only and one-directional rather than by obscurity.
 
 ## Why vfkit rather than a hand-written Virtualization launcher
 
@@ -46,11 +60,11 @@ therefore lands in `vm/gateway.py`, a host process the guest does not control,
 which relays exactly one thing - UDP to mitmproxy's WireGuard listener - and
 drops the rest.
 
-That is what makes §7's first criterion structural rather than configurational:
-with mitmproxy down, or with the agent as root inside the VM rewriting every
-route and firewall rule it can reach, there is still no second path out.  The
-guest's own `nftables` ruleset (`vm/guest/nftables.conf`) is defence in depth,
-not the control.
+That's what makes "the VM cannot reach the internet when WireGuard is
+unavailable" structural rather than configurational: with mitmproxy down, or
+with the agent as root inside the VM rewriting every route and firewall rule
+it can reach, there is still no second path out.  The guest's own `nftables`
+ruleset (`vm/guest/nftables.conf`) is defence in depth, not the control.
 
 The alternative - Lima - would have given a faster path to a booting guest, but
 its user-mode NAT hands the guest working internet independent of WireGuard, so
@@ -59,47 +73,32 @@ own firewall. Same reasoning ruled out `VZNATNetworkDeviceAttachment`.
 
 ## Running it
 
-```bash
-make install
-.venv/bin/asbx doctor          # checks mitmproxy, vfkit, golden image
-
-make vm-image                  # one-time: fetch + convert the guest disk (needs qemu-img)
-
-# store a real credential where only the broker can reach it
-.venv/bin/asbx secret set --service asbx-github --account bot
-
-# start a session: nothing is reachable except the hosts named here
-.venv/bin/asbx session start \
-    --allow api.github.com \
-    --project ~/code/my-project \
-    --preview 3000
-
-# in another terminal: mint a placeholder for the agent
-.venv/bin/asbx cap issue \
-    --provider github --host api.github.com \
-    --resource repo:acme/api \
-    --method GET --path '/repos/*' \
-    --secret keychain:asbx-github:bot --ttl 3600
-```
-
-The agent then uses the placeholder as if it were the credential:
+See `README.md` for the full install steps, quickstart and command reference.
+The short version, for anyone just trying to reach a booted guest fast:
 
 ```bash
-curl -H "Authorization: Bearer cap_v1_…" https://api.github.com/repos/acme/api/issues
-```
-
-Nothing in the guest knows a broker exists.
-
-Reviewing and landing the agent's work:
-
-```bash
-.venv/bin/asbx workspace diff        # per-file verdicts: ok / review / blocked
-.venv/bin/asbx workspace apply       # applies only the clean ones
-.venv/bin/asbx audit --tail 100
-.venv/bin/asbx session stop --purge
+make install && .venv/bin/asbx doctor
+./vm/build-image.sh && ./vm/prepare-image.sh
+asbx box create neo --mount ~/code/my-project:/home/agent/my-project
+asbx box start neo && asbx box shell neo
 ```
 
 ## Design decisions worth knowing
+
+**A box is not a session.** A box (`box.py`) is the long-lived half - a named
+disk, its mounts, its profile, its image - and survives between runs. A
+session (`session.py`) is one boot: it owns the WireGuard identity, the
+mitmproxy CA and the capability store, and all three die with it. Nothing
+secret has ever lived on the guest disk, so keeping the disk between runs
+costs nothing security-wise while saving a from-scratch package install every
+time.
+
+**Mounts have no stored tag.** Each `Mount` is just `host`, `guest`,
+`read_only` - the virtio-fs `mountTag` it gets (`m0`, `m1`, ...) is derived
+purely from its position in the list, by the same function
+(`session.mount_tag`) called from both `vm/vfkit.py` (the device argv) and
+`vm/cloudinit.py` (the guest fstab). Storing the tag instead would be one more
+place for the two sides to quietly disagree.
 
 **Capabilities are references, not secrets.** The store keeps a SHA-256 of the
 placeholder and a *reference* to the credential (`keychain:service:account`).
@@ -120,48 +119,76 @@ socket to the address it validated while TLS still verifies the hostname.
 **Redirects lose the credential the moment the origin changes**, and never get
 it back even if a later hop returns to the original origin.
 
-**The workspace is a copy.** The guest mounts the *session's* workspace over
-virtio-fs, never the Mac project. Export diffs it and blocks escaping symlinks,
-setuid bits, path traversal and oversized change sets outright, and flags git
-hooks, CI workflows, editor task files, new executables and credential-shaped
-content for review. `--accept-review` widens review; it never unblocks a block.
+**A mount is a live share, not a copy.** `--mount HOST:GUEST[:ro|rw]` is a
+direct virtio-fs device into the host directory, read-write by default -
+matching Docker/Podman's own `-v`, where an unmarked mount is writable and
+`:ro` is what restricts it. There is no snapshot, no diff, no validated-export
+gate before changes reach the host: a `:rw` mount is exactly as writable as it
+looks, and `:ro` is the whole safety story if you want less than that.
 
-**Sharing a host path is possible but opt-in.** `--share PATH:ro` / `:rw` adds a
-virtio-fs device. Read-write shares bypass validated export - that is the point
-of the flag, and the CLI says so loudly at start-up.
+**`box web` swaps the proxy process, not the tunnel.** Turning mitmweb on or
+off (`box web --on|--off`) replaces the running mitmdump/mitmweb process
+without restarting the box: the WireGuard keys, the listen port and the CA all
+live outside the proxy process, on the session record and in a per-session
+confdir, so a replacement process picks them straight back up. Only the live
+WireGuard session itself doesn't survive the swap, which is why the guest's
+tunnel is renegotiated as part of the switch.
+
+**`box audit` and `box web` are different tools on purpose.** The audit log is
+always on, cheap, and never holds a header or a body - redaction happens in
+`AuditLog.emit`, on the way in, not as a filter applied later. `box web` is
+the deliberate opposite: full headers and bodies, capped at 2000 flows
+(`proxy/viewcap.py`) so a long session can't grow it without bound, off by
+default and loud about the tradeoff when turned on.
 
 **Audit redaction happens on the way in.** `AuditLog.emit` scrubs every value
 through the redactor, so no caller can format a secret into a message. Sensitive
 headers are dropped by name, registered credential literals are replaced, and
-credential-shaped strings are caught even if never registered. No flow dumps:
-`save_stream_file` is never set and `--flow-detail 0` keeps bodies off stdout.
+credential-shaped strings are caught even if never registered. No flow dumps
+outside `box web`: `save_stream_file` is never set and `--flow-detail 0` keeps
+mitmdump's own output free of bodies.
+
+**The guest checks its own fail-closed shape at boot, too.** `asbx-netcheck`
+(`vm/guest/netcheck.sh`) verifies traffic actually leaves via `wg0` before
+cloud-init finishes, and halts the boot (or just logs, under
+`--netcheck warn`) if not. This is defense in depth on top of the L2
+gateway, not the control - it catches guest-side misconfiguration so it fails
+loudly instead of looking like a working sandbox.
 
 ## Verified by the test suite
 
-`make test` - 235 tests, no network, no VM required.
+`make test` - 453 passing, plus 3 skipped when outbound unix sockets are
+blocked (some sandboxed CI environments do this; a real Mac shell does not) -
+no network, no VM boot required.
 
 - destination policy: loopback/private/link-local/CGNAT/metadata/tunnel space,
   host-alias blocking, allowlist matching that cannot be fooled by
   `api.github.com.evil.test`, DNS rebinding, unresolvable names failing closed
 - capabilities: hash-only storage, session/host/method/path/resource binding,
-  expiry, request and byte budgets, revocation, unsupported injections
-- broker: credential injection shapes, guest auth headers stripped, placeholder
-  leak detection, response scrubbing of echoed credentials and cookie headers,
-  oversized responses refused, audit containing neither the secret nor the
-  placeholder
+  expiry, request and byte budgets, revocation, unsupported injections refused
+- broker: credential injection shapes (bearer/header/basic), guest auth
+  headers stripped, placeholder leak detection, brokered-response scrubbing of
+  echoed credentials and `Set-Cookie`, oversized responses refused, audit
+  containing neither the secret nor the placeholder
 - redirects: same-origin keeps, cross-origin drops, return-to-origin does not
   re-attach, forbidden targets refused, scheme downgrade refused, chain bounded
 - L2 gateway: every non-WireGuard frame dropped with a reason (TCP, ICMP, IPv6,
   wrong port, wrong host, spoofed source, IP fragments, VLAN, ARP for anything
   but the gateway), checksum correctness, return-path addressing
 - addon: allowlisting, capability detection and misplacement, DNS refusal and
-  answer filtering, raw TCP/UDP killed, `server_connect` re-validation
-- workspace: exclusion of credential files, symlink escapes, setuid, review
-  flags, apply semantics, backups
-- guest configuration: vfkit argv (no NAT device, vsock `connect`-only,
-  read-only shares, workspace copy not project), cloud-init (CA cert but never
-  the CA key, 0600 tunnel config, `builder` account, IPv6 off, no default route)
-- lifecycle: per-session identities, revocation on stop, purge, CLI paths
+  answer filtering, raw TCP/UDP killed, `server_connect` re-validation,
+  refusal to start if mitmproxy's own passthrough options are non-empty
+- mounts: round-trip through `Box`/`Session`, tag derivation agreeing between
+  vfkit and cloud-init, guest-path collision rejected, normalization (a
+  trailing slash can't hide a mount from `--mount-rm`)
+- port forwarding: listener setup and `[HOST:]GUEST` syntax - not a full
+  proxied connection end to end (see "Still not verified")
+- guest configuration: vfkit argv (no NAT device, vsock `connect`-only, mount
+  read-only flag reaching the device list), cloud-init (CA cert but never the
+  CA key, 0600 tunnel config, `builder` account with no capability access,
+  IPv6 off, no default route)
+- lifecycle: per-session identities, revocation on stop, purge, box vs.
+  session state reconciliation after a crashed supervisor, CLI paths
 
 ## Verified on real hardware
 
@@ -176,7 +203,14 @@ A guest booted under vfkit on macOS 26 / Apple silicon, Debian 13 cloud image:
 - a non-allowlisted host (`example.com`) fails to resolve at all, because the
   DNS hook refuses names outside the session allowlist
 - guest diagnostics survive a guest that powers itself off, via the virtio-fs
-  log share, and `asbx diag` collects them in one command
+  log share, and `asbx box diag` collects them in one command
+
+Since then, in ordinary interactive use rather than a formal test pass: real
+`--mount` shares into a running guest, and the vsock-based SSH channel
+(`box shell`, plus ad-hoc `ssh -L` tunnels riding the same connection) reaching
+a real process listening inside the guest - including forwarding a port an
+in-guest process chose at runtime, which `--forward` itself can't do since it
+needs the port named at `box start`.
 
 ### Bugs that first boot found
 
@@ -205,44 +239,33 @@ security-relevant rather than merely broken:
 
 ## Still not verified
 
-1. **A brokered credential from inside the guest.** The broker is covered by
-   tests and the placeholder path works host-side, but no session has yet used a
-   real Keychain credential end to end from the VM.
-2. **The preview gateway's data path.** Listener, loopback binding and the path
-   token are tested; no guest app has been reached over vsock yet.
-3. **HTTP/3 over QUIC.** Enabled and configured, but everything exercised so far
-   negotiated HTTP/2 or 1.1.
-4. **The workspace round trip from a guest.** Import and validated export are
-   tested host-side; the guest writes to the same directory over virtio-fs, so
-   this should hold, but it has not been done from inside a session.
+1. **A brokered credential from inside the guest, end to end.** The broker is
+   covered by tests and the placeholder path works host-side (`cap try`), but
+   no session has used a real Keychain credential from inside a booted guest.
+2. **`--forward`'s actual proxied connection.** The listener and its
+   `[HOST:]GUEST` parsing are tested; the vsock hop to a real guest-side
+   listener has been exercised via `box shell`'s SSH channel, not via
+   `--forward` itself.
+3. **HTTP/3 over QUIC.** Enabled and configured, but everything exercised so
+   far negotiated HTTP/2 or HTTP/1.1.
 
 ## Known limitations
 
-- **Bodies over 1 MiB are not scanned** for placeholders (`_BODY_SCAN_LIMIT`).
-  Headers always are, so this only affects a capability deliberately hidden in a
-  large body - which is refused rather than forwarded when detected.
-- **Previews must be declared at start-up.** vfkit attaches vsock devices at
-  boot and cannot hot-plug, so `--preview 3000` is a `session start` flag.
-- **`asbx session start` runs in the foreground.** It owns the broker thread and
-  the preview loop; `asbx session stop` signals that process.
-- **AWS SigV4 and other signing schemes are refused**, not approximated -
-  `bearer`, `header` and `basic` injections are implemented. This is the spec's
-  "deny unsupported authenticated protocols by default".
-- **One WireGuard peer per session** (a mitmproxy constraint), which is also why
-  a leaked config from an old session authenticates to nothing.
-- **The preview URL serves untrusted content into a `localhost` origin.** Random
-  port plus a 24-byte path token, but it is still the agent's HTML in your
-  browser.
-
-## Next steps, in the order I would do them
-
-1. Build the golden image and boot one session end to end; expect to iterate on
-   the cloud-init bootstrap and on whether the guest image ships
-   `wireguard-tools`, `nftables` and `socat`.
-2. Confirm the L2 gateway against a real guest, and add a `--gateway-stats` view
-   to watch drops while the agent works.
-3. Exercise HTTP/3 from the guest (`curl --http3`) and record what mitmproxy
-   actually negotiates.
-4. Add a per-session spend/rate ceiling across capabilities (currently per
-   capability), which is the one part of §5's "limit external spending" that is
-   only partially covered.
+- **Bodies over 1 MiB are not scanned** for placeholders (`_BODY_SCAN_LIMIT`,
+  both in the addon and in the broker). Headers always are, so this only
+  affects a capability deliberately hidden in a large body - which is refused
+  rather than forwarded when it *is* detected.
+- **Mounts and port forwards are fixed at boot.** vfkit attaches virtio-fs and
+  vsock devices at boot and cannot hot-plug, so both `--mount` and `--forward`
+  take effect on the next `box start`, never live. `box set --mount-add`/
+  `--mount-rm` change a box's config; they still need a restart to apply.
+- **Only `bearer`, `header` and `basic` credential injection are implemented.**
+  AWS SigV4 and other signing schemes are refused outright, not approximated -
+  an unsupported injection kind is a `PolicyDenied`, not a best-effort attempt.
+- **One WireGuard peer per session** (a mitmproxy constraint), which is also
+  why a leaked config from an old session authenticates to nothing.
+- **A forwarded port has no access control beyond loopback binding.** Unlike
+  the original preview-gateway sketch (a random port plus a path token),
+  `--forward` binds a plain, predictable loopback port with no token - the
+  guarantee is that nothing off the Mac can reach it and the guest cannot
+  reach back out through it, not that the port is hard to guess.

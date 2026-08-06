@@ -1,191 +1,279 @@
-# Agent Sandbox with WireGuard Interception and Secrets Brokering
+# agentsandbox (`asbx`)
 
-## 1. Problem
+Run an AI coding agent in a disposable Linux VM on your Mac. The guest's only
+route to the internet is a WireGuard tunnel terminating in mitmproxy; every
+authenticated request goes through a separate secrets broker that injects a
+real credential from the macOS Keychain and returns a sanitized response.
+The agent never sees the credential, and the guest never has a network path
+that bypasses either.
 
-An AI agent runs untrusted code, installs third-party packages, and may itself become compromised. The agent environment must therefore be treated as hostile.
+## How it works
 
-The solution must provide:
-
-* Isolation from the macOS host.
-* Controlled access to an explicitly provided project.
-* Internet access without a direct, bypassable network path.
-* Interception of TCP and UDP traffic, including HTTP/3 over QUIC.
-* Access to authenticated services without exposing real credentials.
-* Host access to applications started inside the agent environment.
-* Session termination, revocation, and auditing.
-
-Routing all traffic does not mean every protocol can be decrypted or modified. The platform should intercept all IP traffic at the network boundary, but inspect or rewrite only supported protocols. Unknown, pinned, or end-to-end-encrypted traffic must be passed through under policy or blocked.
-
-## 2. Suggested Solution
-
-Run every agent session in an ephemeral Linux VM on the Mac using Apple’s Virtualization framework. The framework supports creating and managing Linux VMs on Apple silicon and Intel Macs.
-
-Configure the VM so that its default route goes through a WireGuard tunnel terminating in mitmproxy on the Mac.
-
-Mitmproxy’s WireGuard mode transparently intercepts traffic from connected clients without requiring application-level proxy configuration. Its HTTP/3 support is available in WireGuard mode.
-
-```text
-Linux agent VM
-    │
-    │ TCP, UDP, DNS, HTTP/1.1, HTTP/2, HTTP/3
+```
+guest VM (vfkit)
+    │  virtio-net → a unix datagram socket the host owns, not a NAT device
     ▼
-WireGuard tunnel
+L2 gateway (vm/gateway.py)
+    │  relays only UDP to mitmproxy's WireGuard listener; answers ARP/DHCP;
+    │  drops everything else, regardless of what the guest's own routing
+    │  table or firewall says
     ▼
-mitmproxy on macOS
-    ├── traffic policy
-    ├── credential-placeholder detection
-    ├── protocol inspection
-    └── audit events
+mitmproxy, WireGuard mode (proxy/addon.py)
+    │  terminates the tunnel; decrypts supported TLS with a per-session CA;
+    │  enforces the destination policy; finds capability placeholders
     ▼
-Secrets broker
-    ├── capability validation
-    ├── macOS Keychain access
-    ├── OAuth refresh
-    ├── credential injection
-    └── upstream request execution
+secrets broker (broker/)                              plain, unauthenticated
+    │  separate process, unix socket only;             traffic that passed
+    │  reads the real credential from Keychain,         the policy check is
+    │  performs the upstream request itself,            forwarded directly,
+    │  returns a sanitized response                     without touching this
     ▼
-Approved external services
+approved external service
 ```
 
-The VM must have no usable route that bypasses WireGuard. If the tunnel or gateway is unavailable, network access must fail closed.
+Three processes, three trust levels: the guest is hostile, mitmproxy is
+exposed to whatever the guest sends it, and the broker — the only thing that
+ever touches a real credential — is reachable from mitmproxy only over a unix
+socket in a 0700 directory, and never returns a secret to the caller.
 
-## 3. Main Components
+The guest also runs its own boot-time check (`asbx-netcheck`) that verifies
+the tunnel is genuinely its only route before finishing boot, and halts (or
+just warns, with `--netcheck warn`) if not. That is defense in depth, not the
+control — the control is the host-owned socket above, which drops packets
+regardless of what's misconfigured on the guest side.
 
-### Session Manager
+## Install
 
-The macOS session manager creates and destroys Linux VMs, assigns resources, generates session identities, configures WireGuard, and revokes all session capabilities when the VM stops.
+Requirements: an Apple Silicon or Intel Mac with Virtualization.framework,
+[vfkit](https://github.com/crc-org/vfkit) (`brew install vfkit`, or the copy
+bundled with Podman), and mitmproxy ≥ 12 (pulled in by `make install`).
 
-Each session receives:
-
-* A fresh or reset VM disk.
-* A unique WireGuard identity.
-* A unique mitmproxy certificate authority.
-* A copied or snapshotted project workspace.
-* Session-scoped credential capabilities.
-
-### WireGuard and mitmproxy Gateway
-
-Mitmproxy runs on the Mac in WireGuard mode and becomes the VM’s network gateway.
-
-It is responsible for:
-
-* Receiving all VM traffic.
-* Intercepting supported HTTP and TLS traffic.
-* Enforcing destination rules.
-* Detecting credential placeholders.
-* Blocking access to the Mac, private networks, and metadata endpoints.
-* Forwarding approved unauthenticated traffic.
-* Sending authenticated operations to the secrets broker.
-
-HTTP/3 is supported through mitmproxy’s WireGuard mode, although current mitmproxy documentation notes limitations around QUIC versions and client compatibility.
-
-### Secrets Broker
-
-The secrets broker is a separate trusted macOS process.
-
-The guest receives placeholders such as:
-
-```text
-cap_v1_<random-session-capability>
+```bash
+make install                 # creates .venv, installs agentsandbox + mitmproxy
+.venv/bin/asbx doctor        # checks vfkit, mitmproxy, keychain access, images
 ```
 
-A capability identifies permission to perform specific actions. It is not a retrievable secret.
+Build a golden guest image once — Apple's Virtualization framework only boots
+raw disks, so this fetches a cloud image, verifies and converts it:
 
-Each capability should be bound to:
-
-* VM session.
-* Provider and account.
-* Approved hostnames.
-* Resources such as repositories or buckets.
-* HTTP methods or semantic operations.
-* Expiration time.
-* Request and byte limits.
-
-The broker stores real credentials in macOS Keychain, refreshes OAuth tokens, validates each operation, and performs or signs authenticated requests.
-
-The preferred production design is for the broker to execute the upstream request itself. Real credentials should not be returned to the VM or exposed through a general “get secret” API.
-
-### Workspace Bridge
-
-Do not mount the actual Mac project as a directly writable filesystem by default.
-
-Instead:
-
-1. Copy or snapshot the project into the VM.
-2. Let the agent work on the VM copy.
-3. Export a patch or changed-file set.
-4. Validate paths, links, file types, permissions, and sensitive configuration.
-5. Apply accepted changes to the Mac project.
-
-### Preview Gateway
-
-Applications started by the agent remain inside the VM.
-
-A host-side preview gateway exposes an explicitly selected VM port through a random localhost URL:
-
-```text
-Mac browser → preview gateway → VM application
+```bash
+./vm/build-image.sh                     # debian 13, arm64 — the default
+ASBX_DISTRO=ubuntu ./vm/build-image.sh  # ubuntu LTS, arm64
+./vm/prepare-image.sh                   # bakes in wireguard-tools/nftables/socat, once
 ```
 
-This connection must not provide the VM with general access to Mac services.
+Every box records the image it was created from, so building a new one never
+changes what an existing box resets to. `asbx image ls` lists what's built;
+`asbx image rm`/`asbx image gc` clean up.
 
-## 4. Authenticated Request Flow
+## Quickstart
 
-1. The agent receives a placeholder capability.
-2. Client code sends a normal authenticated request.
-3. The request travels through the WireGuard tunnel.
-4. Mitmproxy decrypts supported TLS traffic using the session CA.
-5. An addon detects the placeholder.
-6. The addon sends the normalized request and capability to the broker.
-7. The broker validates the session, destination, method, path, body, and limits.
-8. The broker obtains the real credential and performs the upstream request.
-9. The broker removes sensitive response information.
-10. Mitmproxy returns the sanitized response to the client.
+```bash
+# a real credential, held only in Keychain — the guest never sees it
+asbx secret set --service asbx-github --account bot
 
-The client code does not need to know that a proxy or broker exists.
+# a box: a named disk, its mount points, its egress allowlist, its image
+asbx box create neo \
+    --mount ~/code/my-project:/home/agent/my-project \
+    --allow api.github.com
 
-## 5. Mandatory Security Controls
+# mint a capability placeholder scoped to exactly what it needs
+asbx cap issue --box neo \
+    --provider github --host api.github.com \
+    --method GET --path '/repos/acme/*' \
+    --secret keychain:asbx-github:bot --ttl 3600
 
-* Block direct VM internet access outside WireGuard.
-* Block access to Mac interfaces, localhost, private networks, and link-local addresses.
-* Resolve and validate DNS on the trusted side.
-* Revalidate every redirect.
-* Use a unique mitmproxy CA for each session.
-* Keep the CA private key outside the VM.
-* Never log capabilities, authorization headers, cookies, or real credentials.
-* Do not save mitmproxy flow dumps.
-* Deny unsupported authenticated protocols by default.
-* Give package installation and test subprocesses fewer capabilities than the agent.
-* Support immediate session and capability revocation.
-* Limit request count, response size, duration, and external spending.
+asbx box start neo
+asbx box shell neo
+```
 
-## 6. Implementation Deliverables
+Inside the guest, the agent uses the placeholder exactly like a real token —
+nothing there knows a proxy or a broker exists:
 
-The implementation agent should produce:
+```bash
+curl -H "Authorization: Bearer cap_v1_…" https://api.github.com/repos/acme/api/issues
+```
 
-1. A macOS session launcher.
-2. A minimal Linux VM image and bootstrap process.
-3. WireGuard session configuration.
-4. A hardened mitmproxy configuration.
-5. A mitmproxy credential-detection addon.
-6. A separate secrets broker with Keychain integration.
-7. A capability policy model.
-8. Workspace import and validated export.
-9. A localhost preview gateway.
-10. Integration and bypass-resistance tests.
+```bash
+asbx box audit neo --follow    # watch what the proxy is doing, live
+asbx box stop neo
+```
 
-## 7. Acceptance Criteria
+For repeat use, declare capabilities once as a **profile** instead of issuing
+them by hand every time:
 
-The solution is complete when:
+```json
+// ~/.config/asbx/profiles/oss-contributor.json
+{
+  "version": 1,
+  "capabilities": [
+    {
+      "provider": "github",
+      "hosts": ["api.github.com"],
+      "methods": ["GET", "HEAD"],
+      "paths": ["/repos/acme/*"],
+      "secret": "keychain:asbx-github:me"
+    }
+  ]
+}
+```
 
-* The VM cannot reach the internet when WireGuard is unavailable.
-* The VM cannot reach the Mac or private LAN.
-* HTTP/1.1, HTTP/2, and HTTP/3 requests pass through the controlled gateway.
-* A placeholder works only for its approved destination and operation.
-* Real credentials never appear inside the VM.
-* Redirects cannot move credentials to another origin.
-* Untrusted package scripts cannot access agent capabilities by default.
-* The Mac can open an explicitly exposed application running in the VM.
-* Project changes can be exported without exposing the rest of the Mac filesystem.
-* Destroying a session revokes its network identity and all capabilities.
+```bash
+asbx box create neo --profile oss-contributor --mount ~/code/my-project:/home/agent/my-project
+asbx box start neo   # issues everything the profile lists, every time
+```
 
+A profile file contains no credential — only a reference to where one lives
+in Keychain — so it's safe to check into a repo.
+
+## Commands
+
+`asbx <resource> <action>`. A command that acts *on a box* (`box start`,
+`box shell`) takes the box name as its own positional; a command that acts on
+something *belonging to* a box (a capability, a secret) takes `--box` instead.
+
+### `box` — create, boot and manage sandboxed VMs
+
+| | |
+|---|---|
+| `box create NAME [--mount HOST:GUEST[:ro\|rw]]... [--allow HOST]... [--profile NAME] [--cpus N] [--memory MIB] [--image NAME]` | define a box; does not boot it |
+| `box start NAME [--forward [HOST:]GUEST]... [--fresh] [--attach] [--netcheck halt\|warn]` | boot it |
+| `box stop NAME [--purge] [--no-wait]` | shut it down |
+| `box shell [NAME] [COMMAND...]` | ssh in — any number of shells at once |
+| `box ls` / `box inspect NAME` / `box status [NAME]` | list boxes / a box's config / its live session |
+| `box set NAME [--cpus N] [--memory MIB] [--image NAME] [--mount-add HOST:GUEST[:ro\|rw]] [--mount-rm GUEST]` | change hardware or mounts — takes effect on the next start |
+| `box reset NAME` | discard the disk, keep the config |
+| `box rm NAME [--keep-disk]` | delete a box, and its disk unless told to keep it |
+| `box web [NAME] --on\|--off [--port N]` | swap in mitmweb, the full-detail flow inspector, without restarting the box |
+| `box audit [NAME] [--tail N] [--follow]` | the audit trail: every proxy decision, no bodies or headers |
+| `box diag [NAME] [--tail N]` | one-shot bundle — gateway stats, guest console, audit tail — for a misbehaving session |
+
+### `image` — base images boxes clone from
+`image ls` · `image rm NAME [--force]` · `image gc [--dry-run]`
+
+### `cap` — capabilities
+`cap issue --box NAME --provider NAME --host HOST --secret keychain:SERVICE[:ACCOUNT] [--method M]... [--path GLOB]... [--resource R]... [--operation OP] [--injection bearer|header|basic] [--ttl SECONDS]`
+`cap ls --box NAME` · `cap renew CAP_ID --ttl SECONDS` · `cap revoke CAP_ID`
+`cap try CAP_ID --url URL [--method M] [--via-broker]` — send one request through the broker exactly as the guest would, from the host, no VM boot required; add `--via-broker` to also exercise the running broker's transport rather than an in-process copy of its logic.
+
+### `secret` — Keychain credentials
+`secret set --service NAME [--account NAME]` (prompts, never echoes)
+`secret refresh --box NAME` — pick up a rotated credential without restarting the box
+
+### `profile` — reusable capability declarations
+`profile ls` · `profile show NAME`
+
+### `system` — host-wide, not scoped to any one box
+`system doctor` · `system sessions` (every session, across every box) · `system prune [--older-than DAYS] [--dry-run]`
+
+## Mounts
+
+`--mount HOST:GUEST[:ro|rw]` follows Docker/Podman's own `-v`: both sides are
+always explicit, a mount is read-write unless marked `:ro`, and it's
+repeatable — there's no special "the project" mount privileged over the
+others. Two mounts landing on the same guest path is refused outright rather
+than letting one silently shadow the other.
+
+There is no snapshot-and-diff workspace step: a mount is a live virtio-fs
+share straight through to the host directory, exactly as writable as it
+looks. If you want changes reviewed before they land, mount `:ro` and pull
+work out some other way (git, etc.) — that flow isn't built in.
+
+Changing a box's mounts (`box set --mount-add`/`--mount-rm`) takes effect on
+the next start, not live — Apple's Virtualization framework fixes a VM's
+devices at boot, so there's no hot-plug to offer.
+
+## Reaching a guest port from the host
+
+`box start --forward [HOST:]GUEST` opens a loopback listener on the host that
+pipes straight to a guest port over vsock — a raw byte pipe, not an HTTP
+proxy, so anything TCP works through it. Like mounts, forwards are fixed at
+boot.
+
+For a port only known at runtime (an OAuth callback, say), use the SSH
+channel `box shell` already sets up instead: it writes a real `ssh_config` to
+`~/.agentsandbox/boxes/NAME.ssh/config`, so `ssh -F that-file -L
+PORT:127.0.0.1:PORT asbx-NAME` (or `ssh -O forward` against an
+already-open, multiplexed connection) adds a tunnel on demand, no restart.
+
+## Two ways to see what the proxy is doing
+
+`box audit [--follow]` is always-on and cheap: one JSON line per decision —
+`net.forward`, `net.denied`, `broker.request`/`broker.response` — with
+headers, bodies and query strings never written in the first place
+(redaction happens on the way *into* the log, in `AuditLog.emit`, not as a
+filter on the way out).
+
+`box web --on` is the opposite tradeoff: it swaps the running proxy process
+for mitmweb, a full browser-based flow inspector that keeps every header and
+body it sees in memory (capped at 2000 flows), readable by anything on the
+Mac. Turn it off (`box web --off`) when you're done rather than leaving it on
+for a long run — the CLI says so at start-up, loudly.
+
+## What's enforced, and where
+
+- **The guest's only usable route out is the tunnel.** `vm/gateway.py` owns
+  the unix socket the guest's virtio-net device is attached to, and relays
+  nothing except WireGuard traffic to mitmproxy's listener. This holds
+  regardless of what the guest's own routing table, `nftables`, or root
+  access inside the guest tries to do — there is no real network device to
+  reconfigure, only a socket the host controls.
+- **Destination policy is checked twice, independently.** The mitmproxy addon
+  checks a name before connecting; the broker re-checks every hop it
+  performs, including each redirect — so a bug in one is not a bypass of the
+  other. (`netpolicy.py`)
+- **DNS is resolved and validated on the host.** A name that resolves to
+  loopback, private, link-local, CGNAT or metadata-endpoint space is refused
+  outright — not partially — and any answer pointing into that space is
+  stripped before it reaches the guest. That closes the usual DNS-rebinding
+  gap, where "check the name" and "connect to the address" are two separate
+  lookups that can disagree.
+- **A capability is a reference, not a secret.** `cap_v1_...` is what the
+  guest gets; the store keeps only a SHA-256 of it. It's bound to a session,
+  a provider and account, hostnames, resources, methods, paths, and an
+  optional TTL and response-byte budget — all re-checked on every use.
+- **A capability must arrive in a request header.** Found in a URL or a body
+  instead, it's refused with a clear error rather than silently rewritten — a
+  URL ends up in logs and referrers, a body may be persisted upstream.
+- **A redirect loses the credential the moment the origin changes**, and it
+  does not come back even if a later hop returns to the original origin.
+- **Nothing sensitive is ever logged, by construction.** `AuditLog.emit`
+  scrubs every value on the way in: header names on a fixed sensitive list
+  are dropped outright, registered credential literals and well-known
+  credential shapes are pattern-matched and redacted. No mitmproxy flow dump
+  is ever kept — `box web` is the deliberate, opt-in exception, off by
+  default.
+- **Nothing outlives its session.** Each session gets its own WireGuard
+  keypair and its own mitmproxy CA; stopping it shreds the key material
+  before deleting it, so nothing from a finished run is reusable by the next
+  one.
+
+`make test` runs the full suite with no network access and no VM boot
+required — the network-boundary and broker logic are tested directly against
+their inputs. `tests/test_bypass_resistance.py` targets the guarantees above
+one at a time, each test naming the property it stands for.
+
+## Project layout on disk
+
+```
+~/.agentsandbox/
+  images/            golden disk images, built by vm/build-image.sh
+  boxes/<name>.json  a box's config — mounts, profile, allowlist, image, cpus/memory
+  boxes/<name>.ssh/  its ssh host + client keys, and the generated ssh_config
+  disks/<name>.raw   its disk — a copy-on-write clone of a golden image
+  sessions/<id>/     one boot's private state: keys, CA, capability store,
+                     audit.jsonl, run/ sockets — mode 0700, gone on `stop --purge`
+```
+
+## Current limitations
+
+- Mounts and port forwards are fixed at boot; changing either needs
+  `box stop && box start`. Apple's Virtualization framework has no device
+  hot-plug, so this isn't a missing feature so much as a hard platform floor.
+- HTTP/1.1, HTTP/2 and HTTP/3-over-QUIC are intercepted through mitmproxy's
+  WireGuard mode; anything else reaching the proxy layer (raw TCP, raw UDP,
+  unsupported or pinned TLS) is either passed through under policy or killed
+  — never silently allowed through unexamined.
+- There's no workspace snapshot/diff/export step. A `:rw` mount is exactly as
+  writable as it looks; use `:ro` plus your own review workflow if you want
+  a gate before changes land on the host.
