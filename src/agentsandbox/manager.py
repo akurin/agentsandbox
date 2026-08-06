@@ -189,7 +189,7 @@ class SessionManager:
         self.audit.emit(
             "capability.issued",
             cap_id=cap.cap_id,
-            provider=spec.provider,
+            label=spec.label,
             hosts=spec.hosts,
             methods=spec.methods,
             ttl_s=spec.ttl_seconds,

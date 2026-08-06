@@ -97,7 +97,7 @@ def test_session_policy_applies_before_the_capability(session, store, executor, 
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
         )
@@ -126,7 +126,7 @@ def test_capability_in_the_body_is_refused(broker, github_capability):
 def test_expired_capability_is_refused(broker, store):
     token, cap = store.issue(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
             ttl_seconds=-1,
@@ -149,7 +149,7 @@ def test_usage_accumulates_without_ever_blocking(session, store, executor, resol
     )
     token, cap = store.issue(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
         )
@@ -171,7 +171,7 @@ def test_an_expired_capability_says_which_one_and_how_to_extend_it(
     )
     token, cap = store.issue(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
             ttl_seconds=-1,
@@ -195,7 +195,7 @@ def test_a_scope_denial_offers_no_remedy(session, store, executor, resolver):
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
             path_globs=["/user"],
@@ -215,7 +215,7 @@ def test_oversized_response_is_refused_not_truncated(session, store, resolver):
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
             max_response_bytes=50,
@@ -239,7 +239,7 @@ def test_credential_echoed_by_upstream_is_scrubbed_from_the_response(session, st
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
         )
@@ -269,7 +269,7 @@ def test_credential_bearing_response_headers_are_stripped(session, store, resolv
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
+            label="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
         )
     )
     names = {k.lower() for k, _ in core.handle(make_request(token)).headers}
@@ -292,7 +292,7 @@ def test_basic_and_header_injection_shapes(session, store, executor, resolver):
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="x",
+            label="x",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
             injection=InjectionSpec(kind="basic", username="acme"),
@@ -305,7 +305,7 @@ def test_basic_and_header_injection_shapes(session, store, executor, resolver):
 
     token2, _ = store.issue(
         CapabilitySpec(
-            provider="x",
+            label="x",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
             injection=InjectionSpec(kind="header", header="X-Api-Key", template="{secret}"),
@@ -329,7 +329,7 @@ def test_upstream_failure_becomes_a_502_without_leaking_detail(session, store, r
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
+            label="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
         )
     )
     response = core.handle(make_request(token))
@@ -407,7 +407,7 @@ def test_the_keychain_is_not_asked_for_the_same_credential_twice(store):
 
     token, _ = store.issue(
         CapabilitySpec(
-            provider="x", hosts=["api.github.com"],
+            label="x", hosts=["api.github.com"],
             secret=SecretRef(service="t"),
         )
     )
@@ -437,7 +437,7 @@ def test_a_capability_issued_after_the_broker_started_is_usable(session, executo
     issuing = CapabilityStore(session.paths.capabilities, session.session_id)
     token, cap = issuing.issue(
         CapabilitySpec(
-            provider="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
+            label="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
         )
     )
 
@@ -628,7 +628,7 @@ def _basic(user: str, password: str) -> str:
 def _basic_capability(store, username="developer"):
     return store.issue(
         CapabilitySpec(
-            provider="wiremock",
+            label="wiremock",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
             injection=InjectionSpec(kind="basic", username=username),
@@ -714,7 +714,7 @@ def test_the_suggested_remedy_is_a_command_that_actually_parses(session, store, 
     core = BrokerCore(session.session_id, store, session.policy, resolver)
     token, cap = store.issue(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
             ttl_seconds=-1,

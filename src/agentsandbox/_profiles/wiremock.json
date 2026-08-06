@@ -8,7 +8,6 @@
   },
   "capabilities": [
     {
-      "provider": "wiremock",
       "label": "admin API",
       "env": "WIREMOCK_PASSWORD",
       "hosts": ["wiremock.example.com"],

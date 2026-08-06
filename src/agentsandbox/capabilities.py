@@ -9,9 +9,13 @@ and the store keeps nothing but a SHA-256 of that string, so a leaked store
 file does not yield working placeholders, and the audit log can refer to a
 capability by its short id without ever printing the token.
 
-Every capability is bound to the axes the spec lists: session, provider and
-account, hostnames, resources, methods and semantic operations, and an
-optional expiry.
+Every capability is bound to the axes the spec lists: session, account,
+hostnames, resources, methods and semantic operations, and an optional
+expiry. A required ``label`` is the only thing that names what a capability
+is *for* - there is no ``provider`` field to fall back on, so two
+capabilities against the same service (an API key and an app key for the
+same product, say) are told apart by giving them distinct labels, not by
+inventing a fake provider name for one of them.
 """
 
 from __future__ import annotations
@@ -116,7 +120,7 @@ class InjectionSpec:
 class Capability:
     token_hash: str
     session_id: str
-    provider: str
+    label: str
     account: str = ""
     hosts: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
@@ -135,7 +139,6 @@ class Capability:
     used_requests: int = 0
     used_bytes: int = 0
     created_at: float = field(default_factory=time.time)
-    label: str = ""
 
     # -- identity -----------------------------------------------------------
 
@@ -217,9 +220,8 @@ class Capability:
         return {
             "cap_id": self.cap_id,
             "session": self.session_id,
-            "provider": self.provider,
-            "account": self.account,
             "label": self.label,
+            "account": self.account,
             "hosts": self.hosts,
             "resources": self.resources,
             "methods": self.methods,
@@ -252,8 +254,13 @@ def res_matches(resource: str, path: str) -> bool:
 class CapabilitySpec:
     """What a caller asks for when minting a capability."""
 
-    provider: str
     hosts: list[str]
+    #: What this capability is for - required, since there is no provider
+    #: field to fall back on for telling two capabilities apart. Two
+    #: capabilities against the same service (an API key and an app key for
+    #: the same product, say) get distinct labels, not a fake provider name
+    #: on one of them.
+    label: str
     account: str = ""
     resources: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=lambda: ["GET", "HEAD"])
@@ -264,32 +271,10 @@ class CapabilitySpec:
     injection: InjectionSpec = field(default_factory=InjectionSpec)
     ttl_seconds: int = DEFAULT_TTL_SECONDS
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
-    label: str = ""
     #: Box variable the placeholder is delivered as inside the guest,
     #: e.g. ``GITHUB_TOKEN``. Without this the operator has to copy the
     #: placeholder by hand, and it changes every session.
     env_var: str = ""
-
-    @classmethod
-    def from_dict(cls, data: dict) -> CapabilitySpec:
-        spec = cls(
-            provider=data["provider"],
-            hosts=list(data.get("hosts", [])),
-            account=data.get("account", ""),
-            resources=list(data.get("resources", [])),
-            methods=list(data.get("methods", ["GET", "HEAD"])),
-            path_globs=list(data.get("path_globs", data.get("paths", ["/*"]))),
-            deny_path_globs=list(data.get("deny_paths", [])),
-            operations=list(data.get("operations", [])),
-            secret=SecretRef.from_dict(data.get("secret", {})),
-            injection=InjectionSpec.from_dict(data.get("injection", {})),
-            ttl_seconds=int(data.get("ttl_seconds", DEFAULT_TTL_SECONDS)),
-            max_response_bytes=int(data.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)),
-            label=data.get("label", ""),
-        )
-        if not spec.hosts:
-            raise CapabilityError("a capability must be bound to at least one host")
-        return spec
 
 
 class CapabilityStore:
@@ -352,7 +337,7 @@ class CapabilityStore:
         cap = Capability(
             token_hash=token_hash(token),
             session_id=self.session_id,
-            provider=spec.provider,
+            label=spec.label,
             account=spec.account,
             hosts=list(spec.hosts),
             resources=list(spec.resources),
@@ -364,7 +349,6 @@ class CapabilityStore:
             injection=spec.injection,
             expires_at=(time.time() + spec.ttl_seconds) if spec.ttl_seconds else 0.0,
             max_response_bytes=spec.max_response_bytes,
-            label=spec.label,
         )
         with self._lock:
             self._load()

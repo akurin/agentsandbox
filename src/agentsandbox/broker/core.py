@@ -224,7 +224,7 @@ class BrokerCore:
         self.audit.emit(
             "broker.response" if response.decision == "allow" else "broker.denied",
             cap_id=response.cap_id or (cap.cap_id if cap else ""),
-            provider=cap.provider if cap else "",
+            label=cap.label if cap else "",
             method=req.method,
             host=req.host,
             path=req.path,
@@ -375,7 +375,7 @@ class BrokerCore:
         self.audit.emit(
             "broker.request",
             cap_id=cap.cap_id,
-            provider=cap.provider,
+            label=cap.label,
             method=req.method,
             host=req.host,
             path=req.path,

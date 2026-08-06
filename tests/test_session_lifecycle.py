@@ -70,7 +70,7 @@ def cli_issue(manager: SessionManager):
 
     return manager.issue_capability(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(backend="static", service="github-token"),
         )
@@ -109,7 +109,7 @@ def test_a_stopped_session_brokers_nothing(session, store, executor, resolver):
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
+            label="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
         )
     )
     assert core.handle(make_request(token)).decision == "allow"
@@ -191,7 +191,7 @@ def test_cli_issue_list_and_revoke(capsys, monkeypatch):
         [
             "cap",
             "issue",
-            "--provider",
+            "--label",
             "github",
             "--host",
             "api.github.com",
@@ -440,8 +440,8 @@ def test_starting_with_a_profile_issues_all_capabilities(tmp_path, monkeypatch):
     (profile_dir / "testproj.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"provider": "github", "hosts": ["api.github.com"], "secret": "keychain:asbx-github:bot", "methods": ["GET"]},
-            {"provider": "npm", "hosts": ["registry.npmjs.org"], "secret": "keychain:asbx-npm:bot", "methods": ["GET"]},
+            {"label": "github", "hosts": ["api.github.com"], "secret": "keychain:asbx-github:bot", "methods": ["GET"]},
+            {"label": "npm", "hosts": ["registry.npmjs.org"], "secret": "keychain:asbx-npm:bot", "methods": ["GET"]},
         ],
     }))
     monkeypatch.setenv("ASBX_PROFILE_DIR", str(profile_dir))

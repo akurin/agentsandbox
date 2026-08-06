@@ -144,6 +144,14 @@ def _parse_forward(value: str) -> tuple[int, int]:
     return host_port, guest_port
 
 
+def _label(value: str) -> str:
+    """A capability's required, non-empty label - the only thing that names
+    what it's for, now that there is no provider field to fall back on."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("--label must not be empty")
+    return value
+
+
 def _parse_secret_ref(value: str) -> SecretRef:
     """``keychain:SERVICE[:ACCOUNT]``, ``pass:path/to/entry``, ``env:NAME`` or ``file:/path``."""
     backend, _, rest = value.partition(":")
@@ -262,7 +270,7 @@ def _warm_secrets(profile_name: str):
             resolver.fetch(ref)
         except SandboxError as exc:
             where = f"{ref.backend}:{ref.service}" + (f":{ref.account}" if ref.account else "")
-            return resolver, f"cannot read the secret for {spec.provider} ({where}): {exc}"
+            return resolver, f"cannot read the secret for {spec.label} ({where}): {exc}"
 
     # From here there is no going back to a terminal, so stop expiring them.
     resolver.hold_for_session()
@@ -312,7 +320,7 @@ def _report_started(box) -> None:
     # nothing looks identical to one that worked.
     caps = CapabilityStore(session.paths.capabilities, session.session_id).list()
     for cap in caps:
-        print(f"  cap        {cap.cap_id}  {cap.provider} ({', '.join(cap.hosts)})")
+        print(f"  cap        {cap.cap_id}  {cap.label} ({', '.join(cap.hosts)})")
     if box.profile and not caps:
         print(f"  !! profile {box.profile!r} issued no capabilities - see {box_supervisor_log(box)}")
 
@@ -378,8 +386,7 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
             print(f"  box {name}")
         for spec in load_profile(profile_path):
             token, cap = manager.issue_capability(spec)
-            label = spec.label or spec.provider
-            print(f"  cap {cap.cap_id:<18} {label} ({', '.join(spec.methods)} {', '.join(spec.hosts)})")
+            print(f"  cap {cap.cap_id:<18} {spec.label} ({', '.join(spec.methods)} {', '.join(spec.hosts)})")
             if spec.env_var:
                 capability_env[spec.env_var] = token
                 print(f"    guest env: ${spec.env_var}")
@@ -585,9 +592,9 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
     session = _resolve_session(args.box)
     manager = SessionManager(session)
     spec = CapabilitySpec(
-        provider=args.provider,
-        account=args.account,
         hosts=args.host,
+        label=args.label,
+        account=args.account,
         resources=args.resource or [],
         methods=[m.upper() for m in (args.method or ["GET", "HEAD"])],
         path_globs=args.path or ["/*"],
@@ -601,14 +608,13 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
         ),
         ttl_seconds=args.ttl,
         max_response_bytes=args.max_response_bytes,
-        label=args.label,
     )
     token, cap = manager.issue_capability(spec)
 
     # Say which session this landed in. It is resolved implicitly when only one
     # is running, and "it worked but where?" is a fair thing to wonder.
     where = session.box_name or "no box"
-    print(f"capability {cap.cap_id} issued for {spec.provider}")
+    print(f"capability {cap.cap_id} issued for {spec.label}")
     print(f"  in session {session.session_id} ({where})")
     lifetime = f"expires in {args.ttl}s, and is" if args.ttl else "does not expire, but is"
     print(f"  {lifetime} revoked when that session stops")
@@ -623,12 +629,16 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
         "profile instead and it arrives as an\nenvironment variable in every session:\n"
     )
     print("  ~/.config/asbx/profiles/my-project.json")
+    # A guess at a shell-safe env var name from a label that may contain
+    # spaces or punctuation ("read repos" -> READ_REPOS) - just a starting
+    # point in the printed suggestion, not validated or stored anywhere.
+    env_guess = "".join(c if c.isalnum() else "_" for c in spec.label).strip("_").upper() or "TOKEN"
     print(
         "  {\n"
         '    "version": 1,\n'
         '    "capabilities": [\n'
         "      {\n"
-        f'        "provider": "{spec.provider}", "env": "{spec.provider.upper()}_TOKEN",\n'
+        f'        "label": "{spec.label}", "env": "{env_guess}",\n'
         f'        "hosts": {json.dumps(spec.hosts)},\n'
         f'        "methods": {json.dumps(spec.methods)}, "paths": {json.dumps(spec.path_globs)},\n'
         f'        "secret": "{spec.secret.backend}:{spec.secret.service}'
@@ -749,7 +759,7 @@ def cmd_cap_renew(args: argparse.Namespace) -> int:
     AuditLog(session.paths.audit_log, session.session_id).emit(
         "capability.renewed", cap_id=cap.cap_id, ttl=args.ttl
     )
-    print(f"renewed {cap.cap_id} ({cap.provider})")
+    print(f"renewed {cap.cap_id} ({cap.label})")
     print(f"  expires in {args.ttl}s" if args.ttl else "  no longer expires")
     print("  takes effect on the next request; no restart needed")
     return 0
@@ -907,7 +917,7 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
             "header": f"{inject.header}: {inject.template.replace('{secret}', '<secret>')}",
         }.get(inject.kind, inject.kind)
 
-        print(f"\n  - provider: {spec.provider}")
+        print(f"\n  - label: {spec.label}")
         print(f"    placeholder:  ${spec.env_var}" if spec.env_var else
               "    placeholder:  (none - copy it from `asbx cap issue` by hand)")
         print(f"    secret:       {spec.secret.backend}:{spec.secret.service}"
@@ -1872,8 +1882,10 @@ def build_parser() -> argparse.ArgumentParser:
     cap_sub = cap.add_subparsers(dest="subcommand", required=True)
 
     issue = cap_sub.add_parser("issue", parents=[box_flag], help="mint a capability placeholder")
-    issue.add_argument("--provider", required=True, help="e.g. github, openai, aws")
-    issue.add_argument("--account", default="", help="which account at that provider")
+    issue.add_argument(
+        "--label", required=True, type=_label, help="what this is for, e.g. 'github read repos'"
+    )
+    issue.add_argument("--account", default="", help="which account this credential is for")
     issue.add_argument(
         "--host", action="append", required=True, help="hostname the capability covers (repeatable)"
     )
@@ -1901,7 +1913,6 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument(
         "--max-response-bytes", type=int, default=DEFAULT_MAX_RESPONSE_BYTES
     )
-    issue.add_argument("--label", default="")
     issue.set_defaults(func=cmd_cap_issue)
 
     cap_sub.add_parser("ls", parents=[box_flag], help="list capabilities").set_defaults(

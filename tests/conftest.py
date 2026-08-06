@@ -121,13 +121,12 @@ def broker(session, store, executor, resolver) -> BrokerCore:
 def github_capability(store):
     """A read-only capability for one repo on api.github.com."""
     spec = CapabilitySpec(
-        provider="github",
+        label="github",
         account="acme-bot",
         hosts=["api.github.com"],
         resources=["repo:acme/api"],
         methods=["GET", "HEAD"],
         path_globs=["/repos/*"],
         secret=SecretRef(backend="static", service="github-token"),
-        label="test",
     )
     return store.issue(spec)

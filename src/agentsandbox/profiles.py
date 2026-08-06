@@ -11,19 +11,19 @@ Example (``~/.config/asbx/profiles/oss-contributor.json``)::
       "version": 1,
       "capabilities": [
         {
-          "provider": "github",
+          "label": "github",
           "hosts": ["api.github.com"],
           "methods": ["GET", "HEAD"],
           "paths": ["/repos/acme/*"],
           "secret": "keychain:asbx-github:me"
         },
         {
-          "provider": "npm",
+          "label": "npm",
           "hosts": ["registry.npmjs.org"],
           "secret": "keychain:asbx-npm:me"
         },
         {
-          "provider": "openai",
+          "label": "openai",
           "hosts": ["api.openai.com"],
           "methods": ["POST"],
           "secret": "keychain:asbx-openai:default"
@@ -146,10 +146,14 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
         secret.store = default_store
     injection = InjectionSpec.from_dict(entry.get("injection", {}))
 
+    label = str(entry.get("label", ""))
+    if not label:
+        raise CapabilityError("a capability must have a label")
+
     return CapabilitySpec(
-        provider=entry["provider"],
-        account=str(entry.get("account", "")),
         hosts=_as_list(entry["hosts"]),
+        label=label,
+        account=str(entry.get("account", "")),
         resources=_as_list(entry.get("resources", [])),
         methods=_as_list(entry.get("methods", ["GET"])),
         path_globs=_as_list(entry.get("paths", ["/*"])),
@@ -159,7 +163,6 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
         injection=injection,
         ttl_seconds=int(entry.get("ttl", DEFAULT_TTL_SECONDS)),
         max_response_bytes=int(entry.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)),
-        label=str(entry.get("label", "")),
         env_var=str(entry.get("env", "")),
     )
 

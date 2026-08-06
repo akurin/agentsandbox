@@ -17,12 +17,12 @@ def test_json_profile_parses(profile_dir):
     (profile_dir / "oss.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"provider": "github", "hosts": ["api.github.com"], "methods": ["GET"], "secret": "keychain:asbx-github:me"}
+            {"label": "github", "hosts": ["api.github.com"], "methods": ["GET"], "secret": "keychain:asbx-github:me"}
         ],
     }))
     specs = load_profile(resolve_profile("oss"))
     assert len(specs) == 1
-    assert specs[0].provider == "github"
+    assert specs[0].label == "github"
     assert specs[0].hosts == ["api.github.com"]
     assert specs[0].secret.backend == "keychain"
 
@@ -30,8 +30,8 @@ def test_secret_ref_variants(profile_dir):
     (profile_dir / "s.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"provider": "a", "hosts": ["x.com"], "secret": "keychain:svc:acct"},
-            {"provider": "b", "hosts": ["y.com"], "secret": {"backend": "env", "service": "TOKEN"}},
+            {"label": "a", "hosts": ["x.com"], "secret": "keychain:svc:acct"},
+            {"label": "b", "hosts": ["y.com"], "secret": {"backend": "env", "service": "TOKEN"}},
         ],
     }))
     specs = load_profile(resolve_profile("s"))
@@ -41,13 +41,13 @@ def test_secret_ref_variants(profile_dir):
     assert specs[1].secret.backend == "env"
     assert specs[1].secret.service == "TOKEN"
 
-def test_missing_provider_is_an_error(profile_dir):
+def test_missing_label_is_an_error(profile_dir):
     (profile_dir / "bad.json").write_text(json.dumps({"version": 1, "capabilities": [{"hosts": ["x.com"], "secret": "keychain:x"}]}))
-    with pytest.raises(CapabilityError, match="provider"):
+    with pytest.raises(CapabilityError, match="label"):
         load_profile(resolve_profile("bad"))
 
 def test_missing_secret_is_an_error(profile_dir):
-    (profile_dir / "bad.json").write_text(json.dumps({"version": 1, "capabilities": [{"provider": "x", "hosts": ["x.com"]}]}))
+    (profile_dir / "bad.json").write_text(json.dumps({"version": 1, "capabilities": [{"hosts": ["x.com"]}]}))
     with pytest.raises(CapabilityError, match="secret"):
         load_profile(resolve_profile("bad"))
 
@@ -74,7 +74,7 @@ def test_profiles_can_carry_non_secret_environment(profile_dir):
         "version": 1,
         "env": {"WIREMOCK_URL": "https://wiremock.example.com", "WIREMOCK_USER": "developer"},
         "capabilities": [
-            {"provider": "wiremock", "hosts": ["wiremock.example.com"], "secret": "keychain:x:y"}
+            {"label": "wiremock", "hosts": ["wiremock.example.com"], "secret": "keychain:x:y"}
         ],
     }))
     box = load_profile_env(resolve_profile("svc"))
@@ -98,7 +98,7 @@ def test_the_wiremock_profile_cannot_wipe_the_shared_journal():
     cap = Capability(
         token_hash="0" * 64,
         session_id="s",
-        provider=spec.provider,
+        label=spec.label,
         hosts=spec.hosts,
         methods=spec.methods,
         path_globs=spec.path_globs,
@@ -133,7 +133,7 @@ def test_query_strings_do_not_defeat_the_path_check():
     cap = Capability(
         token_hash="0" * 64,
         session_id="s",
-        provider=spec.provider,
+        label=spec.label,
         hosts=spec.hosts,
         methods=spec.methods,
         path_globs=spec.path_globs,
@@ -151,8 +151,8 @@ def test_a_profile_can_point_at_its_own_pass_store(profile_dir):
         "version": 1,
         "pass_store": "~/.password-store-neo",
         "capabilities": [
-            {"provider": "a", "hosts": ["a.example.com"], "secret": "pass:wiremock/developer"},
-            {"provider": "b", "hosts": ["b.example.com"], "secret": "pass:github/token"},
+            {"label": "a", "hosts": ["a.example.com"], "secret": "pass:wiremock/developer"},
+            {"label": "b", "hosts": ["b.example.com"], "secret": "pass:github/token"},
         ],
     }))
     specs = load_profile(resolve_profile("neo"))
@@ -165,9 +165,9 @@ def test_a_capability_can_override_the_profile_store(profile_dir):
         "version": 1,
         "pass_store": "~/.password-store-neo",
         "capabilities": [
-            {"provider": "a", "hosts": ["a.example.com"], "secret": "pass:wiremock/developer"},
+            {"label": "a", "hosts": ["a.example.com"], "secret": "pass:wiremock/developer"},
             {
-                "provider": "shared",
+                "label": "shared",
                 "hosts": ["b.example.com"],
                 "secret": {"backend": "pass", "service": "github/token", "store": "~/.password-store"},
             },
@@ -187,7 +187,7 @@ def test_every_shipped_profile_loads(name):
     specs = load_profile(resolve_profile(name))
     assert specs
     for spec in specs:
-        assert spec.hosts and spec.provider
+        assert spec.hosts and spec.label
         spec.injection.validate()
 
 
@@ -198,7 +198,7 @@ def test_a_profile_capability_does_not_expire_by_default():
     from agentsandbox.config import DEFAULT_TTL_SECONDS
 
     for spec in load_profile(resolve_profile("example")):
-        if spec.provider == "internal-api":
+        if spec.label == "deploy tooling":
             assert spec.ttl_seconds == 1800  # explicit, and honoured
         else:
             assert spec.ttl_seconds == DEFAULT_TTL_SECONDS == 0
@@ -226,17 +226,17 @@ def test_no_module_hardcodes_a_default_that_config_owns():
 
 
 def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
-    """It used to print `label`, which does nothing, and hide injection,
-    deny_paths and the placeholder name - so the fields that decide whether a
-    request succeeds were the ones you could not see."""
+    """It used to hide injection, deny_paths and the placeholder name - so the
+    fields that decide whether a request succeeds were the ones you could not
+    see. label is required now and stands in for what provider used to show,
+    so it is expected to appear too."""
     from agentsandbox import cli
 
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "env": {"API_BASE": "https://api.example.com"},
         "capabilities": [{
-            "provider": "svc",
-            "label": "ignore me",
+            "label": "svc",
             "env": "SVC_TOKEN",
             "hosts": ["api.example.com"],
             "methods": ["GET", "POST"],
@@ -249,12 +249,12 @@ def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
     assert cli.main(["profile", "show", "p"]) == 0
     out = capsys.readouterr().out
 
+    assert "- label: svc" in out          # what identifies this capability
     assert "$SVC_TOKEN" in out            # what the agent actually uses
     assert "X-Key: <secret>" in out       # how it is attached
     assert "/v1/admin/*" in out           # the deny list is a security control
     assert "expires:      never" in out
     assert "API_BASE=https://api.example.com" in out
-    assert "ignore me" not in out         # documentation-only, not shown
 
 
 def test_profile_show_spells_out_defaults_the_file_omitted():

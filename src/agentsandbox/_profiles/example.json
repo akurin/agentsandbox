@@ -10,7 +10,6 @@
 
   "capabilities": [
     {
-      "provider": "github",
       "label": "read repos",
       "env": "GITHUB_TOKEN",
       "hosts": ["api.github.com"],
@@ -20,7 +19,6 @@
     },
 
     {
-      "provider": "openai",
       "label": "completions",
       "env": "OPENAI_API_KEY",
       "hosts": ["api.openai.com"],
@@ -32,7 +30,6 @@
     {
       "_comment_deny": "deny_paths is checked before paths, so a broad allow can keep a few endpoints out of reach. Use it where an API mixes routine and destructive operations under one prefix.",
       "_comment_ttl": "ttl is in seconds, and 0 - the default - means the capability never expires, because an agent may run for days. Set it only for a grant meant to lapse on its own; extend one with `asbx cap renew`.",
-      "provider": "internal-api",
       "label": "deploy tooling",
       "env": "INTERNAL_TOKEN",
       "hosts": ["api.internal.example.com"],

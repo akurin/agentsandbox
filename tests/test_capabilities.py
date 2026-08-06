@@ -89,7 +89,7 @@ def test_a_capability_from_another_session_is_worthless(store, github_capability
 def test_expiry(store):
     token, cap = store.issue(
         CapabilitySpec(
-            provider="test",
+            label="test",
             hosts=["api.github.com"],
             secret=SecretRef(service="x"),
             ttl_seconds=1,
@@ -112,7 +112,7 @@ def test_revocation_is_immediate(store, github_capability):
 def test_revoke_all_kills_every_capability(store):
     for i in range(3):
         store.issue(
-            CapabilitySpec(provider=f"p{i}", hosts=["api.github.com"], secret=SecretRef(service="x"))
+            CapabilitySpec(label=f"p{i}", hosts=["api.github.com"], secret=SecretRef(service="x"))
         )
     assert store.revoke_all() == 3
     assert all(cap.revoked for cap in store.list())
@@ -129,7 +129,7 @@ def test_unsupported_injection_is_refused_at_issue_time(store):
     with pytest.raises(PolicyDenied) as exc:
         store.issue(
             CapabilitySpec(
-                provider="aws",
+                label="aws",
                 hosts=["api.github.com"],
                 secret=SecretRef(service="x"),
                 injection=InjectionSpec(kind="aws_sigv4"),
@@ -151,7 +151,7 @@ def test_public_view_never_contains_the_token(store, github_capability):
 def test_store_is_reloaded_when_another_process_writes_it(session, store):
     other = CapabilityStore(session.paths.capabilities, session.session_id)
     token, cap = other.issue(
-        CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
+        CapabilitySpec(label="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
     )
     # The first store instance had already loaded an empty file.
     assert store.lookup(token) is not None
@@ -167,7 +167,7 @@ def test_find_placeholders_extracts_tokens():
 def test_prune_expired(store):
     store.issue(
         CapabilitySpec(
-            provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"), ttl_seconds=1
+            label="test", hosts=["api.github.com"], secret=SecretRef(service="x"), ttl_seconds=1
         )
     )
     assert store.prune_expired(now=time.time() + 5) == 1
@@ -178,7 +178,7 @@ def test_a_deny_list_carves_exceptions_out_of_a_broad_allow(store):
     """Allow the API, keep the destructive corner of it out of reach."""
     token, cap = store.issue(
         CapabilitySpec(
-            provider="svc",
+            label="svc",
             hosts=["api.example.com"],
             methods=["GET", "POST", "DELETE"],
             path_globs=["/admin/*"],
@@ -199,7 +199,7 @@ def test_deny_beats_allow_even_for_an_exact_match(store):
     """Order matters: the deny list is checked first, so it always wins."""
     _, cap = store.issue(
         CapabilitySpec(
-            provider="svc",
+            label="svc",
             hosts=["api.example.com"],
             path_globs=["/thing"],
             deny_path_globs=["/thing"],
@@ -214,7 +214,7 @@ def test_deny_beats_allow_even_for_an_exact_match(store):
 def test_denied_paths_are_visible_when_reviewing_a_capability(store):
     _, cap = store.issue(
         CapabilitySpec(
-            provider="svc",
+            label="svc",
             hosts=["api.example.com"],
             path_globs=["/*"],
             deny_path_globs=["/dangerous"],
@@ -232,7 +232,7 @@ def test_a_capability_does_not_expire_by_default(store):
     a capability, and scope does not decay.
     """
     _, cap = store.issue(
-        CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
+        CapabilitySpec(label="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
     )
     assert cap.expires_at == 0.0
     cap.check_alive(now=time.time() + 86400 * 30)
@@ -241,7 +241,7 @@ def test_a_capability_does_not_expire_by_default(store):
 def test_renew_extends_an_expired_capability(store):
     _, cap = store.issue(
         CapabilitySpec(
-            provider="test",
+            label="test",
             hosts=["api.github.com"],
             secret=SecretRef(service="x"),
             ttl_seconds=1,
@@ -262,7 +262,7 @@ def test_renewing_an_unknown_capability_reports_it(store):
 def test_renew_to_zero_ttl_means_never_expires(store):
     _, cap = store.issue(
         CapabilitySpec(
-            provider="test",
+            label="test",
             hosts=["api.github.com"],
             secret=SecretRef(service="x"),
             ttl_seconds=1,
@@ -281,7 +281,7 @@ def test_usage_is_counted_even_though_nothing_caps_it(store):
     no longer changes any decision.
     """
     token, cap = store.issue(
-        CapabilitySpec(provider="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
+        CapabilitySpec(label="test", hosts=["api.github.com"], secret=SecretRef(service="x"))
     )
     for _ in range(300):
         store.record_usage(cap, 4096)
@@ -296,7 +296,7 @@ def test_renew_does_not_reset_the_usage_counters(store):
     """A capability renewed four times should look like it in the audit log."""
     token, cap = store.issue(
         CapabilitySpec(
-            provider="test",
+            label="test",
             hosts=["api.github.com"],
             secret=SecretRef(service="x"),
             ttl_seconds=1,
@@ -323,7 +323,7 @@ def test_a_renewal_is_visible_to_an_already_loaded_store(store):
     """
     token, cap = store.issue(
         CapabilitySpec(
-            provider="test",
+            label="test",
             hosts=["api.github.com"],
             secret=SecretRef(service="x"),
             ttl_seconds=1,
@@ -343,7 +343,7 @@ def test_renewal_is_measured_from_now_not_from_the_old_expiry(store):
     """A grant that lapsed overnight should come back with a full window."""
     _, cap = store.issue(
         CapabilitySpec(
-            provider="test",
+            label="test",
             hosts=["api.github.com"],
             secret=SecretRef(service="x"),
             ttl_seconds=1,

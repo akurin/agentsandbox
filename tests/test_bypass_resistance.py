@@ -109,7 +109,7 @@ def test_the_broker_will_not_fetch_from_private_space_either(session, store, res
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="x", hosts=["*"], secret=SecretRef(service="github-token")
+            label="x", hosts=["*"], secret=SecretRef(service="github-token")
         )
     )
     response = core.handle(make_request(token, host="metadata.test"))
@@ -186,7 +186,7 @@ def test_the_real_credential_never_crosses_back_into_the_guest(session, store, r
     )
     token, _ = store.issue(
         CapabilitySpec(
-            provider="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
+            label="github", hosts=["api.github.com"], secret=SecretRef(service="github-token")
         )
     )
     response = core.handle(make_request(token))
@@ -320,7 +320,7 @@ def test_destroying_a_session_revokes_identity_and_capabilities(tmp_path):
     manager = SessionManager.create(allow_hosts=["api.github.com"])
     token, cap = manager.issue_capability(
         CapabilitySpec(
-            provider="github",
+            label="github",
             hosts=["api.github.com"],
             secret=SecretRef(backend="static", service="github-token"),
         )

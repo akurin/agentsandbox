@@ -81,7 +81,7 @@ asbx box create neo \
 
 # mint a capability placeholder scoped to exactly what it needs
 asbx cap issue --box neo \
-    --provider github --host api.github.com \
+    --label github --host api.github.com \
     --method GET --path '/repos/acme/*' \
     --secret keychain:asbx-github:bot --ttl 3600
 
@@ -110,7 +110,7 @@ them by hand every time:
   "version": 1,
   "capabilities": [
     {
-      "provider": "github",
+      "label": "github",
       "hosts": ["api.github.com"],
       "methods": ["GET", "HEAD"],
       "paths": ["/repos/acme/*"],
@@ -165,7 +165,7 @@ omitted name: `box ssh neo -o ConnectTimeout=5 -- git status`.
 `image ls` · `image rm NAME [--force]` · `image gc [--dry-run]`
 
 ### `cap` — capabilities
-`cap issue --box NAME --provider NAME --host HOST --secret REF [--method M]... [--path GLOB]... [--resource R]... [--operation OP] [--injection bearer|header|basic] [--ttl SECONDS]`
+`cap issue --box NAME --label LABEL --host HOST --secret REF [--method M]... [--path GLOB]... [--resource R]... [--operation OP] [--injection bearer|header|basic] [--ttl SECONDS]`
 `cap ls --box NAME` · `cap renew CAP_ID --ttl SECONDS` · `cap revoke CAP_ID`
 `cap try CAP_ID --url URL [--method M] [--via-broker]` — send one request through the broker exactly as the guest would, from the host, no VM boot required; add `--via-broker` to also exercise the running broker's transport rather than an in-process copy of its logic.
 
@@ -265,7 +265,7 @@ for a long run — the CLI says so at start-up, loudly.
   lookups that can disagree.
 - **A capability is a reference, not a secret.** `cap_v1_...` is what the
   guest gets; the store keeps only a SHA-256 of it. It's bound to a session,
-  a provider and account, hostnames, resources, methods, paths, and an
+  a required label and account, hostnames, resources, methods, paths, and an
   optional TTL and response-byte budget — all re-checked on every use.
 - **A capability must arrive in a request header.** Found in a URL or a body
   instead, it's refused with a clear error rather than silently rewritten — a
