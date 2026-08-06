@@ -275,8 +275,8 @@ for a long run — the CLI says so at start-up, loudly.
   lookups that can disagree.
 - **A capability is a reference, not a secret.** `cap_v1_...` is what the
   guest gets; the store keeps only a SHA-256 of it. It's bound to a session,
-  a required label and account, hostnames, resources, methods, paths, and an
-  optional TTL and response-byte budget — all re-checked on every use.
+  a required label, hostnames, resources, methods, paths, and an optional
+  TTL and response-byte budget — all re-checked on every use.
 - **A capability must arrive in a request header.** Found in a URL or a body
   instead, it's refused with a clear error rather than silently rewritten — a
   URL ends up in logs and referrers, a body may be persisted upstream.

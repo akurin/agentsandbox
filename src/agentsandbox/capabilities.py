@@ -9,9 +9,9 @@ and the store keeps nothing but a SHA-256 of that string, so a leaked store
 file does not yield working placeholders, and the audit log can refer to a
 capability by its short id without ever printing the token.
 
-Every capability is bound to the axes the spec lists: session, account,
-hostnames, resources, methods and semantic operations, and an optional
-expiry. A required ``label`` is the only thing that names what a capability
+Every capability is bound to the axes the spec lists: session, hostnames,
+resources, methods and semantic operations, and an optional expiry. A
+required ``label`` is the only thing that names what a capability
 is *for* - there is no ``provider`` field to fall back on, so two
 capabilities against the same service (an API key and an app key for the
 same product, say) are told apart by giving them distinct labels, not by
@@ -134,7 +134,6 @@ class Capability:
     token_hash: str
     session_id: str
     label: str
-    account: str = ""
     hosts: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=lambda: ["GET", "HEAD"])
@@ -234,7 +233,6 @@ class Capability:
             "cap_id": self.cap_id,
             "session": self.session_id,
             "label": self.label,
-            "account": self.account,
             "hosts": self.hosts,
             "resources": self.resources,
             "methods": self.methods,
@@ -274,7 +272,6 @@ class CapabilitySpec:
     #: the same product, say) get distinct labels, not a fake provider name
     #: on one of them.
     label: str
-    account: str = ""
     resources: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=lambda: ["GET", "HEAD"])
     path_globs: list[str] = field(default_factory=lambda: ["/*"])
@@ -351,7 +348,6 @@ class CapabilityStore:
             token_hash=token_hash(token),
             session_id=self.session_id,
             label=spec.label,
-            account=spec.account,
             hosts=list(spec.hosts),
             resources=list(spec.resources),
             methods=[m.upper() for m in spec.methods],

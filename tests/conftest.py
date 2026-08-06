@@ -132,7 +132,6 @@ def github_capability(store):
     """A read-only capability for one repo on api.github.com."""
     spec = CapabilitySpec(
         label="github",
-        account="acme-bot",
         hosts=["api.github.com"],
         resources=["repo:acme/api"],
         methods=["GET", "HEAD"],

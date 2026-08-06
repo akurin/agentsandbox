@@ -594,7 +594,6 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
     spec = CapabilitySpec(
         hosts=args.host,
         label=args.label,
-        account=args.account,
         resources=args.resource or [],
         methods=[m.upper() for m in (args.method or ["GET", "HEAD"])],
         path_globs=args.path or ["/*"],
@@ -1886,7 +1885,6 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument(
         "--label", required=True, type=_label, help="what this is for, e.g. 'github read repos'"
     )
-    issue.add_argument("--account", default="", help="which account this credential is for")
     issue.add_argument(
         "--host", action="append", required=True, help="hostname the capability covers (repeatable)"
     )

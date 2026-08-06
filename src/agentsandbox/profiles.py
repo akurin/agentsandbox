@@ -213,7 +213,6 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
     return CapabilitySpec(
         hosts=hosts,
         label=label,
-        account=str(entry.get("account", "")),
         resources=_as_list(when.get("resources", [])),
         methods=_as_list(when.get("methods", ["GET"])),
         path_globs=_as_list(when.get("paths", ["/*"])),
