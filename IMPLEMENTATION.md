@@ -157,7 +157,7 @@ loudly instead of looking like a working sandbox.
 
 ## Verified by the test suite
 
-`make test` - 453 passing, plus 3 skipped when outbound unix sockets are
+`make test` - 501 passing, plus 3 skipped when outbound unix sockets are
 blocked (some sandboxed CI environments do this; a real Mac shell does not) -
 no network, no VM boot required.
 
@@ -170,6 +170,11 @@ no network, no VM boot required.
   headers stripped, placeholder leak detection, brokered-response scrubbing of
   echoed credentials and `Set-Cookie`, oversized responses refused, audit
   containing neither the secret nor the placeholder
+- `aws_autosign`: dummy-key detection independent of destination, region/service
+  read from the guest's own signature scope, signing secret never cached,
+  both credential-bundle key casings accepted, expired credentials refused,
+  a secret backend failure turned into a clean denial rather than a dead
+  connection, signed headers split so a redirect can't carry them off-origin
 - redirects: same-origin keeps, cross-origin drops, return-to-origin does not
   re-attach, forbidden targets refused, scheme downgrade refused, chain bounded
 - L2 gateway: every non-WireGuard frame dropped with a reason (TCP, ICMP, IPv6,
@@ -210,7 +215,31 @@ Since then, in ordinary interactive use rather than a formal test pass: real
 (`box ssh`, plus ad-hoc `ssh -L` tunnels riding the same connection) reaching
 a real process listening inside the guest - including forwarding a port an
 in-guest process chose at runtime, which `--forward` itself can't do since it
-needs the port named at `box start`.
+needs the port named at `box start`. `aws_autosign` was exercised end to end
+against real AWS traffic from a full `cdk deploy` - `sts:GetCallerIdentity`,
+CloudFormation, and an S3 asset upload with SSE-KMS, none of it declared to
+`asbx` in advance beyond the signing secret.
+
+### Bugs real AWS traffic found
+
+1. **A secret backend failing (a signing-credential file with the wrong
+   permissions, in this case) killed the broker connection outright.**
+   `BrokerCore.handle` only caught `PolicyDenied`/`UpstreamError`; a
+   `BrokerError` propagated past it, the per-connection handler thread died,
+   and the guest saw an opaque "broker unavailable" for what was actually a
+   precise, fixable `chmod` away. Now caught and turned into a clean
+   `502 secret_unavailable` naming the real problem.
+2. **A dangling `x-amz-sdk-checksum-algorithm` header failed real S3 uploads**
+   that a synthetic signing test never would have: the header itself signs
+   and verifies fine, but S3 separately enforces that it never appears
+   without a matching `x-amz-checksum-*` value or trailer - both of which are
+   correctly stripped as stale once the body changes. Now stripped alongside
+   them.
+3. **`aws configure export-credentials` emits PascalCase
+   (`AccessKeyId`/`SecretAccessKey`/`SessionToken`/`Expiration`)**, not this
+   profile format's own snake_case - both are accepted now, so a host-side
+   refresh job can write that command's output to a file verbatim instead of
+   needing a reshaping step.
 
 ### Bugs that first boot found
 
@@ -259,9 +288,12 @@ security-relevant rather than merely broken:
   vsock devices at boot and cannot hot-plug, so both `--mount` and `--forward`
   take effect on the next `box start`, never live. `box set --mount-add`/
   `--mount-rm` change a box's config; they still need a restart to apply.
-- **Only `bearer`, `header` and `basic` credential injection are implemented.**
-  AWS SigV4 and other signing schemes are refused outright, not approximated -
-  an unsupported injection kind is a `PolicyDenied`, not a best-effort attempt.
+- **Only `bearer`, `header` and `basic` credential injection are implemented
+  for capabilities** - an unsupported injection kind is a `PolicyDenied`, not
+  a best-effort attempt. AWS SigV4 is handled separately, by `aws_autosign`
+  (see README): a session-wide re-signing rule rather than a per-capability
+  injection kind, since AWS requests usually need the whole thing re-signed,
+  not one value substituted into an otherwise-real signature.
 - **One WireGuard peer per session** (a mitmproxy constraint), which is also
   why a leaked config from an old session authenticates to nothing.
 - **A forwarded port has no access control beyond loopback binding.** Unlike

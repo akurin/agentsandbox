@@ -207,6 +207,38 @@ yourself) and asbx only ever reads from those.
 ### `system` — host-wide, not scoped to any one box
 `system doctor` · `system sessions` (every session, across every box) · `system prune [--older-than DAYS] [--dry-run]`
 
+## AWS requests
+
+A normal capability doesn't fit AWS well: SigV4 signs the whole request, not
+one header, and AWS SDKs sign for whichever of a dozen services they happen
+to be calling that moment, not one fixed host. A profile opts a session into
+**`aws_autosign`** instead:
+
+```json
+{
+  "version": 1,
+  "aws_autosign": {
+    "signing_secret": {"backend": "file", "path": "/path/to/aws-credentials.json"}
+  }
+}
+```
+
+`box start` mints a random, AWS-shaped dummy access key for the session and
+delivers it as `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` — the guest never
+holds a working AWS credential. Whatever the guest's own SDK signs with that
+dummy key gets recognised by the marker alone, stripped, and re-signed by the
+broker using `signing_secret`, for any AWS host the session's own destination
+policy already allows — not just one declared in advance. `region`/`service`
+are read from the guest's own (necessarily invalid) signature rather than
+declared anywhere, since the SDK already worked those out correctly to build
+the request in the first place.
+
+`signing_secret` is a real, working AWS credential the broker signs with -
+never the guest's own. It's read fresh on every request rather than cached,
+since it's the one credential likely to carry its own short expiration (an
+STS session from `aws configure export-credentials`, say) outside `asbx`'s
+control; a `file` backend refreshed by a host-side job is the natural fit.
+
 ## Mounts
 
 `--mount HOST:GUEST[:ro|rw]` follows Docker/Podman's own `-v`: both sides are

@@ -915,7 +915,12 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
     find out what it will actually do. Fields that are only documentation are
     not shown at all.
     """
-    from .profiles import load_profile, load_profile_env, resolve_profile
+    from .profiles import (
+        load_profile,
+        load_profile_aws_autosign,
+        load_profile_env,
+        resolve_profile,
+    )
 
     path = resolve_profile(args.name)
     specs = load_profile(path)
@@ -925,6 +930,13 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
         print("\n  guest environment (literal, not secret):")
         for name, value in sorted(literals.items()):
             print(f"    {name}={value}")
+
+    if autosign := load_profile_aws_autosign(path):
+        secret = autosign.signing_secret
+        print("\n  aws_autosign: every AWS request the guest signs gets re-signed by the broker")
+        print("    guest env:    $AWS_ACCESS_KEY_ID, $AWS_SECRET_ACCESS_KEY (dummy - minted per session)")
+        print(f"    signing_secret: {secret.backend}:{secret.service}"
+              f"{':' + secret.account if secret.account else ''}")
 
     for spec in specs:
         inject = spec.injection

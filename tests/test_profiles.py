@@ -466,6 +466,24 @@ def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
     assert "API_BASE=https://api.example.com" in out
 
 
+def test_profile_show_reveals_aws_autosign(profile_dir, capsys):
+    from agentsandbox import cli
+
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "aws_autosign": {"signing_secret": "file:/run/secrets/aws.json"},
+        "capabilities": [
+            {"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"},
+        ],
+    }))
+    assert cli.main(["profile", "show", "p"]) == 0
+    out = capsys.readouterr().out
+
+    assert "aws_autosign" in out
+    assert "$AWS_ACCESS_KEY_ID" in out
+    assert "file:/run/secrets/aws.json" in out
+
+
 def test_profile_show_spells_out_defaults_the_file_omitted():
     """A default is still a decision; the point of the command is to learn
     what will happen, not to see the file read back."""
