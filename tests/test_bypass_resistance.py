@@ -1,9 +1,10 @@
-"""Bypass resistance, written against README §7.
+"""Bypass resistance: one section per security guarantee, checked at the
+component that actually enforces it.
 
-Each test names the acceptance criterion it stands for and checks it at the
-component that actually enforces it.  Where a criterion can only be fully
-demonstrated with a booted guest, the test checks the enforcing configuration
-and says so - see IMPLEMENTATION.md for what is and is not verified here.
+Where a guarantee can only be fully demonstrated with a booted guest, the
+test checks the enforcing configuration instead and says so - see
+IMPLEMENTATION.md's "Verified on real hardware" / "Still not verified" split
+for what that leaves open.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ def frame(dst_ip, dst_port, payload=b"data", src_ip="192.168.127.2"):
     return EthernetFrame(GATEWAY_MAC, GUEST_MAC, ETHERTYPE_IPV4, packet).pack()
 
 
-# §7.1 -----------------------------------------------------------------------
+# -- the guest's only path out is the tunnel ---------------------------------
 
 
 def test_the_guest_has_no_path_out_except_wireguard():
@@ -83,7 +84,7 @@ def test_the_relay_target_is_pinned_to_this_sessions_mitmproxy(session):
     assert gateway.config.gateway_ip == "192.168.127.1"
 
 
-# §7.2 -----------------------------------------------------------------------
+# -- the mac and the private lan are unreachable through the proxy -----------
 
 
 @pytest.mark.parametrize(
@@ -116,7 +117,7 @@ def test_the_broker_will_not_fetch_from_private_space_either(session, store, res
     assert executor.calls == []
 
 
-# §7.3 -----------------------------------------------------------------------
+# -- every http version goes through the same policy --------------------------
 
 
 @pytest.mark.parametrize("version", [b"HTTP/1.1", b"HTTP/2.0", b"HTTP/3.0"])
@@ -149,7 +150,7 @@ def test_the_proxy_is_configured_for_http3_and_refuses_blind_tunnels(session):
     assert "strip_ech=true" in joined
 
 
-# §7.4 -----------------------------------------------------------------------
+# -- a placeholder works only for its approved destination and operation -----
 
 
 def test_a_placeholder_is_useless_outside_its_grant(broker, github_capability):
@@ -168,7 +169,7 @@ def test_a_placeholder_is_useless_outside_its_grant(broker, github_capability):
         assert broker.handle(make_request(token, **bad)).decision == "deny", bad
 
 
-# §7.5 -----------------------------------------------------------------------
+# -- real credentials never appear inside the vm ------------------------------
 
 
 def test_the_real_credential_never_crosses_back_into_the_guest(session, store, resolver):
@@ -225,7 +226,7 @@ def test_the_broker_protocol_can_only_ask_for_an_operation():
     }
 
 
-# §7.6 -----------------------------------------------------------------------
+# -- redirects cannot move credentials to another origin ---------------------
 
 
 def test_redirects_cannot_carry_the_credential_off_origin(policy):
@@ -246,7 +247,7 @@ def test_redirects_cannot_carry_the_credential_off_origin(policy):
     assert executor.hops[-1]["carried_credential"] is False
 
 
-# §7.7 -----------------------------------------------------------------------
+# -- untrusted package scripts get fewer capabilities than the agent ---------
 
 
 def test_package_scripts_cannot_read_the_agents_capabilities(session, tmp_path):
@@ -273,7 +274,7 @@ def test_package_scripts_cannot_read_the_agents_capabilities(session, tmp_path):
     assert "capabilities.env" in runner
 
 
-# §7.8 -----------------------------------------------------------------------
+# -- forwards are host-to-guest, one-directional, loopback only --------------
 
 
 def test_forwards_are_host_to_guest_only_and_loopback_only(session):
@@ -292,7 +293,7 @@ def test_forwards_are_host_to_guest_only_and_loopback_only(session):
     assert forwarder.host == "127.0.0.1"
 
 
-# §7.9 -----------------------------------------------------------------------
+# -- a mount is the real directory, not a copy --------------------------------
 
 
 def test_the_guest_gets_the_real_project(tmp_path):
@@ -311,7 +312,7 @@ def test_the_guest_gets_the_real_project(tmp_path):
     assert any("mountTag=m0" in s for s in mounts)
 
 
-# §7.10 ----------------------------------------------------------------------
+# -- destroying a session revokes its identity and every capability ----------
 
 
 def test_destroying_a_session_revokes_identity_and_capabilities(tmp_path):
@@ -338,6 +339,9 @@ def test_destroying_a_session_revokes_identity_and_capabilities(tmp_path):
     new_identity = json.loads(fresh.session.paths.wireguard_conf.read_text())
     assert new_identity["server_key"] != old_identity["server_key"]
     assert fresh.store.lookup(token) is None
+
+
+# -- no traffic is ever passed through uninspected ----------------------------
 
 
 def test_the_proxy_is_never_told_to_ignore_anything(session):

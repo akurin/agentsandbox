@@ -3,9 +3,9 @@
 Run an AI coding agent in a disposable Linux VM on your Mac. The guest's only
 route to the internet is a WireGuard tunnel terminating in mitmproxy; every
 authenticated request goes through a separate secrets broker that injects a
-real credential from the macOS Keychain and returns a sanitized response.
-The agent never sees the credential, and the guest never has a network path
-that bypasses either.
+real credential — from the macOS Keychain, `pass`, or wherever else you keep
+one — and returns a sanitized response. The agent never sees the credential,
+and the guest never has a network path that bypasses either.
 
 ## How it works
 
@@ -25,8 +25,9 @@ mitmproxy, WireGuard mode (proxy/addon.py)
 secrets broker (broker/)                              plain, unauthenticated
     │  separate process, unix socket only;             traffic that passed
     │  reads the real credential from Keychain,         the policy check is
-    │  performs the upstream request itself,            forwarded directly,
-    │  returns a sanitized response                     without touching this
+    │  pass, an env var or a file, performs the         forwarded directly,
+    │  upstream request itself, returns a               without touching this
+    │  sanitized response                               broker at all
     ▼
 approved external service
 ```
@@ -70,6 +71,7 @@ changes what an existing box resets to. `asbx image ls` lists what's built;
 
 ```bash
 # a real credential, held only in Keychain — the guest never sees it
+# (the default backend; `pass`, an env var or a file also work — see below)
 asbx secret set --service asbx-github --account bot
 
 # a box: a named disk, its mount points, its egress allowlist, its image
@@ -124,7 +126,8 @@ asbx box start neo   # issues everything the profile lists, every time
 ```
 
 A profile file contains no credential — only a reference to where one lives
-in Keychain — so it's safe to check into a repo.
+(`keychain:...` by default, or any of the other backends below) — so it's
+safe to check into a repo.
 
 ## Commands
 
@@ -152,12 +155,30 @@ something *belonging to* a box (a capability, a secret) takes `--box` instead.
 `image ls` · `image rm NAME [--force]` · `image gc [--dry-run]`
 
 ### `cap` — capabilities
-`cap issue --box NAME --provider NAME --host HOST --secret keychain:SERVICE[:ACCOUNT] [--method M]... [--path GLOB]... [--resource R]... [--operation OP] [--injection bearer|header|basic] [--ttl SECONDS]`
+`cap issue --box NAME --provider NAME --host HOST --secret REF [--method M]... [--path GLOB]... [--resource R]... [--operation OP] [--injection bearer|header|basic] [--ttl SECONDS]`
 `cap ls --box NAME` · `cap renew CAP_ID --ttl SECONDS` · `cap revoke CAP_ID`
 `cap try CAP_ID --url URL [--method M] [--via-broker]` — send one request through the broker exactly as the guest would, from the host, no VM boot required; add `--via-broker` to also exercise the running broker's transport rather than an in-process copy of its logic.
 
+`REF` names where the real credential lives, never the credential itself —
+one of four backends:
+
+| prefix | resolves to |
+|---|---|
+| `keychain:SERVICE[:ACCOUNT]` | a macOS Keychain generic-password item (the default) |
+| `pass:ENTRY[/ACCOUNT]` | a [`pass`](https://www.passwordstore.org/) entry — GPG-encrypted, `gpg-agent` owns the prompt and caching; profiles can set a project-wide `"pass_store"` so its capabilities all read from their own `PASSWORD_STORE_DIR` |
+| `env:NAME` | an environment variable in the broker's own process — a development convenience, not for real use |
+| `file:/path` | a file, refused if it's anything more permissive than `0600` |
+
+A value that decodes as a JSON object with `access_token` is treated as an
+OAuth bundle rather than a plain token: the broker refreshes it against
+`token_url` with the stored `refresh_token` when it's within 60s of expiry,
+and writes the refreshed bundle back if it came from Keychain.
+
 ### `secret` — Keychain credentials
-`secret set --service NAME [--account NAME]` (prompts, never echoes)
+`secret set --service NAME [--account NAME]` (prompts, never echoes) — writes
+to Keychain specifically; the other three backends are populated however you
+already manage them (`pass insert`, an exported env var, a file you place
+yourself) and asbx only ever reads from those.
 `secret refresh --box NAME` — pick up a rotated credential without restarting the box
 
 ### `profile` — reusable capability declarations

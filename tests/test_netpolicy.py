@@ -1,4 +1,4 @@
-"""Destination policy: the "cannot reach the Mac or private LAN" half of §7."""
+"""Destination policy: the guest cannot reach the Mac or the private LAN."""
 
 from __future__ import annotations
 

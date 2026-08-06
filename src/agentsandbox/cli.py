@@ -1,8 +1,8 @@
 """``asbx`` - the operator's interface to the sandbox.
 
-Everything a human does happens here, on the trusted side: starting boxes,
-minting capabilities, reviewing and applying the agent's changes.  The guest
-has no channel to any of it.
+Everything a human does happens here, on the trusted side: creating and
+starting boxes, minting capabilities, watching the audit trail.  The guest has
+no channel to any of it.
 """
 
 from __future__ import annotations
