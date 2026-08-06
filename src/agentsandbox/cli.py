@@ -378,7 +378,12 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
     # be delivered as environment variables in cloud-init, rather than pasted by hand.
     capability_env: dict[str, str] = {}
     if args.profile:
-        from .profiles import load_profile, load_profile_env, resolve_profile
+        from .profiles import (
+            load_profile,
+            load_profile_aws_autosign,
+            load_profile_env,
+            resolve_profile,
+        )
 
         profile_path = resolve_profile(args.profile)
         capability_env.update(load_profile_env(profile_path))
@@ -392,6 +397,18 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
                 print(f"    guest env: ${spec.guest_env}")
             else:
                 print(f"    placeholder: {token}  (add \"box\" to the profile to inject it)")
+
+        if autosign := load_profile_aws_autosign(profile_path):
+            from .capabilities import new_dummy_aws_credentials
+
+            access_key_id, secret_access_key = new_dummy_aws_credentials()
+            autosign.access_key_id = access_key_id
+            capability_env["AWS_ACCESS_KEY_ID"] = access_key_id
+            capability_env["AWS_SECRET_ACCESS_KEY"] = secret_access_key
+            session.aws_autosign = autosign
+            session.save()
+            print("  aws_autosign  every AWS request the guest signs gets re-signed by the broker")
+            print("    guest env: $AWS_ACCESS_KEY_ID, $AWS_SECRET_ACCESS_KEY (dummy - never a working credential)")
 
     vm_config = VmConfig(
         cpus=args.cpus,

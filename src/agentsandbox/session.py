@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .capabilities import AwsAutosignSpec
 from .config import SessionPaths, sessions_root, write_private_file
 from .errors import SessionError
 from .netpolicy import DestinationPolicy
@@ -98,6 +99,12 @@ class Session:
     supervisor_pid: int = 0
     vm_driver: str = "vfkit"
 
+    #: Present only when the profile declared `aws_autosign`. Minted once at
+    #: session creation and read by both the addon (which host recognises
+    #: the guest's dummy access key by) and the broker (which credential
+    #: actually signs with) - neither hardcodes anything session-specific.
+    aws_autosign: AwsAutosignSpec | None = None
+
     @property
     def paths(self) -> SessionPaths:
         return SessionPaths(self.session_id)
@@ -108,6 +115,7 @@ class Session:
         data = asdict(self)
         data["policy"] = self.policy.to_dict()
         data["mounts"] = [m.to_dict() for m in self.mounts]
+        data["aws_autosign"] = self.aws_autosign.to_dict() if self.aws_autosign else None
         return data
 
     @classmethod
@@ -115,6 +123,8 @@ class Session:
         data = dict(data)
         data["policy"] = DestinationPolicy.from_dict(data.get("policy", {}))
         data["mounts"] = [Mount(**m) for m in data.get("mounts", [])]
+        raw_autosign = data.get("aws_autosign")
+        data["aws_autosign"] = AwsAutosignSpec.from_dict(raw_autosign) if raw_autosign else None
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})
 

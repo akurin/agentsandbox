@@ -61,7 +61,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .capabilities import CapabilitySpec, InjectionSpec, SecretRef
+from .capabilities import AwsAutosignSpec, CapabilitySpec, InjectionSpec, SecretRef
 from .config import DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
 from .errors import CapabilityError, PolicyDenied
 
@@ -121,7 +121,17 @@ def load_profile_env(path: Path) -> dict[str, str]:
     return _parse(path)[1]
 
 
-def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str]]:
+def load_profile_aws_autosign(path: Path) -> AwsAutosignSpec | None:
+    """The profile's ``aws_autosign`` block, if it declared one.
+
+    ``access_key_id`` comes back empty - a profile only ever names the real
+    credential to sign with; the dummy marker is minted per session, not
+    written down anywhere.
+    """
+    return _parse(path)[2]
+
+
+def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str], AwsAutosignSpec | None]:
     data = json.loads(path.read_text())
 
     if not isinstance(data, dict):
@@ -168,7 +178,20 @@ def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str]]:
         if spec.injection.username_guest_env:
             plain_env[spec.injection.username_guest_env] = spec.injection.username or ""
 
-    return specs, plain_env
+    aws_autosign = _resolve_aws_autosign(data.get("aws_autosign"), path)
+
+    return specs, plain_env, aws_autosign
+
+
+def _resolve_aws_autosign(data: Any, path: Path) -> AwsAutosignSpec | None:
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise CapabilityError(f"profile {path}: 'aws_autosign' must be a mapping")
+    try:
+        return AwsAutosignSpec(signing_secret=_resolve_secret_ref(data.get("signing_secret")))
+    except (KeyError, TypeError, ValueError, PolicyDenied, CapabilityError) as exc:
+        raise CapabilityError(f"profile {path}, 'aws_autosign': {exc}") from exc
 
 
 def _guest_env_collision(raw_env: dict, specs: list[CapabilitySpec]) -> str | None:
@@ -276,10 +299,6 @@ def _resolve_injection(data: dict) -> InjectionSpec:
     ...}`` when the guest's own tooling also needs it. Nested, not a second
     flat ``username_guest_env`` field, so there is nothing shaped like it to
     swap it with.
-
-    ``signing_secret`` (sigv4 only) is a secret reference in the same shape
-    as the top-level ``secret`` - compact string or explicit object - since
-    it names a credential the same way, it just plays a different role.
     """
     username_field = data.get("username")
     username: str | None = None
@@ -290,20 +309,12 @@ def _resolve_injection(data: dict) -> InjectionSpec:
     elif username_field is not None:
         username = str(username_field)
 
-    signing_secret_field = data.get("signing_secret")
-    signing_secret = (
-        _resolve_secret_ref(signing_secret_field) if signing_secret_field is not None else None
-    )
-
     return InjectionSpec(
         kind=data.get("kind", "bearer"),
         header=data.get("header", "Authorization"),
         template=data.get("template", "Bearer {secret}"),
         username=username,
         username_guest_env=username_guest_env,
-        region=data.get("region"),
-        service=data.get("service"),
-        signing_secret=signing_secret,
     )
 
 

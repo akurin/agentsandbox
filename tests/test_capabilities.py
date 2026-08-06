@@ -8,11 +8,13 @@ import time
 import pytest
 
 from agentsandbox.capabilities import (
+    AwsAutosignSpec,
     CapabilitySpec,
     CapabilityStore,
     InjectionSpec,
     SecretRef,
     find_placeholders,
+    new_dummy_aws_credentials,
     res_matches,
 )
 from agentsandbox.errors import CapabilityError, PolicyDenied
@@ -143,44 +145,25 @@ def test_header_injection_requires_a_secret_placeholder():
         InjectionSpec(kind="header", header="X-Api-Key", template="constant").validate()
 
 
-def test_sigv4_requires_region_service_and_signing_secret():
-    with pytest.raises(PolicyDenied) as exc:
-        InjectionSpec(kind="sigv4").validate()
-    assert exc.value.reason == "invalid_injection"
+def test_dummy_aws_credentials_look_like_a_real_access_key():
+    access_key_id, secret_access_key = new_dummy_aws_credentials()
+    assert access_key_id.startswith("AKIA")
+    assert len(access_key_id) == 20
+    assert access_key_id.isalnum() and access_key_id.isupper()
+    assert secret_access_key
 
-    with pytest.raises(PolicyDenied):
-        InjectionSpec(kind="sigv4", region="us-east-1").validate()
-
-    with pytest.raises(PolicyDenied):
-        InjectionSpec(
-            kind="sigv4", region="us-east-1", service="cloudformation"
-        ).validate()
-
-    InjectionSpec(
-        kind="sigv4",
-        region="us-east-1",
-        service="cloudformation",
-        signing_secret=SecretRef(service="aws-signing"),
-    ).validate()
+    # Minted per session, not a fixed constant - two calls must not agree.
+    other_access_key_id, other_secret_access_key = new_dummy_aws_credentials()
+    assert other_access_key_id != access_key_id
+    assert other_secret_access_key != secret_access_key
 
 
-def test_sigv4_fields_are_refused_on_other_injection_kinds():
-    with pytest.raises(PolicyDenied) as exc:
-        InjectionSpec(kind="bearer", region="us-east-1").validate()
-    assert exc.value.reason == "invalid_injection"
-
-    with pytest.raises(PolicyDenied):
-        InjectionSpec(kind="bearer", signing_secret=SecretRef(service="x")).validate()
-
-
-def test_sigv4_injection_round_trips_through_to_dict():
-    spec = InjectionSpec(
-        kind="sigv4",
-        region="us-east-1",
-        service="cloudformation",
-        signing_secret=SecretRef(service="aws-signing", account="ci"),
+def test_aws_autosign_spec_round_trips_through_to_dict():
+    spec = AwsAutosignSpec(
+        signing_secret=SecretRef(backend="file", service="/tmp/cred.json"),
+        access_key_id="AKIAABCDEFGHIJKLMNOP",
     )
-    restored = InjectionSpec.from_dict(spec.to_dict())
+    restored = AwsAutosignSpec.from_dict(spec.to_dict())
     assert restored == spec
 
 

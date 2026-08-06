@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from agentsandbox.errors import CapabilityError
 from agentsandbox import profiles
-from agentsandbox.profiles import load_profile, resolve_profile, list_profiles
+from agentsandbox.profiles import load_profile, load_profile_aws_autosign, resolve_profile, list_profiles
 
 @pytest.fixture
 def profile_dir(tmp_path, monkeypatch):
@@ -268,42 +268,41 @@ def test_username_plain_string_still_works(profile_dir):
     assert spec.injection.username_guest_env is None
 
 
-def test_sigv4_injection_parses_region_service_and_signing_secret(profile_dir):
+def test_aws_autosign_parses_the_signing_secret(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
-        "capabilities": [{
-            "label": "cfn",
-            "when": {"hosts": ["cloudformation.us-east-1.amazonaws.com"], "methods": ["POST"]},
-            "secret": "keychain:cfn-param",
-            "injection": {
-                "kind": "sigv4",
-                "region": "us-east-1",
-                "service": "cloudformation",
-                "signing_secret": {"backend": "keychain", "service": "aws-ci", "account": "deploy"},
-            },
-        }],
+        "aws_autosign": {
+            "signing_secret": {"backend": "keychain", "service": "aws-ci", "account": "deploy"},
+        },
+        "capabilities": [
+            {"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"},
+        ],
     }))
-    spec = load_profile(resolve_profile("p"))[0]
-    assert spec.injection.kind == "sigv4"
-    assert spec.injection.region == "us-east-1"
-    assert spec.injection.service == "cloudformation"
-    assert spec.injection.signing_secret.backend == "keychain"
-    assert spec.injection.signing_secret.service == "aws-ci"
-    assert spec.injection.signing_secret.account == "deploy"
+    autosign = load_profile_aws_autosign(resolve_profile("p"))
+    assert autosign is not None
+    assert autosign.signing_secret.backend == "keychain"
+    assert autosign.signing_secret.service == "aws-ci"
+    assert autosign.signing_secret.account == "deploy"
+    # Minted per session, never written into the profile.
+    assert autosign.access_key_id == ""
 
 
-def test_sigv4_without_signing_secret_is_an_error(profile_dir):
+def test_a_profile_without_aws_autosign_has_none(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
-        "capabilities": [{
-            "label": "cfn",
-            "when": {"hosts": ["cloudformation.us-east-1.amazonaws.com"]},
-            "secret": "keychain:cfn-param",
-            "injection": {"kind": "sigv4", "region": "us-east-1", "service": "cloudformation"},
-        }],
+        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
     }))
-    with pytest.raises(CapabilityError, match="signing_secret"):
-        load_profile(resolve_profile("p"))
+    assert load_profile_aws_autosign(resolve_profile("p")) is None
+
+
+def test_aws_autosign_without_signing_secret_is_an_error(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "aws_autosign": {},
+        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
+    }))
+    with pytest.raises(CapabilityError, match="aws_autosign"):
+        load_profile_aws_autosign(resolve_profile("p"))
 
 
 def test_username_guest_env_requires_basic_auth(profile_dir):

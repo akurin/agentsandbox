@@ -140,23 +140,81 @@ def test_capability_in_the_url_is_refused_before_it_leaves(addon, broker_stub):
     assert broker_stub.requests == []
 
 
-def test_capability_in_the_body_is_brokered_not_refused_here(addon, broker_stub):
-    """The addon can't yet know the capability's injection kind - that means
-    resolving it, which is the broker's job - so a body placement is passed
-    through rather than refused at this layer. `sigv4` legitimately needs it;
-    every other kind is still refused, but by the broker (see test_broker.py),
-    which is the one that knows what it's holding.
-    """
+def test_capability_in_the_body_is_refused(addon, broker_stub):
     flow = http_flow(method=b"POST", content=f'{{"key":"{TOKEN}"}}'.encode())
     addon.request(flow)
-    assert len(broker_stub.requests) == 1
-    assert broker_stub.requests[0].capability == TOKEN
+    assert flow.response.headers["X-Asbx-Reason"] == "capability_misplaced"
+    assert broker_stub.requests == []
 
 
 def test_capability_in_a_cookie_is_refused(addon, broker_stub):
     flow = http_flow(headers=[("Host", "api.github.com"), ("Cookie", f"auth={TOKEN}")])
     addon.request(flow)
     assert flow.response.headers["X-Asbx-Reason"] == "capability_misplaced"
+    assert broker_stub.requests == []
+
+
+# -- aws autosign -------------------------------------------------------------
+
+
+DUMMY_ACCESS_KEY_ID = "AKIADUMMYSESSIONMARKER1"
+
+
+def _autosign_header(access_key_id: str) -> str:
+    return (
+        f"AWS4-HMAC-SHA256 Credential={access_key_id}/20260101/us-east-1/sts/aws4_request, "
+        "SignedHeaders=host;x-amz-date, Signature=deadbeef"
+    )
+
+
+@pytest.fixture
+def autosign_session(session):
+    from agentsandbox.capabilities import AwsAutosignSpec, SecretRef
+
+    session.aws_autosign = AwsAutosignSpec(
+        signing_secret=SecretRef(backend="file", service="/tmp/cred.json"),
+        access_key_id=DUMMY_ACCESS_KEY_ID,
+    )
+    return session
+
+
+def test_dummy_signed_aws_request_is_routed_for_autosign(autosign_session, broker_stub):
+    addon = SandboxAddon(autosign_session, broker_stub, audit=NullAuditLog(autosign_session.session_id))
+    flow = http_flow(
+        method=b"POST",
+        headers=[("Host", "api.github.com"), ("Authorization", _autosign_header(DUMMY_ACCESS_KEY_ID))],
+    )
+    addon.request(flow)
+    assert len(broker_stub.requests) == 1
+    brokered = broker_stub.requests[0]
+    assert brokered.aws_autosign is True
+    assert brokered.capability == ""
+
+
+def test_a_session_without_aws_autosign_leaves_the_same_request_alone(session, broker_stub):
+    """A session that never declared `aws_autosign` has no marker to compare
+    against - a request that would have matched in another session just
+    forwards or gets killed like any other unbrokered traffic."""
+    addon = SandboxAddon(session, broker_stub, audit=NullAuditLog(session.session_id))
+    flow = http_flow(
+        method=b"POST",
+        headers=[("Host", "api.github.com"), ("Authorization", _autosign_header(DUMMY_ACCESS_KEY_ID))],
+    )
+    addon.request(flow)
+    assert flow.response is None  # left for mitmproxy to forward
+    assert broker_stub.requests == []
+
+
+def test_a_different_access_key_is_not_treated_as_this_sessions_autosign_marker(
+    autosign_session, broker_stub
+):
+    addon = SandboxAddon(autosign_session, broker_stub, audit=NullAuditLog(autosign_session.session_id))
+    flow = http_flow(
+        method=b"POST",
+        headers=[("Host", "api.github.com"), ("Authorization", _autosign_header("AKIASOMEOTHERKEY0000"))],
+    )
+    addon.request(flow)
+    assert flow.response is None
     assert broker_stub.requests == []
 
 

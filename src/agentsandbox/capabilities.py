@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import secrets
+import string
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -43,7 +44,7 @@ from .netpolicy import Destination, any_host_matches
 #: Injection strategies the broker knows how to perform safely. Anything else
 #: is refused rather than approximated - "deny unsupported authenticated
 #: protocols by default".
-SUPPORTED_INJECTIONS = frozenset({"bearer", "header", "basic", "sigv4"})
+SUPPORTED_INJECTIONS = frozenset({"bearer", "header", "basic"})
 
 
 def new_placeholder() -> str:
@@ -85,6 +86,55 @@ class SecretRef:
         )
 
 
+def new_dummy_aws_credentials() -> tuple[str, str]:
+    """A syntactically AWS-shaped access key id, and a random secret good for
+    nothing but building a request whose signature the broker will discard.
+
+    Shaped like a real static access key (``AKIA`` + 16 uppercase-alnum) only
+    so nothing downstream trips over an unfamiliar format - it is never
+    checked against anything real, by AWS or by asbx. Minted fresh per
+    session, the same as a capability placeholder: nothing about it is an
+    operator-chosen constant to keep track of.
+    """
+    alphabet = string.ascii_uppercase + string.digits
+    access_key_id = "AKIA" + "".join(secrets.choice(alphabet) for _ in range(16))
+    secret_access_key = secrets.token_urlsafe(30)
+    return access_key_id, secret_access_key
+
+
+@dataclass
+class AwsAutosignSpec:
+    """Session-wide: sign every AWS request the guest's own (dummy)
+    credential can't actually authenticate, regardless of destination.
+
+    Unlike a ``Capability``, this is not placeholder-triggered or scoped to
+    a fixed host/service/region - the guest never holds a real AWS
+    credential at all, and *every* SigV4-shaped request it makes gets
+    intercepted and re-signed. ``region``/``service`` are read per-request
+    from the guest's own (necessarily invalid) signature scope rather than
+    declared here, since the guest's SDK already worked those out correctly
+    to build the request - it just has nothing real to sign with.
+
+    ``access_key_id`` is empty at profile-parse time - a profile only
+    declares ``signing_secret``. It is filled in once, at session creation,
+    with a freshly minted marker (see :func:`new_dummy_aws_credentials`),
+    and from then on is what the addon and broker recognise a request by.
+    """
+
+    signing_secret: SecretRef
+    access_key_id: str = ""
+
+    def to_dict(self) -> dict:
+        return {"signing_secret": self.signing_secret.to_dict(), "access_key_id": self.access_key_id}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> AwsAutosignSpec:
+        return cls(
+            signing_secret=SecretRef.from_dict(data.get("signing_secret", {})),
+            access_key_id=data.get("access_key_id", ""),
+        )
+
+
 @dataclass
 class InjectionSpec:
     """How the broker attaches the credential to the upstream request."""
@@ -97,18 +147,6 @@ class InjectionSpec:
     #: build a matching Basic-auth header without the value being written
     #: twice in the profile. Basic auth only, and only alongside `username`.
     username_guest_env: str | None = None
-    #: AWS region/service the signature is scoped to. Kept explicit rather
-    #: than inferred from the destination host: S3's virtual-hosted URLs put
-    #: the bucket first, API Gateway puts the service second, and global
-    #: services often carry no region in the hostname at all - there is no
-    #: single rule to invert. sigv4 only.
-    region: str | None = None
-    service: str | None = None
-    #: The IAM credential used to *sign* the request - distinct from `secret`
-    #: above, which is the value substituted into the placeholder. The broker
-    #: never picks up ambient/host AWS credentials; this is the only way it
-    #: gets any. sigv4 only.
-    signing_secret: SecretRef | None = None
 
     def validate(self) -> None:
         if self.kind not in SUPPORTED_INJECTIONS:
@@ -126,34 +164,18 @@ class InjectionSpec:
             raise PolicyDenied(
                 "invalid_injection", "username.guest_env requires username.value to be set"
             )
-        sigv4_fields = (self.region, self.service, self.signing_secret)
-        if self.kind == "sigv4":
-            if not all(sigv4_fields):
-                raise PolicyDenied(
-                    "invalid_injection",
-                    "sigv4 injection requires region, service and signing_secret",
-                )
-        elif any(sigv4_fields):
-            raise PolicyDenied(
-                "invalid_injection",
-                "region/service/signing_secret only make sense for sigv4 injection",
-            )
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> InjectionSpec:
-        signing_secret = data.get("signing_secret")
         return cls(
             kind=data.get("kind", "bearer"),
             header=data.get("header", "Authorization"),
             template=data.get("template", "Bearer {secret}"),
             username=data.get("username"),
             username_guest_env=data.get("username_guest_env"),
-            region=data.get("region"),
-            service=data.get("service"),
-            signing_secret=SecretRef.from_dict(signing_secret) if signing_secret else None,
         )
 
 

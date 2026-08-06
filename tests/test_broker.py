@@ -18,7 +18,7 @@ import pytest
 from agentsandbox.audit import AuditLog
 from agentsandbox.broker.core import BrokerCore, BrokerRequest, BrokerResponse, scrub_secret
 from agentsandbox.broker.upstream import UpstreamResponse
-from agentsandbox.capabilities import CapabilitySpec, InjectionSpec, SecretRef
+from agentsandbox.capabilities import AwsAutosignSpec, CapabilitySpec, InjectionSpec, SecretRef
 from agentsandbox.errors import BrokerError, UpstreamError
 from agentsandbox.keychain import SecretResolver, StaticResolver
 
@@ -316,186 +316,158 @@ def test_basic_and_header_injection_shapes(session, store, executor, resolver):
     assert executor.last["credential_headers"] == [("X-Api-Key", SECRET)]
 
 
-SIGV4_KEYS = {"access_key_id": "AKIDEXAMPLE", "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}
+AWS_SIGNING_KEYS = {"access_key_id": "AKIDEXAMPLE", "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}
+DUMMY_ACCESS_KEY_ID = "AKIADUMMYFORTESTS0001"
 
 
-def _sigv4_core(session, store, executor, *, extra_secrets: dict | None = None):
-    secrets = {"cfn-param": "the-real-param-value", "aws-signing": json.dumps(SIGV4_KEYS)}
+def _autosign_core(
+    session, store, executor, *, extra_secrets: dict | None = None, access_key_id: str = DUMMY_ACCESS_KEY_ID
+):
+    secrets = {"aws-signing": json.dumps(AWS_SIGNING_KEYS)}
     secrets.update(extra_secrets or {})
     resolver = StaticResolver(secrets)
-    return BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
-
-
-def _issue_sigv4_capability(store, **overrides):
-    fields = {
-        "label": "cfn",
-        "hosts": ["api.github.com"],
-        "methods": ["POST"],
-        "secret": SecretRef(service="cfn-param"),
-        "injection": InjectionSpec(
-            kind="sigv4",
-            region="us-east-1",
-            service="cloudformation",
-            signing_secret=SecretRef(service="aws-signing"),
-        ),
-    }
-    fields.update(overrides)
-    return store.issue(CapabilitySpec(**fields))
-
-
-def test_sigv4_substitutes_the_body_and_signs_it(session, store, executor):
-    core = _sigv4_core(session, store, executor)
-    token, _ = _issue_sigv4_capability(store)
-    body = f"Action=UpdateStack&Param={token}".encode()
-
-    response = core.handle(
-        make_request(
-            token,
-            target="/",
-            method="POST",
-            headers=[("Content-Type", "application/x-www-form-urlencoded")],
-            body=body,
-        )
+    autosign = AwsAutosignSpec(
+        signing_secret=SecretRef(service="aws-signing"), access_key_id=access_key_id
+    )
+    return BrokerCore(
+        session.session_id, store, session.policy, resolver, executor=executor, aws_autosign=autosign
     )
 
-    assert response.decision == "allow"
-    sent_body = executor.last["body"]
-    assert b"the-real-param-value" in sent_body
-    assert token.encode() not in sent_body
 
-    # Signing produces its own headers directly; there is nothing left for
-    # the generic credential_headers path to add.
-    assert executor.last["credential_headers"] == []
-    headers = dict(executor.last["headers"])
+def _autosign_request(
+    *, access_key_id: str = DUMMY_ACCESS_KEY_ID, region: str = "us-east-1", service: str = "sts", **overrides
+) -> BrokerRequest:
+    auth = (
+        f"AWS4-HMAC-SHA256 Credential={access_key_id}/20260101/{region}/{service}/aws4_request, "
+        "SignedHeaders=host;x-amz-date, Signature=deadbeef"
+    )
+    fields = {
+        "session_id": "test-session",
+        "capability": "",
+        "method": "POST",
+        "scheme": "https",
+        "host": "api.github.com",
+        "port": 443,
+        "target": "/",
+        "headers": [("Content-Type", "application/x-www-form-urlencoded"), ("Authorization", auth)],
+        "body": b"",
+        "aws_autosign": True,
+    }
+    fields.update(overrides)
+    return BrokerRequest(**fields)
+
+
+def test_aws_autosign_signs_with_the_signing_secret(session, store, executor):
+    core = _autosign_core(session, store, executor)
+    response = core.handle(_autosign_request(body=b"Action=GetCallerIdentity"))
+
+    assert response.decision == "allow"
+    assert executor.last["body"] == b"Action=GetCallerIdentity"  # never substituted
+    headers = dict(executor.last["headers"] + executor.last["credential_headers"])
     assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
-    assert "us-east-1/cloudformation/aws4_request" in headers["Authorization"]
+    assert "us-east-1/sts/aws4_request" in headers["Authorization"]
     assert "X-Amz-Date" in headers
     assert headers["Host"] == "api.github.com"
 
 
-def test_sigv4_placeholder_in_the_body_is_allowed_unlike_every_other_kind(session, store, executor):
-    core = _sigv4_core(session, store, executor)
-    token, _ = _issue_sigv4_capability(store)
-    body = f"Action=UpdateStack&Param={token}".encode()
+def test_aws_autosign_region_and_service_come_from_the_guests_own_scope(session, store, executor):
+    """No declared host table - whatever service/region the guest's own SDK
+    worked out to build the request is what gets signed for, read straight
+    out of its (necessarily invalid) credential scope."""
+    core = _autosign_core(session, store, executor)
+    core.handle(_autosign_request(region="eu-central-1", service="cloudformation"))
 
-    response = core.handle(
-        make_request(
-            token,
-            target="/",
-            method="POST",
-            headers=[("Content-Type", "application/x-www-form-urlencoded")],
-            body=body,
-        )
+    headers = dict(executor.last["headers"] + executor.last["credential_headers"])
+    assert "eu-central-1/cloudformation/aws4_request" in headers["Authorization"]
+
+
+def test_aws_autosign_disabled_when_the_session_has_none_configured(session, store, executor):
+    core = BrokerCore(
+        session.session_id, store, session.policy, StaticResolver({}), executor=executor
     )
-    assert response.decision == "allow"
+    response = core.handle(_autosign_request())
+    assert response.reason == "aws_autosign_disabled"
+    assert executor.calls == []
 
 
-def test_sigv4_still_refuses_the_placeholder_in_the_url(session, store, executor):
-    core = _sigv4_core(session, store, executor)
-    token, _ = _issue_sigv4_capability(store)
-
+def test_aws_autosign_requires_a_parseable_scope(session, store, executor):
+    core = _autosign_core(session, store, executor)
     response = core.handle(
-        make_request(
-            token,
-            target=f"/?Param={token}",
-            method="POST",
-        )
+        _autosign_request(headers=[("Authorization", "Basic dGVzdDp0ZXN0")])
     )
-    assert response.reason == "capability_in_url"
+    assert response.reason == "aws_autosign_unparseable"
 
 
-def test_sigv4_stale_signing_headers_from_the_guest_are_dropped(session, store, executor):
-    core = _sigv4_core(session, store, executor)
-    token, _ = _issue_sigv4_capability(store)
-    body = f"Action=UpdateStack&Param={token}".encode()
+def test_aws_autosign_still_enforces_the_session_destination_policy(session, store, executor):
+    core = _autosign_core(session, store, executor)
+    response = core.handle(_autosign_request(host="evil.test"))
+    assert response.reason == "host_not_allowlisted"
+    assert executor.calls == []
 
+
+def test_aws_autosign_signed_headers_are_split_for_redirect_safety(session, store, executor):
+    """Authorization/X-Amz-Date/X-Amz-Security-Token must travel as
+    `credential_headers` - dropped off-origin on a redirect via the same
+    mechanism every other injection kind already gets - not as ordinary
+    `headers`, which ride along on every hop regardless of origin."""
+    core = _autosign_core(
+        session,
+        store,
+        executor,
+        extra_secrets={"aws-signing": json.dumps({**AWS_SIGNING_KEYS, "session_token": "tok"})},
+    )
+    core.handle(_autosign_request())
+
+    header_names = {k.lower() for k, _ in executor.last["headers"]}
+    credential_names = {k.lower() for k, _ in executor.last["credential_headers"]}
+    assert credential_names == {"authorization", "x-amz-date", "x-amz-security-token"}
+    assert header_names.isdisjoint(credential_names)
+    assert "host" in header_names
+    assert "content-type" in header_names
+
+
+def test_aws_autosign_stale_signing_headers_from_the_guest_are_dropped(session, store, executor):
+    core = _autosign_core(session, store, executor)
     core.handle(
-        make_request(
-            token,
-            target="/",
-            method="POST",
+        _autosign_request(
             headers=[
                 ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Authorization", _autosign_request().headers[1][1]),
                 ("X-Amz-Date", "20200101T000000Z"),
                 ("X-Amz-Content-Sha256", "deadbeef"),
                 ("X-Amz-Checksum-Sha256", "deadbeef"),
                 ("X-Amz-Sdk-Checksum-Algorithm", "SHA256"),
                 ("X-Amz-Trailer", "x-amz-checksum-sha256"),
-            ],
-            body=body,
+            ]
         )
     )
-    headers = {k.lower(): v for k, v in executor.last["headers"]}
+    headers = {k.lower(): v for k, v in executor.last["headers"] + executor.last["credential_headers"]}
     assert headers["x-amz-date"] != "20200101T000000Z"
     assert "x-amz-content-sha256" not in headers
     assert "x-amz-checksum-sha256" not in headers
-    # A dangling algorithm name (or trailer announcement) with no checksum
-    # to back it up is not harmless metadata - S3 itself rejects it:
-    # "x-amz-sdk-checksum-algorithm specified, but no corresponding
-    # x-amz-checksum-* or x-amz-trailer headers were found."
     assert "x-amz-sdk-checksum-algorithm" not in headers
     assert "x-amz-trailer" not in headers
 
 
-def test_sigv4_uses_the_signing_secret_never_the_app_secret(session, store, executor):
-    """The credential that signs and the value substituted into the body are
-    different secrets, fetched from different refs - conflating them would
-    mean the broker signs with whatever it happens to be injecting, which is
-    not what an AWS credential is."""
-    core = _sigv4_core(session, store, executor)
-    token, _ = _issue_sigv4_capability(store)
-    body = f"Action=UpdateStack&Param={token}".encode()
-
-    core.handle(
-        make_request(
-            token,
-            target="/",
-            method="POST",
-            body=body,
-        )
-    )
-    headers = dict(executor.last["headers"])
-    assert "the-real-param-value" not in headers["Authorization"]
-    assert "AKIDEXAMPLE" in headers["Authorization"]
-
-
-def test_sigv4_signing_secret_must_be_a_json_bundle(session, store, executor):
-    core = _sigv4_core(session, store, executor, extra_secrets={"aws-signing": "not-json"})
-    token, _ = _issue_sigv4_capability(store)
-
-    response = core.handle(
-        make_request(
-            token,
-            target="/",
-            method="POST",
-            body=f"Param={token}".encode(),
-        )
-    )
+def test_aws_autosign_signing_secret_must_be_a_json_bundle(session, store, executor):
+    core = _autosign_core(session, store, executor, extra_secrets={"aws-signing": "not-json"})
+    response = core.handle(_autosign_request())
     assert response.reason == "invalid_signing_secret"
 
 
-def test_sigv4_signing_secret_needs_both_key_fields(session, store, executor):
-    core = _sigv4_core(
+def test_aws_autosign_signing_secret_needs_both_key_fields(session, store, executor):
+    core = _autosign_core(
         session, store, executor, extra_secrets={"aws-signing": json.dumps({"access_key_id": "AKID"})}
     )
-    token, _ = _issue_sigv4_capability(store)
-
-    response = core.handle(
-        make_request(
-            token,
-            target="/",
-            method="POST",
-            body=f"Param={token}".encode(),
-        )
-    )
+    response = core.handle(_autosign_request())
     assert response.reason == "invalid_signing_secret"
 
 
-def test_sigv4_accepts_the_aws_cli_export_credentials_shape(session, store, executor):
+def test_aws_autosign_accepts_the_aws_cli_export_credentials_shape(session, store, executor):
     """`aws configure export-credentials` emits PascalCase keys - the same
     shape a host-side refresh job would write to a file verbatim. Both that
     and this profile format's own snake_case are accepted."""
-    core = _sigv4_core(
+    core = _autosign_core(
         session,
         store,
         executor,
@@ -510,46 +482,34 @@ def test_sigv4_accepts_the_aws_cli_export_credentials_shape(session, store, exec
             )
         },
     )
-    token, _ = _issue_sigv4_capability(store)
-
-    response = core.handle(
-        make_request(token, target="/", method="POST", body=f"Param={token}".encode())
-    )
+    response = core.handle(_autosign_request())
     assert response.decision == "allow"
-    headers = dict(executor.last["headers"])
+    headers = dict(executor.last["headers"] + executor.last["credential_headers"])
     assert "AKIDCLIEXPORT" in headers["Authorization"]
     assert headers["X-Amz-Security-Token"] == "cli-session-token"
 
 
-def test_sigv4_signing_secret_already_expired_is_refused(session, store, executor):
+def test_aws_autosign_signing_secret_already_expired_is_refused(session, store, executor):
     expired = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-    core = _sigv4_core(
+    core = _autosign_core(
         session,
         store,
         executor,
-        extra_secrets={"aws-signing": json.dumps({**SIGV4_KEYS, "Expiration": expired})},
+        extra_secrets={"aws-signing": json.dumps({**AWS_SIGNING_KEYS, "Expiration": expired})},
     )
-    token, _ = _issue_sigv4_capability(store)
-
-    response = core.handle(
-        make_request(token, target="/", method="POST", body=f"Param={token}".encode())
-    )
+    response = core.handle(_autosign_request())
     assert response.reason == "signing_secret_expired"
 
 
-def test_sigv4_signing_secret_not_yet_expired_is_accepted(session, store, executor):
+def test_aws_autosign_signing_secret_not_yet_expired_is_accepted(session, store, executor):
     future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-    core = _sigv4_core(
+    core = _autosign_core(
         session,
         store,
         executor,
-        extra_secrets={"aws-signing": json.dumps({**SIGV4_KEYS, "Expiration": future})},
+        extra_secrets={"aws-signing": json.dumps({**AWS_SIGNING_KEYS, "Expiration": future})},
     )
-    token, _ = _issue_sigv4_capability(store)
-
-    response = core.handle(
-        make_request(token, target="/", method="POST", body=f"Param={token}".encode())
-    )
+    response = core.handle(_autosign_request())
     assert response.decision == "allow"
 
 
@@ -613,39 +573,25 @@ def test_a_secret_backend_failure_is_a_clean_denial_not_a_dead_connection(
     assert "keychain item not found" in json.loads(response.body)["message"]
 
 
-def test_sigv4_signing_secret_backend_failure_is_a_clean_denial(session, store, executor):
-    param_provider = _DictProvider({"cfn-param": "the-real-param-value"})
+def test_aws_autosign_signing_secret_backend_failure_is_a_clean_denial(session, store, executor):
     resolver = SecretResolver(
-        providers={
-            "keychain": param_provider,
-            "file": _FailingProvider("secret file is group/world readable (644)"),
-        }
+        providers={"file": _FailingProvider("secret file is group/world readable (644)")}
     )
-    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
-    token, _ = store.issue(
-        CapabilitySpec(
-            label="cfn",
-            hosts=["api.github.com"],
-            methods=["POST"],
-            secret=SecretRef(service="cfn-param"),
-            injection=InjectionSpec(
-                kind="sigv4",
-                region="us-east-1",
-                service="cloudformation",
-                signing_secret=SecretRef(backend="file", service="aws-signing"),
-            ),
-        )
+    autosign = AwsAutosignSpec(
+        signing_secret=SecretRef(backend="file", service="aws-signing"),
+        access_key_id=DUMMY_ACCESS_KEY_ID,
+    )
+    core = BrokerCore(
+        session.session_id, store, session.policy, resolver, executor=executor, aws_autosign=autosign
     )
 
-    response = core.handle(
-        make_request(token, target="/", method="POST", body=f"Param={token}".encode())
-    )
+    response = core.handle(_autosign_request())
     assert response.status_code == 502
     assert response.reason == "secret_unavailable"
     assert "group/world readable" in json.loads(response.body)["message"]
 
 
-def test_sigv4_signing_secret_is_refetched_every_request_even_when_held_forever(
+def test_aws_autosign_signing_secret_is_refetched_every_request_even_when_held_forever(
     session, store, executor
 ):
     """Every other secret is cached, including - once `hold_for_session` has
@@ -653,75 +599,29 @@ def test_sigv4_signing_secret_is_refetched_every_request_even_when_held_forever(
     most likely to carry its own short expiration outside the broker's
     control, and a resolver held forever would otherwise pin it to whatever
     was first read even after a refresh job replaced it."""
-    param_provider = _DictProvider({"cfn-param": "the-real-param-value"})
     signing_provider = _MutableProvider(
         json.dumps({"access_key_id": "AKID1", "secret_access_key": "secret1"})
     )
-    resolver = SecretResolver(providers={"keychain": param_provider, "file": signing_provider})
+    resolver = SecretResolver(providers={"file": signing_provider})
     resolver.hold_for_session()
-
-    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
-    token, _ = store.issue(
-        CapabilitySpec(
-            label="cfn",
-            hosts=["api.github.com"],
-            methods=["POST"],
-            secret=SecretRef(service="cfn-param"),
-            injection=InjectionSpec(
-                kind="sigv4",
-                region="us-east-1",
-                service="cloudformation",
-                signing_secret=SecretRef(backend="file", service="aws-signing"),
-            ),
-        )
+    autosign = AwsAutosignSpec(
+        signing_secret=SecretRef(backend="file", service="aws-signing"),
+        access_key_id=DUMMY_ACCESS_KEY_ID,
+    )
+    core = BrokerCore(
+        session.session_id, store, session.policy, resolver, executor=executor, aws_autosign=autosign
     )
 
-    core.handle(make_request(token, target="/", method="POST", body=f"Param={token}".encode()))
-    assert "AKID1" in dict(executor.last["headers"])["Authorization"]
+    core.handle(_autosign_request())
+    headers = dict(executor.last["headers"] + executor.last["credential_headers"])
+    assert "AKID1" in headers["Authorization"]
 
-    signing_provider.value = json.dumps(
-        {"access_key_id": "AKID2", "secret_access_key": "secret2"}
-    )
+    signing_provider.value = json.dumps({"access_key_id": "AKID2", "secret_access_key": "secret2"})
 
-    core.handle(make_request(token, target="/", method="POST", body=f"Param={token}".encode()))
-    assert "AKID2" in dict(executor.last["headers"])["Authorization"]
+    core.handle(_autosign_request())
+    headers = dict(executor.last["headers"] + executor.last["credential_headers"])
+    assert "AKID2" in headers["Authorization"]
     assert signing_provider.calls == 2
-
-
-def test_sigv4_signature_reflects_the_substituted_body(session, store, executor):
-    """Two different secret values substituted into the same request shape
-    must produce two different signatures - proof the broker signs the body
-    it actually sends, and not something fixed or shaped like the
-    placeholder."""
-    core = _sigv4_core(session, store, executor, extra_secrets={"cfn-param-2": "a-totally-different-value"})
-    token_a, _ = _issue_sigv4_capability(store, label="cfn-a")
-    token_b, _ = _issue_sigv4_capability(
-        store, label="cfn-b", secret=SecretRef(service="cfn-param-2")
-    )
-
-    core.handle(
-        make_request(
-            token_a,
-            target="/",
-            method="POST",
-            body=f"Param={token_a}".encode(),
-        )
-    )
-    assert executor.last["body"] == b"Param=the-real-param-value"
-    sig_a = dict(executor.last["headers"])["Authorization"]
-
-    core.handle(
-        make_request(
-            token_b,
-            target="/",
-            method="POST",
-            body=f"Param={token_b}".encode(),
-        )
-    )
-    assert executor.last["body"] == b"Param=a-totally-different-value"
-    sig_b = dict(executor.last["headers"])["Authorization"]
-
-    assert sig_a != sig_b
 
 
 def test_upstream_failure_becomes_a_502_without_leaking_detail(session, store, resolver):

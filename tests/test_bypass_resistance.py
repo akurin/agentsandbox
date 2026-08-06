@@ -223,6 +223,11 @@ def test_the_broker_protocol_can_only_ask_for_an_operation():
         "body",
         "operation",
         "flow_id",
+        # No target/service/region either: `aws_autosign` re-signs whatever
+        # the session's own destination policy already allows, using
+        # whatever region/service the guest's own (invalid) signature
+        # names - there is nothing here for a compromised guest to widen.
+        "aws_autosign",
     }
 
 

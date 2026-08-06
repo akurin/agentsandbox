@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,8 +25,13 @@ from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
 from ..audit import AuditLog, NullAuditLog, fingerprint, redactor
-from ..capabilities import Capability, CapabilityStore, find_placeholders
-from ..config import CAPABILITY_PREFIX
+from ..capabilities import (
+    AwsAutosignSpec,
+    Capability,
+    CapabilityStore,
+    find_placeholders,
+)
+from ..config import CAPABILITY_PREFIX, DEFAULT_MAX_RESPONSE_BYTES
 from ..errors import BrokerError, PolicyDenied, UpstreamError
 from ..keychain import SecretResolver
 from ..netpolicy import Destination, DestinationPolicy
@@ -76,6 +82,38 @@ SIGV4_STALE_HEADERS = frozenset(
     }
 )
 
+#: Identity-bearing headers a SigV4 signature produces - dropped off-origin
+#: on a redirect via the same `credential_headers`/`carry_credentials`
+#: mechanism every other injection kind already gets. Everything else SigV4
+#: touches (Host, X-Amz-Content-Sha256, ...) carries no authority on its own
+#: and travels as an ordinary header.
+SIGV4_CREDENTIAL_HEADER_NAMES = frozenset({"authorization", "x-amz-date", "x-amz-security-token"})
+
+_SIGV4_CREDENTIAL_SCOPE_RE = re.compile(
+    r"Credential=[^/\s,]+/\d{8}/([A-Za-z0-9-]+)/([a-z0-9-]+)/aws4_request"
+)
+
+
+def _parse_sigv4_scope(auth_header: str) -> tuple[str, str] | None:
+    """Pull ``(region, service)`` out of a SigV4 Authorization header's
+    credential scope - valid or not, the scope names what the signer
+    intended to sign for."""
+    match = _SIGV4_CREDENTIAL_SCOPE_RE.search(auth_header)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _split_signed_headers(
+    signed: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """``(headers, credential_headers)`` - separate what a SigV4 signature
+    depends on from everything else, so a redirect can drop the former
+    off-origin exactly as it already does for every other injection kind."""
+    credential_headers = [(k, v) for k, v in signed if k.lower() in SIGV4_CREDENTIAL_HEADER_NAMES]
+    headers = [(k, v) for k, v in signed if k.lower() not in SIGV4_CREDENTIAL_HEADER_NAMES]
+    return headers, credential_headers
+
 _BODY_SCAN_LIMIT = 1 * 1024 * 1024
 
 
@@ -92,6 +130,11 @@ class BrokerRequest:
     body: bytes = b""
     operation: str | None = None
     flow_id: str = ""
+    #: No capability, no placeholder: the guest signed with its session's
+    #: dummy AWS credential (see `AwsAutosignSpec`), and this gets re-signed
+    #: wholesale with the session's own signing secret, regardless of
+    #: destination.
+    aws_autosign: bool = False
 
     @property
     def dest(self) -> Destination:
@@ -115,6 +158,7 @@ class BrokerRequest:
                 "body_b64": base64.b64encode(self.body).decode(),
                 "operation": self.operation,
                 "flow_id": self.flow_id,
+                "aws_autosign": self.aws_autosign,
             }
         )
 
@@ -132,6 +176,7 @@ class BrokerRequest:
             body=base64.b64decode(data.get("body_b64", "")),
             operation=data.get("operation"),
             flow_id=data.get("flow_id", ""),
+            aws_autosign=bool(data.get("aws_autosign", False)),
         )
 
 
@@ -228,6 +273,7 @@ class BrokerCore:
         *,
         audit: AuditLog | None = None,
         executor: UpstreamExecutor | None = None,
+        aws_autosign: AwsAutosignSpec | None = None,
     ) -> None:
         self.session_id = session_id
         self.store = store
@@ -235,6 +281,7 @@ class BrokerCore:
         self.resolver = resolver
         self.audit = audit or NullAuditLog(session_id)
         self.executor = executor or UpstreamExecutor(policy)
+        self.aws_autosign = aws_autosign
 
     # -- entry point --------------------------------------------------------
 
@@ -242,9 +289,17 @@ class BrokerCore:
         started = time.monotonic()
         cap: Capability | None = None
         try:
-            cap = self._resolve(req)
-            self._authorize(req, cap)
-            response = self._perform(req, cap)
+            if req.aws_autosign:
+                if self.aws_autosign is None:
+                    raise PolicyDenied(
+                        "aws_autosign_disabled",
+                        "this session has no AWS auto-sign credential configured",
+                    )
+                response = self._perform_aws_autosign(req)
+            else:
+                cap = self._resolve(req)
+                self._authorize(req, cap)
+                response = self._perform(req, cap)
         except PolicyDenied as denied:
             response = denial(
                 denied.reason,
@@ -327,7 +382,7 @@ class BrokerCore:
             path=req.path,
             operation=req.operation,
         )
-        self._reject_leaked_placeholders(req, cap)
+        self._reject_leaked_placeholders(req)
         self._reject_username_mismatch(req, cap)
 
     def _reject_username_mismatch(self, req: BrokerRequest, cap: Capability) -> None:
@@ -378,26 +433,18 @@ class BrokerCore:
                     "with nothing appended",
                 )
 
-    def _reject_leaked_placeholders(self, req: BrokerRequest, cap: Capability) -> None:
-        """A capability belongs in a header, nowhere else - with one exception.
+    def _reject_leaked_placeholders(self, req: BrokerRequest) -> None:
+        """A capability belongs in a header, nowhere else.
 
         In a URL it ends up in server logs, referrers and browser history; in a
         body it may be persisted by the upstream service. Both are refused
         rather than quietly rewritten, so the agent gets a clear error.
-
-        ``sigv4`` is the one kind that legitimately puts the placeholder in the
-        body: that is the whole point of it (a signed API, like CloudFormation,
-        that wants the secret as a request parameter, not a header), and
-        ``_perform`` substitutes and re-signs before anything leaves. Every
-        other injection kind still refuses this outright.
         """
         if find_placeholders(req.target):
             raise PolicyDenied(
                 "capability_in_url",
                 "put the capability in a request header, not in the URL",
             )
-        if cap.injection.kind == "sigv4":
-            return
         if len(req.body) <= _BODY_SCAN_LIMIT and find_placeholders(
             req.body.decode("utf-8", "ignore")
         ):
@@ -409,25 +456,20 @@ class BrokerCore:
     def _perform(self, req: BrokerRequest, cap: Capability) -> BrokerResponse:
         secret = self.resolver.fetch(cap.secret)
         redactor.register_secret(secret)
+        credential_headers = build_credential_headers(cap, secret)
 
-        if cap.injection.kind == "sigv4":
-            body, headers = self._sign_sigv4(req, cap, secret)
-            credential_headers: list[tuple[str, str]] = []
-        else:
-            body = req.body
-            credential_headers = build_credential_headers(cap, secret)
-            headers = [
-                (name, value)
-                for name, value in req.headers
-                if name.lower() not in STRIP_REQUEST_HEADERS
-                and name.lower() not in HOP_BY_HOP
-                and CAPABILITY_PREFIX not in value
-            ]
-            # Identity encoding keeps the response body scannable, so a
-            # credential echoed back by the upstream cannot slip through
-            # compressed.
-            headers = [h for h in headers if h[0].lower() != "accept-encoding"]
-            headers.append(("Accept-Encoding", "identity"))
+        headers = [
+            (name, value)
+            for name, value in req.headers
+            if name.lower() not in STRIP_REQUEST_HEADERS
+            and name.lower() not in HOP_BY_HOP
+            and CAPABILITY_PREFIX not in value
+        ]
+        # Identity encoding keeps the response body scannable, so a
+        # credential echoed back by the upstream cannot slip through
+        # compressed.
+        headers = [h for h in headers if h[0].lower() != "accept-encoding"]
+        headers.append(("Accept-Encoding", "identity"))
 
         self.audit.emit(
             "broker.request",
@@ -436,7 +478,7 @@ class BrokerCore:
             method=req.method,
             host=req.host,
             path=req.path,
-            body_bytes=len(body),
+            body_bytes=len(req.body),
             flow=req.flow_id,
         )
 
@@ -445,7 +487,7 @@ class BrokerCore:
             req.method,
             req.target,
             headers,
-            body,
+            req.body,
             credential_headers,
             cap.max_response_bytes,
         )
@@ -477,59 +519,68 @@ class BrokerCore:
             cap_id=cap.cap_id,
         )
 
-    def _sign_sigv4(
-        self, req: BrokerRequest, cap: Capability, secret: str
-    ) -> tuple[bytes, list[tuple[str, str]]]:
-        """Substitute the placeholder into the body and re-sign with SigV4.
+    def _perform_aws_autosign(self, req: BrokerRequest) -> BrokerResponse:
+        """No capability, no placeholder: the guest signed with its session's
+        dummy AWS credential (it has no real one), so any request carrying it
+        gets re-signed wholesale with the session's ``aws_autosign.
+        signing_secret``, regardless of destination.
 
-        Uses ``botocore``'s own signer rather than a hand-rolled one - this is
-        security-critical code, and there is no reason to re-derive a
-        canonical-request algorithm AWS already publishes a reference
-        implementation of. The credential used to sign is ``injection.
-        signing_secret``, never the guest's own AWS environment: the broker
-        only ever authenticates with a credential the profile named.
+        ``region``/``service`` come from the guest's own (necessarily
+        invalid) credential scope rather than a declared table - the guest's
+        SDK already worked those out correctly to build the request, it just
+        had nothing real to sign with. This can't be abused to sign something
+        it shouldn't: the real destination is still policy-checked below, and
+        a claimed scope that doesn't match what AWS expects for that
+        destination just gets rejected by AWS's own verification.
         """
-        spec = cap.injection
-        assert spec.signing_secret is not None and spec.region and spec.service
+        assert self.aws_autosign is not None  # checked by the caller
+        self.policy.check(req.dest)
+
+        auth_header = next((v for k, v in req.headers if k.lower() == "authorization"), "")
+        scope = _parse_sigv4_scope(auth_header)
+        if scope is None:
+            raise PolicyDenied(
+                "aws_autosign_unparseable",
+                "could not find a service/region to sign with in the guest's own Authorization header",
+            )
+        region, service = scope
 
         # Fetched fresh, not through the cached `fetch()`: this is exactly the
         # credential most likely to carry its own expiration outside the
         # resolver's control - an STS session from `aws configure
         # export-credentials`, refreshed on disk by a job the broker knows
         # nothing about.
-        raw = self.resolver.fetch_fresh(spec.signing_secret)
+        raw = self.resolver.fetch_fresh(self.aws_autosign.signing_secret)
         try:
             bundle = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise PolicyDenied(
                 "invalid_signing_secret",
-                "sigv4 signing_secret must resolve to a JSON credential bundle",
+                "aws_autosign signing_secret must resolve to a JSON credential bundle",
             ) from exc
 
-        # Both the shape this profile format documents (snake_case) and the
-        # shape `aws configure export-credentials`/a `credential_process`
-        # actually emits (PascalCase) are accepted, so a host-side refresh
-        # job can write that command's output to a file verbatim.
+        # Both this profile format's own snake_case convention and the shape
+        # `aws configure export-credentials`/a `credential_process` actually
+        # emits (PascalCase) are accepted, so a host-side refresh job can
+        # write that command's output to a file verbatim.
         access_key_id = _bundle_field(bundle, "access_key_id", "AccessKeyId")
         secret_access_key = _bundle_field(bundle, "secret_access_key", "SecretAccessKey")
         session_token = _bundle_field(bundle, "session_token", "SessionToken") or None
         if not access_key_id or not secret_access_key:
             raise PolicyDenied(
                 "invalid_signing_secret",
-                "sigv4 signing_secret needs access_key_id/AccessKeyId and "
+                "aws_autosign signing_secret needs access_key_id/AccessKeyId and "
                 "secret_access_key/SecretAccessKey",
             )
         expiration = _bundle_field(bundle, "expiration", "Expiration")
         if expiration and _is_past(expiration):
             raise PolicyDenied(
                 "signing_secret_expired",
-                f"the sigv4 signing credential expired at {expiration}",
+                f"the aws_autosign signing credential expired at {expiration}",
             )
         for value in (access_key_id, secret_access_key, session_token):
             if value:
                 redactor.register_secret(str(value))
-
-        body = req.body.replace(req.capability.encode(), secret.encode())
 
         headers = [
             (name, value)
@@ -538,7 +589,6 @@ class BrokerCore:
             and name.lower() not in HOP_BY_HOP
             and name.lower() not in SIGV4_STALE_HEADERS
             and not name.lower().startswith("x-amz-checksum-")
-            and CAPABILITY_PREFIX not in value
         ]
         headers = [h for h in headers if h[0].lower() != "accept-encoding"]
         headers.append(("Accept-Encoding", "identity"))
@@ -552,14 +602,52 @@ class BrokerCore:
         aws_request = AWSRequest(
             method=req.method,
             url=f"{req.dest.origin}{req.target}",
-            data=body,
+            data=req.body,
             headers=dict(headers),
         )
         credentials = Credentials(access_key_id, secret_access_key, session_token)
-        signer_cls = S3SigV4Auth if spec.service == "s3" else SigV4Auth
-        signer_cls(credentials, spec.service, spec.region).add_auth(aws_request)
+        signer_cls = S3SigV4Auth if service == "s3" else SigV4Auth
+        signer_cls(credentials, service, region).add_auth(aws_request)
+        signed_headers, credential_headers = _split_signed_headers(
+            list(aws_request.headers.items())
+        )
 
-        return body, list(aws_request.headers.items())
+        self.audit.emit(
+            "broker.aws_autosign",
+            method=req.method,
+            host=req.host,
+            path=req.path,
+            service=service,
+            region=region,
+            flow=req.flow_id,
+        )
+
+        upstream = self.executor.execute(
+            req.dest,
+            req.method,
+            req.target,
+            signed_headers,
+            req.body,
+            credential_headers,
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        if upstream.truncated:
+            raise PolicyDenied(
+                "response_too_large",
+                f"upstream response exceeded {DEFAULT_MAX_RESPONSE_BYTES} bytes",
+            )
+
+        headers_out = list(sanitize_response_headers(upstream.headers))
+        headers_out.append(("Content-Length", str(len(upstream.body))))
+        headers_out.append(("X-Asbx-Decision", "allow"))
+        if upstream.redirects:
+            headers_out.append(("X-Asbx-Redirects", str(upstream.redirects)))
+        return BrokerResponse(
+            status_code=upstream.status_code,
+            headers=headers_out,
+            body=upstream.body,
+            decision="allow",
+        )
 
 
 def _bundle_field(bundle: dict, *names: str) -> str:

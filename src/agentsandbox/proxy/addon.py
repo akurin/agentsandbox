@@ -111,16 +111,13 @@ class SandboxAddon:
         placeholder, location = self._find_capability(flow)
 
         if placeholder is None:
+            if self._looks_like_dummy_aws_request(req):
+                self._broker_aws_autosign(flow, dest)
+                return
             self._forward_or_kill(flow, dest)
             return
 
-        # The addon doesn't know the capability's injection kind yet - that
-        # requires resolving it, which is the broker's job - so it can only
-        # rule out the placements nothing ever needs (URL, cookie). A body
-        # placement is legitimate for `sigv4` (the secret is a request
-        # parameter, not a header) and refused for everything else; the
-        # broker makes that kind-aware call once it knows what it's holding.
-        if location not in ("header", "body"):
+        if location != "header":
             self._deny(
                 flow,
                 "capability_misplaced",
@@ -297,6 +294,19 @@ class SandboxAddon:
                 return found[0], "body"
         return None, ""
 
+    def _looks_like_dummy_aws_request(self, req: http.Request) -> bool:
+        """Was this signed with the session's own dummy AWS credential?
+
+        Only true when the profile actually declared ``aws_autosign`` - a
+        session without one has no marker to compare against, and every
+        AWS-shaped request just falls through to the ordinary allow/kill
+        path like any other unbrokered traffic.
+        """
+        if self.session.aws_autosign is None:
+            return False
+        auth = req.headers.get("authorization", "")
+        return f"Credential={self.session.aws_autosign.access_key_id}/" in auth
+
     def _forward_or_kill(self, flow: http.HTTPFlow, dest: Destination) -> None:
         try:
             self.policy.check(dest)
@@ -330,6 +340,35 @@ class SandboxAddon:
             response = self.broker.call(broker_request)
         except BrokerError as exc:
             # Fail closed: if the broker is unreachable, nothing is authorised.
+            self.audit.emit("broker.unavailable", host=dest.host, error=str(exc))
+            self._deny(flow, "broker_unavailable", "the secrets broker is not available", dest=dest)
+            return
+        flow.response = _to_mitm_response(response)
+
+    def _broker_aws_autosign(self, flow: http.HTTPFlow, dest: Destination) -> None:
+        """Route a dummy-signed AWS request to the broker for a full re-sign.
+
+        No capability, no placeholder - `capability=""` here is not looked up
+        by anything, it only carries `aws_autosign=True` through so the
+        broker knows which path to take.
+        """
+        req = flow.request
+        broker_request = BrokerRequest(
+            session_id=self.session.session_id,
+            capability="",
+            method=req.method,
+            scheme=dest.scheme,
+            host=dest.host,
+            port=dest.port,
+            target=req.path,
+            headers=[(k, v) for k, v in req.headers.items(multi=True)],
+            body=req.raw_content or b"",
+            flow_id=flow.id,
+            aws_autosign=True,
+        )
+        try:
+            response = self.broker.call(broker_request)
+        except BrokerError as exc:
             self.audit.emit("broker.unavailable", host=dest.host, error=str(exc))
             self._deny(flow, "broker_unavailable", "the secrets broker is not available", dest=dest)
             return

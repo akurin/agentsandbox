@@ -182,6 +182,7 @@ class SessionManager:
             resolver or SecretResolver(),
             audit=self.audit,
             executor=UpstreamExecutor(self.session.policy),
+            aws_autosign=self.session.aws_autosign,
         )
 
     def issue_capability(self, spec: CapabilitySpec) -> tuple[str, object]:
