@@ -157,7 +157,7 @@ loudly instead of looking like a working sandbox.
 
 ## Verified by the test suite
 
-`make test` - 501 passing, plus 3 skipped when outbound unix sockets are
+`make test` - 512 passing, plus 3 skipped when outbound unix sockets are
 blocked (some sandboxed CI environments do this; a real Mac shell does not) -
 no network, no VM boot required.
 
@@ -175,6 +175,10 @@ no network, no VM boot required.
   both credential-bundle key casings accepted, expired credentials refused,
   a secret backend failure turned into a clean denial rather than a dead
   connection, signed headers split so a redirect can't carry them off-origin
+- `aws_profile` backend: resolves through an injectable session factory so
+  tests never touch a real `~/.aws`, botocore errors (no such profile, an
+  expired SSO login) turned into the same clean denial as any other secret
+  backend failure, both the compact and explicit profile-JSON forms parse
 - redirects: same-origin keeps, cross-origin drops, return-to-origin does not
   re-attach, forbidden targets refused, scheme downgrade refused, chain bounded
 - L2 gateway: every non-WireGuard frame dropped with a reason (TCP, ICMP, IPv6,

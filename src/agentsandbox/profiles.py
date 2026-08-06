@@ -257,6 +257,7 @@ _SECRET_IDENTIFIER_KEY = {
     "pass": "entry",
     "env": "name",
     "file": "path",
+    "aws_profile": "profile",
 }
 
 

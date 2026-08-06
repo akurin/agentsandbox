@@ -287,6 +287,30 @@ def test_aws_autosign_parses_the_signing_secret(profile_dir):
     assert autosign.access_key_id == ""
 
 
+def test_aws_autosign_signing_secret_can_be_an_aws_cli_profile(profile_dir):
+    """No exported file needed - `aws_profile` resolves live, the same way
+    `aws --profile NAME` would, off whatever's already in ~/.aws."""
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "aws_autosign": {"signing_secret": {"backend": "aws_profile", "profile": "work"}},
+        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
+    }))
+    autosign = load_profile_aws_autosign(resolve_profile("p"))
+    assert autosign.signing_secret.backend == "aws_profile"
+    assert autosign.signing_secret.service == "work"
+
+
+def test_aws_autosign_signing_secret_accepts_the_compact_aws_profile_form(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "aws_autosign": {"signing_secret": "aws_profile:work"},
+        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
+    }))
+    autosign = load_profile_aws_autosign(resolve_profile("p"))
+    assert autosign.signing_secret.backend == "aws_profile"
+    assert autosign.signing_secret.service == "work"
+
+
 def test_a_profile_without_aws_autosign_has_none(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,

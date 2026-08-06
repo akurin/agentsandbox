@@ -19,8 +19,13 @@ import subprocess
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+import botocore.exceptions
+import botocore.session
 
 from .audit import redactor
 from .capabilities import SecretRef
@@ -193,6 +198,49 @@ class FileProvider(SecretProvider):
         return value
 
 
+def _aws_cli_session(profile: str) -> botocore.session.Session:
+    """The real (non-test) session factory: botocore's own profile-aware
+    ``Session``, reading ``~/.aws/config`` and ``~/.aws/credentials`` exactly
+    like the AWS CLI does for ``--profile``."""
+    return botocore.session.Session(profile=profile)
+
+
+@dataclass
+class AwsProfileProvider(SecretProvider):
+    """Resolves a real AWS credential the same way ``aws --profile NAME``
+    does, rather than requiring a separately exported file.
+
+    Walks botocore's own standard resolution chain for the named profile -
+    static keys, assume-role, SSO (refreshed automatically off the cached
+    login, the same way the CLI does it), ``credential_process`` - so
+    whatever ``aws login``/``aws sso login`` already established on the host
+    is what gets used, live, with nothing for a host-side job to keep fresh.
+    """
+
+    #: Injectable so tests don't need a real ``~/.aws``.
+    session_factory: Callable[[str], Any] = _aws_cli_session
+
+    def fetch(self, ref: SecretRef) -> str:
+        profile = ref.service
+        if not profile:
+            raise BrokerError("secret ref has no AWS CLI profile name")
+        try:
+            session = self.session_factory(profile)
+            credentials = session.get_credentials()
+            if credentials is None:
+                raise BrokerError(f"no AWS credentials found for profile {profile!r}")
+            frozen = credentials.get_frozen_credentials()
+        except botocore.exceptions.BotoCoreError as exc:
+            raise BrokerError(f"could not resolve AWS profile {profile!r}: {exc}") from exc
+
+        bundle = {"access_key_id": frozen.access_key, "secret_access_key": frozen.secret_key}
+        if frozen.token:
+            bundle["session_token"] = frozen.token
+        value = json.dumps(bundle)
+        redactor.register_secret(value)
+        return value
+
+
 #: Hold a credential for the life of the process rather than a fixed window.
 #: An unattended agent runs for days with nobody to answer a pinentry or a
 #: Keychain prompt, so the unlock has to happen once, in the foreground, and
@@ -229,6 +277,7 @@ class SecretResolver:
             "pass": PassProvider(),
             "env": EnvProvider(),
             "file": FileProvider(),
+            "aws_profile": AwsProfileProvider(),
         }
         self.cache_ttl = cache_ttl
         self._cache: dict[tuple[str, str, str, str], tuple[str, float]] = {}

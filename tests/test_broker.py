@@ -828,6 +828,129 @@ def test_the_resolver_knows_the_pass_backend():
     assert isinstance(SecretResolver().providers["pass"], PassProvider)
 
 
+class _FakeFrozenCredentials:
+    def __init__(self, access_key, secret_key, token=None):
+        self.access_key = access_key
+        self.secret_key = secret_key
+        self.token = token
+
+
+class _FakeAwsCredentials:
+    def __init__(self, frozen):
+        self._frozen = frozen
+
+    def get_frozen_credentials(self):
+        return self._frozen
+
+
+class _FakeAwsSession:
+    def __init__(self, credentials=None):
+        self._credentials = credentials
+
+    def get_credentials(self):
+        return self._credentials
+
+
+def test_the_resolver_knows_the_aws_profile_backend():
+    from agentsandbox.keychain import AwsProfileProvider, SecretResolver
+
+    assert isinstance(SecretResolver().providers["aws_profile"], AwsProfileProvider)
+
+
+def test_aws_profile_provider_resolves_like_the_aws_cli():
+    """Reads whatever `aws --profile NAME` would resolve to right now -
+    static keys, assume-role, SSO, credential_process - not a separately
+    exported file."""
+    from agentsandbox.keychain import AwsProfileProvider
+
+    frozen = _FakeFrozenCredentials("AKIDEXAMPLE", "secret123", "token123")
+    provider = AwsProfileProvider(
+        session_factory=lambda profile: _FakeAwsSession(_FakeAwsCredentials(frozen))
+    )
+    bundle = json.loads(provider.fetch(SecretRef(backend="aws_profile", service="work")))
+    assert bundle == {
+        "access_key_id": "AKIDEXAMPLE",
+        "secret_access_key": "secret123",
+        "session_token": "token123",
+    }
+
+
+def test_aws_profile_provider_omits_session_token_when_absent():
+    """A permanent IAM user has no token - the bundle shouldn't claim one."""
+    from agentsandbox.keychain import AwsProfileProvider
+
+    frozen = _FakeFrozenCredentials("AKIDEXAMPLE", "secret123")
+    provider = AwsProfileProvider(
+        session_factory=lambda profile: _FakeAwsSession(_FakeAwsCredentials(frozen))
+    )
+    bundle = json.loads(provider.fetch(SecretRef(backend="aws_profile", service="work")))
+    assert "session_token" not in bundle
+
+
+def test_aws_profile_provider_passes_the_profile_name_through():
+    from agentsandbox.keychain import AwsProfileProvider
+
+    seen = []
+
+    def factory(profile):
+        seen.append(profile)
+        return _FakeAwsSession(_FakeAwsCredentials(_FakeFrozenCredentials("A", "B")))
+
+    AwsProfileProvider(session_factory=factory).fetch(
+        SecretRef(backend="aws_profile", service="work")
+    )
+    assert seen == ["work"]
+
+
+def test_aws_profile_provider_requires_a_profile_name():
+    from agentsandbox.keychain import AwsProfileProvider
+
+    with pytest.raises(BrokerError, match="profile name"):
+        AwsProfileProvider().fetch(SecretRef(backend="aws_profile", service=""))
+
+
+def test_aws_profile_provider_with_no_resolvable_credentials_is_a_broker_error():
+    from agentsandbox.keychain import AwsProfileProvider
+
+    provider = AwsProfileProvider(session_factory=lambda profile: _FakeAwsSession(None))
+    with pytest.raises(BrokerError, match="no AWS credentials found"):
+        provider.fetch(SecretRef(backend="aws_profile", service="work"))
+
+
+def test_aws_profile_provider_wraps_botocore_errors_as_broker_errors():
+    """A botocore failure (no such profile, an SSO session that's actually
+    expired) must reach BrokerCore.handle's BrokerError branch, not crash
+    the connection - same as every other secret backend."""
+    import botocore.exceptions
+
+    from agentsandbox.keychain import AwsProfileProvider
+
+    class _FailingSession:
+        def get_credentials(self):
+            raise botocore.exceptions.ProfileNotFound(profile="work")
+
+    provider = AwsProfileProvider(session_factory=lambda profile: _FailingSession())
+    with pytest.raises(BrokerError, match="could not resolve AWS profile"):
+        provider.fetch(SecretRef(backend="aws_profile", service="work"))
+
+
+def test_aws_profile_provider_registers_the_bundle_for_redaction():
+    """The provider registers the raw bundle it fetched, same as every other
+    provider does with whatever it reads - the broker separately registers
+    each individual field (access_key_id, secret_access_key, session_token)
+    once it parses the bundle, which is what actually keeps them out of a
+    header or a log line."""
+    from agentsandbox.audit import redactor
+    from agentsandbox.keychain import AwsProfileProvider
+
+    frozen = _FakeFrozenCredentials("AKIDEXAMPLE", "shh-its-a-secret")
+    provider = AwsProfileProvider(
+        session_factory=lambda profile: _FakeAwsSession(_FakeAwsCredentials(frozen))
+    )
+    raw = provider.fetch(SecretRef(backend="aws_profile", service="work"))
+    assert raw not in redactor.text(f"leaked {raw} here")
+
+
 def test_pass_consults_the_store_it_was_told_to(tmp_path):
     """A per-project database is selected explicitly, never inherited."""
     from agentsandbox.keychain import PassProvider

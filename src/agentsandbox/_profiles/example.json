@@ -8,9 +8,9 @@
     "GITHUB_API": "https://api.github.com"
   },
 
-  "_comment_aws_autosign": "Opts the session into re-signing every AWS request the guest makes, for any AWS host the session's destination policy already allows - not one declared here. box start mints a random dummy AWS key for the guest (it never holds a real one); signing_secret is the real credential the broker signs with, read fresh on every request rather than cached, since it often carries its own short expiration (an STS session from `aws configure export-credentials`, say) outside asbx's control. See README's 'AWS requests' section.",
+  "_comment_aws_autosign": "Opts the session into re-signing every AWS request the guest makes, for any AWS host the session's destination policy already allows - not one declared here. box start mints a random dummy AWS key for the guest (it never holds a real one); signing_secret is the real credential the broker signs with. aws_profile:NAME resolves live off ~/.aws, the same way `aws --profile NAME` would - no separate export step. file:/path also works, for a credential bundle kept fresh some other way (a CI secrets manager, say). See README's 'AWS requests' section.",
   "aws_autosign": {
-    "signing_secret": "file:/run/secrets/aws-signing-credentials.json"
+    "signing_secret": "aws_profile:work"
   },
 
   "capabilities": [

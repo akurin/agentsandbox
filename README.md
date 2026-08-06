@@ -218,7 +218,7 @@ to be calling that moment, not one fixed host. A profile opts a session into
 {
   "version": 1,
   "aws_autosign": {
-    "signing_secret": {"backend": "file", "path": "/path/to/aws-credentials.json"}
+    "signing_secret": {"backend": "aws_profile", "profile": "work"}
   }
 }
 ```
@@ -236,8 +236,20 @@ the request in the first place.
 `signing_secret` is a real, working AWS credential the broker signs with -
 never the guest's own. It's read fresh on every request rather than cached,
 since it's the one credential likely to carry its own short expiration (an
-STS session from `aws configure export-credentials`, say) outside `asbx`'s
-control; a `file` backend refreshed by a host-side job is the natural fit.
+SSO-derived STS session, say) outside `asbx`'s control:
+
+| backend | resolves to |
+|---|---|
+| `aws_profile:NAME` | whatever `aws --profile NAME` would resolve to right now — static keys, assume-role, SSO, `credential_process` — read live off `~/.aws/config`/`~/.aws/credentials` through botocore's own resolution chain, with SSO refreshed automatically the same way the CLI does it. No file, no host-side job. |
+| `file:/path` | a JSON credential bundle (`access_key_id`/`secret_access_key`/`session_token`, or the PascalCase `aws configure export-credentials` emits directly) kept fresh by something outside `asbx` — the natural fit when credentials come from a source `aws_profile` can't reach, like a CI secrets manager. |
+
+`aws_profile` never goes stale on its own - botocore refreshes an SSO/assumed
+-role session transparently on every fetch, the same as it would mid-command
+for the CLI, and raises a clear error if the underlying login has actually
+expired rather than handing back something invalid. For `file`, where the
+bundle is self-reported, an `Expiration` field (if present) is honoured the
+same way: an already-expired credential is refused with a clear reason
+rather than surfacing as an opaque AWS 403.
 
 ## Mounts
 
