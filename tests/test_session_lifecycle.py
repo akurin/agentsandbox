@@ -251,6 +251,50 @@ def test_cli_audit_shows_events(capsys, monkeypatch):
     assert "session.created" in capsys.readouterr().out
 
 
+def test_cli_audit_follow_picks_up_new_events(capsys, monkeypatch):
+    """--follow must see a line written *after* it starts polling, not just
+    replay what was already there when it opened the file."""
+    import threading
+    import time
+
+    manager = SessionManager.create(allow_hosts=["example.com"])
+    monkeypatch.setenv("ASBX_SESSION", manager.session.session_id)
+
+    stop = threading.Event()
+    real_sleep = time.sleep
+
+    def fake_sleep(seconds):
+        if stop.is_set():
+            raise KeyboardInterrupt
+        real_sleep(min(seconds, 0.02))
+
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+
+    result = {}
+    thread = threading.Thread(
+        target=lambda: result.__setitem__("code", cli.main(["box", "audit", "--follow"]))
+    )
+    thread.start()
+    real_sleep(0.1)  # let the loop past its initial read and into polling
+    manager.audit.emit("test.followed", note="hi")
+    real_sleep(0.2)  # let it notice the new line
+    stop.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert result["code"] == 0
+    assert "test.followed" in capsys.readouterr().out
+
+
+def test_cli_audit_follow_without_a_log_is_an_error(capsys, monkeypatch, tmp_path):
+    manager = SessionManager.create(allow_hosts=["example.com"])
+    monkeypatch.setenv("ASBX_SESSION", manager.session.session_id)
+    manager.session.paths.audit_log.unlink()
+
+    assert cli.main(["box", "audit", "--follow"]) == cli.EXIT_USAGE
+    assert "no audit log yet" in capsys.readouterr().err
+
+
 def test_cli_reports_a_missing_session_without_a_traceback(capsys, monkeypatch):
     monkeypatch.setenv("ASBX_SESSION", "does-not-exist")
     assert cli.main(["cap", "ls"]) == cli.EXIT_DENIED

@@ -826,15 +826,44 @@ def cmd_secret_refresh(args: argparse.Namespace) -> int:
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
+    """The audit trail: every proxy decision, one JSON line each, no bodies
+    or headers - redaction happens on the way into the file, in `AuditLog`
+    itself, so there is nothing to filter out here.
+    """
     session = _resolve_session(args.name)
-    log = AuditLog(session.paths.audit_log, session.session_id)
-    records = log.read()
-    for record in records[-args.tail :]:
+    path = session.paths.audit_log
+
+    def show(record: dict) -> None:
         stamp = time.strftime("%H:%M:%S", time.localtime(record["ts"]))
         detail = {
             k: v for k, v in record.items() if k not in ("ts", "session", "event")
         }
         print(f"{stamp} {record['event']:<28} {json.dumps(detail, default=str)}")
+
+    log = AuditLog(path, session.session_id)
+    for record in log.read()[-args.tail :]:
+        show(record)
+
+    if not args.follow:
+        return 0
+
+    if not path.exists():
+        print(f"!! no audit log yet for {session.session_id}", file=sys.stderr)
+        return EXIT_USAGE
+
+    # Poll rather than inotify: one more line every so often is not worth a
+    # platform-specific file-watcher dependency for what is a debugging tool.
+    try:
+        with path.open() as fh:
+            fh.seek(0, os.SEEK_END)
+            while True:
+                line = fh.readline()
+                if not line:
+                    time.sleep(0.3)
+                    continue
+                show(json.loads(line))
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass
     return 0
 
 
@@ -1797,9 +1826,10 @@ def build_parser() -> argparse.ArgumentParser:
     diag.add_argument("--tail", type=int, default=25, help="lines per log section")
     diag.set_defaults(func=cmd_diag)
 
-    audit = box_sub.add_parser("audit", help="show a box's session audit log")
+    audit = box_sub.add_parser("audit", help="show or follow a box's session audit log")
     audit.add_argument("name", nargs="?", help="box (default: the only one running)")
     audit.add_argument("--tail", type=int, default=50)
+    audit.add_argument("-f", "--follow", action="store_true", help="keep printing new events as they arrive")
     audit.set_defaults(func=cmd_audit)
 
     # -- image ----------------------------------------------------------------
