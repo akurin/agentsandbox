@@ -93,6 +93,10 @@ class InjectionSpec:
     header: str = "Authorization"
     template: str = "Bearer {secret}"
     username: str | None = None  # basic auth only
+    #: Guest env var that mirrors `username`, so the guest's own tooling can
+    #: build a matching Basic-auth header without the value being written
+    #: twice in the profile. Basic auth only, and only alongside `username`.
+    username_env: str | None = None
 
     def validate(self) -> None:
         if self.kind not in SUPPORTED_INJECTIONS:
@@ -102,6 +106,14 @@ class InjectionSpec:
             )
         if self.kind == "header" and "{secret}" not in self.template:
             raise PolicyDenied("invalid_injection", "header template must contain {secret}")
+        if self.username_env and self.kind != "basic":
+            raise PolicyDenied(
+                "invalid_injection", "username_env only makes sense for basic auth"
+            )
+        if self.username_env and not (self.username or "").strip():
+            raise PolicyDenied(
+                "invalid_injection", "username_env requires username to be set"
+            )
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -113,6 +125,7 @@ class InjectionSpec:
             header=data.get("header", "Authorization"),
             template=data.get("template", "Bearer {secret}"),
             username=data.get("username"),
+            username_env=data.get("username_env"),
         )
 
 

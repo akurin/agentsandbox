@@ -3,8 +3,7 @@
 
   "version": 1,
   "env": {
-    "WIREMOCK_URL": "https://wiremock.example.com",
-    "WIREMOCK_USER": "developer"
+    "WIREMOCK_URL": "https://wiremock.example.com"
   },
   "capabilities": [
     {
@@ -27,9 +26,11 @@
 
       "_comment_secret": "pass: keeps credentials in the store you already back up. keychain:SERVICE:ACCOUNT works too.",
       "secret": "pass:wiremock/developer",
+      "_comment_injection": "username_env mirrors username into the guest's plain environment (here, WIREMOCK_USER) so a tool inside the guest can build a matching Basic-auth header - the value is written once, not once per place it's needed.",
       "injection": {
         "kind": "basic",
-        "username": "developer"
+        "username": "developer",
+        "username_env": "WIREMOCK_USER"
       }
     }
   ]

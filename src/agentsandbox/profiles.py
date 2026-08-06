@@ -49,7 +49,7 @@ from typing import Any
 
 from .capabilities import CapabilitySpec, InjectionSpec, SecretRef
 from .config import DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
-from .errors import CapabilityError
+from .errors import CapabilityError, PolicyDenied
 
 
 def profile_dirs() -> list[Path]:
@@ -131,13 +131,46 @@ def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str]]:
     for i, entry in enumerate(entries):
         try:
             specs.append(_entry_to_spec(entry, default_store))
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, PolicyDenied) as exc:
             raise CapabilityError(f"profile {path}, entry {i}: {exc}") from exc
 
-    plain_env = data.get("env", {})
-    if not isinstance(plain_env, dict):
+    raw_env = data.get("env", {})
+    if not isinstance(raw_env, dict):
         raise CapabilityError(f"profile {path}: 'env' must be a mapping")
-    return specs, {str(k): str(v) for k, v in plain_env.items()}
+
+    if conflict := _guest_env_collision(raw_env, specs):
+        raise CapabilityError(f"profile {path}: {conflict}")
+
+    # username_env mirrors injection.username into the guest's plain
+    # environment, so the guest's own tooling can build a matching Basic-auth
+    # header without the value being written twice in the file.
+    plain_env = {str(k): str(v) for k, v in raw_env.items()}
+    for spec in specs:
+        if spec.injection.username_env:
+            plain_env[spec.injection.username_env] = spec.injection.username or ""
+
+    return specs, plain_env
+
+
+def _guest_env_collision(raw_env: dict, specs: list[CapabilitySpec]) -> str | None:
+    """Two different sources landing on the same guest environment variable
+    name is never useful - one would silently overwrite the other, whether
+    it's the profile's own `env` block, a capability's placeholder `env`, or
+    a `username_env`. Returns an error message naming the conflict, or None
+    if there is none.
+    """
+    seen: dict[str, str] = {str(k): "the profile's env block" for k in raw_env}
+    for spec in specs:
+        for name, source in (
+            (spec.env_var, f"the placeholder env for {spec.label!r}"),
+            (spec.injection.username_env, f"the username_env for {spec.label!r}"),
+        ):
+            if not name:
+                continue
+            if name in seen:
+                return f"{source} and {seen[name]} both target guest env var {name!r}"
+            seen[name] = source
+    return None
 
 
 def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> CapabilitySpec:
@@ -145,6 +178,7 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
     if default_store and not secret.store:
         secret.store = default_store
     injection = InjectionSpec.from_dict(entry.get("injection", {}))
+    injection.validate()
 
     label = str(entry.get("label", ""))
     if not label:

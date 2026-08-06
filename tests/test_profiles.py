@@ -178,6 +178,103 @@ def test_a_capability_can_override_the_profile_store(profile_dir):
     assert specs[1].secret.store == "~/.password-store"
 
 
+def test_username_env_mirrors_the_username_into_plain_env(profile_dir):
+    """One value, written once - not duplicated between injection.username
+    and the profile's own env block."""
+    from agentsandbox.profiles import load_profile_env
+
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{
+            "label": "tnb",
+            "hosts": ["x.com"],
+            "secret": "pass:neo/TNB_SECRET",
+            "injection": {"kind": "basic", "username": "bot@example.com", "username_env": "TNB_USER"},
+        }],
+    }))
+    assert load_profile_env(resolve_profile("p")) == {"TNB_USER": "bot@example.com"}
+
+
+def test_username_env_requires_basic_auth(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{
+            "label": "x", "hosts": ["x.com"], "secret": "keychain:x",
+            "injection": {"kind": "bearer", "username_env": "X_USER"},
+        }],
+    }))
+    with pytest.raises(CapabilityError, match="username_env only makes sense for basic auth"):
+        load_profile(resolve_profile("p"))
+
+
+def test_username_env_requires_username(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{
+            "label": "x", "hosts": ["x.com"], "secret": "keychain:x",
+            "injection": {"kind": "basic", "username_env": "X_USER"},
+        }],
+    }))
+    with pytest.raises(CapabilityError, match="username_env requires username"):
+        load_profile(resolve_profile("p"))
+
+
+def test_username_env_colliding_with_the_env_block_is_an_error(profile_dir):
+    from agentsandbox.profiles import load_profile_env
+
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "env": {"X_USER": "manual"},
+        "capabilities": [{
+            "label": "x", "hosts": ["x.com"], "secret": "keychain:x",
+            "injection": {"kind": "basic", "username": "real", "username_env": "X_USER"},
+        }],
+    }))
+    with pytest.raises(CapabilityError, match="X_USER"):
+        load_profile_env(resolve_profile("p"))
+
+
+def test_username_env_colliding_with_another_capabilitys_placeholder_is_an_error(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [
+            {"label": "a", "hosts": ["a.com"], "secret": "keychain:a", "env": "SHARED"},
+            {
+                "label": "b", "hosts": ["b.com"], "secret": "keychain:b",
+                "injection": {"kind": "basic", "username": "u", "username_env": "SHARED"},
+            },
+        ],
+    }))
+    with pytest.raises(CapabilityError, match="SHARED"):
+        load_profile(resolve_profile("p"))
+
+
+def test_two_capabilities_cannot_share_a_placeholder_env_var(profile_dir):
+    """Pre-existing gap, closed by the same collision check: two placeholders
+    landing on one guest env var would mean the second silently overwrites
+    the first."""
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [
+            {"label": "a", "hosts": ["a.com"], "secret": "keychain:a", "env": "SHARED"},
+            {"label": "b", "hosts": ["b.com"], "secret": "keychain:b", "env": "SHARED"},
+        ],
+    }))
+    with pytest.raises(CapabilityError, match="SHARED"):
+        load_profile(resolve_profile("p"))
+
+
+def test_the_wiremock_example_derives_its_username_env(profile_dir):
+    """The shipped example demonstrates the feature by using it to fix its
+    own former duplication of WIREMOCK_USER."""
+    from agentsandbox.profiles import load_profile_env
+
+    path = Path(profiles.__file__).parent / "_profiles" / "wiremock.json"
+    env = load_profile_env(path)
+    spec = load_profile(path)[0]
+    assert env["WIREMOCK_USER"] == spec.injection.username == "developer"
+
+
 @pytest.mark.parametrize(
     "name", [p.stem for p in (Path(profiles.__file__).parent / "_profiles").glob("*.json")]
 )
