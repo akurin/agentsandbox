@@ -17,7 +17,11 @@ def test_json_profile_parses(profile_dir):
     (profile_dir / "oss.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "github", "hosts": ["api.github.com"], "methods": ["GET"], "secret": "keychain:asbx-github:me"}
+            {
+                "label": "github",
+                "when": {"hosts": ["api.github.com"], "methods": ["GET"]},
+                "secret": "keychain:asbx-github:me",
+            }
         ],
     }))
     specs = load_profile(resolve_profile("oss"))
@@ -30,8 +34,8 @@ def test_secret_ref_variants(profile_dir):
     (profile_dir / "s.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "a", "hosts": ["x.com"], "secret": "keychain:svc:acct"},
-            {"label": "b", "hosts": ["y.com"], "secret": {"backend": "env", "service": "TOKEN"}},
+            {"label": "a", "when": {"hosts": ["x.com"]}, "secret": "keychain:svc:acct"},
+            {"label": "b", "when": {"hosts": ["y.com"]}, "secret": {"backend": "env", "name": "TOKEN"}},
         ],
     }))
     specs = load_profile(resolve_profile("s"))
@@ -41,14 +45,63 @@ def test_secret_ref_variants(profile_dir):
     assert specs[1].secret.backend == "env"
     assert specs[1].secret.service == "TOKEN"
 
+def test_secret_ref_dict_form_uses_the_backends_own_field_name(profile_dir):
+    """`service` is only the right word for keychain - pass/env/file each get
+    their own name (`entry`/`name`/`path`), not one generic field stretched
+    over all four."""
+    (profile_dir / "s.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [
+            {"label": "a", "when": {"hosts": ["x.com"]}, "secret": {"backend": "pass", "entry": "neo/TOKEN"}},
+            {"label": "b", "when": {"hosts": ["y.com"]}, "secret": {"backend": "file", "path": "/run/secrets/x"}},
+        ],
+    }))
+    specs = load_profile(resolve_profile("s"))
+    assert specs[0].secret.backend == "pass"
+    assert specs[0].secret.service == "neo/TOKEN"
+    assert specs[1].secret.backend == "file"
+    assert specs[1].secret.service == "/run/secrets/x"
+
+def test_secret_ref_dict_form_rejects_the_wrong_backends_field(profile_dir):
+    (profile_dir / "bad.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [
+            {"label": "a", "when": {"hosts": ["x.com"]}, "secret": {"backend": "pass", "service": "neo/TOKEN"}},
+        ],
+    }))
+    with pytest.raises(CapabilityError, match="'pass' secret needs 'entry'"):
+        load_profile(resolve_profile("bad"))
+
 def test_missing_label_is_an_error(profile_dir):
-    (profile_dir / "bad.json").write_text(json.dumps({"version": 1, "capabilities": [{"hosts": ["x.com"], "secret": "keychain:x"}]}))
+    (profile_dir / "bad.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{"when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
+    }))
     with pytest.raises(CapabilityError, match="label"):
         load_profile(resolve_profile("bad"))
 
 def test_missing_secret_is_an_error(profile_dir):
-    (profile_dir / "bad.json").write_text(json.dumps({"version": 1, "capabilities": [{"hosts": ["x.com"]}]}))
+    (profile_dir / "bad.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}}],
+    }))
     with pytest.raises(CapabilityError, match="secret"):
+        load_profile(resolve_profile("bad"))
+
+def test_missing_when_block_is_an_error(profile_dir):
+    (profile_dir / "bad.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{"label": "x", "secret": "keychain:x"}],
+    }))
+    with pytest.raises(CapabilityError, match="'when' block"):
+        load_profile(resolve_profile("bad"))
+
+def test_when_without_hosts_is_an_error(profile_dir):
+    (profile_dir / "bad.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{"label": "x", "when": {"methods": ["GET"]}, "secret": "keychain:x"}],
+    }))
+    with pytest.raises(CapabilityError, match="when.hosts"):
         load_profile(resolve_profile("bad"))
 
 def test_no_such_profile_is_an_error():
@@ -74,7 +127,7 @@ def test_profiles_can_carry_non_secret_environment(profile_dir):
         "version": 1,
         "env": {"WIREMOCK_URL": "https://wiremock.example.com", "WIREMOCK_USER": "developer"},
         "capabilities": [
-            {"label": "wiremock", "hosts": ["wiremock.example.com"], "secret": "keychain:x:y"}
+            {"label": "wiremock", "when": {"hosts": ["wiremock.example.com"]}, "secret": "keychain:x:y"}
         ],
     }))
     box = load_profile_env(resolve_profile("svc"))
@@ -151,8 +204,8 @@ def test_a_profile_can_point_at_its_own_pass_store(profile_dir):
         "version": 1,
         "pass_store": "~/.password-store-neo",
         "capabilities": [
-            {"label": "a", "hosts": ["a.example.com"], "secret": "pass:wiremock/developer"},
-            {"label": "b", "hosts": ["b.example.com"], "secret": "pass:github/token"},
+            {"label": "a", "when": {"hosts": ["a.example.com"]}, "secret": "pass:wiremock/developer"},
+            {"label": "b", "when": {"hosts": ["b.example.com"]}, "secret": "pass:github/token"},
         ],
     }))
     specs = load_profile(resolve_profile("neo"))
@@ -165,11 +218,11 @@ def test_a_capability_can_override_the_profile_store(profile_dir):
         "version": 1,
         "pass_store": "~/.password-store-neo",
         "capabilities": [
-            {"label": "a", "hosts": ["a.example.com"], "secret": "pass:wiremock/developer"},
+            {"label": "a", "when": {"hosts": ["a.example.com"]}, "secret": "pass:wiremock/developer"},
             {
                 "label": "shared",
-                "hosts": ["b.example.com"],
-                "secret": {"backend": "pass", "service": "github/token", "store": "~/.password-store"},
+                "when": {"hosts": ["b.example.com"]},
+                "secret": {"backend": "pass", "entry": "github/token", "store": "~/.password-store"},
             },
         ],
     }))
@@ -178,8 +231,8 @@ def test_a_capability_can_override_the_profile_store(profile_dir):
     assert specs[1].secret.store == "~/.password-store"
 
 
-def test_username_env_mirrors_the_username_into_plain_env(profile_dir):
-    """One value, written once - not duplicated between injection.username
+def test_username_guest_env_mirrors_the_username_into_plain_env(profile_dir):
+    """One value, written once - not duplicated between injection.username.value
     and the profile's own env block."""
     from agentsandbox.profiles import load_profile_env
 
@@ -187,61 +240,81 @@ def test_username_env_mirrors_the_username_into_plain_env(profile_dir):
         "version": 1,
         "capabilities": [{
             "label": "tnb",
-            "hosts": ["x.com"],
+            "when": {"hosts": ["x.com"]},
             "secret": "pass:neo/TNB_SECRET",
-            "injection": {"kind": "basic", "username": "bot@example.com", "username_env": "TNB_USER"},
+            "injection": {
+                "kind": "basic",
+                "username": {"value": "bot@example.com", "guest_env": "TNB_USER"},
+            },
         }],
     }))
     assert load_profile_env(resolve_profile("p")) == {"TNB_USER": "bot@example.com"}
 
 
-def test_username_env_requires_basic_auth(profile_dir):
+def test_username_plain_string_still_works(profile_dir):
+    """Most basic-auth capabilities don't need the guest to see the username
+    separately - a plain string stays the simple case."""
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [{
-            "label": "x", "hosts": ["x.com"], "secret": "keychain:x",
-            "injection": {"kind": "bearer", "username_env": "X_USER"},
+            "label": "tnb",
+            "when": {"hosts": ["x.com"]},
+            "secret": "pass:neo/TNB_SECRET",
+            "injection": {"kind": "basic", "username": "bot@example.com"},
         }],
     }))
-    with pytest.raises(CapabilityError, match="username_env only makes sense for basic auth"):
-        load_profile(resolve_profile("p"))
+    spec = load_profile(resolve_profile("p"))[0]
+    assert spec.injection.username == "bot@example.com"
+    assert spec.injection.username_guest_env is None
 
 
-def test_username_env_requires_username(profile_dir):
+def test_username_guest_env_requires_basic_auth(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [{
-            "label": "x", "hosts": ["x.com"], "secret": "keychain:x",
-            "injection": {"kind": "basic", "username_env": "X_USER"},
+            "label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x",
+            "injection": {"kind": "bearer", "username": {"guest_env": "X_USER"}},
         }],
     }))
-    with pytest.raises(CapabilityError, match="username_env requires username"):
+    with pytest.raises(CapabilityError, match="username.guest_env only makes sense for basic auth"):
         load_profile(resolve_profile("p"))
 
 
-def test_username_env_colliding_with_the_env_block_is_an_error(profile_dir):
+def test_username_guest_env_requires_a_value(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{
+            "label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x",
+            "injection": {"kind": "basic", "username": {"guest_env": "X_USER"}},
+        }],
+    }))
+    with pytest.raises(CapabilityError, match="username.guest_env requires username.value"):
+        load_profile(resolve_profile("p"))
+
+
+def test_username_guest_env_colliding_with_the_env_block_is_an_error(profile_dir):
     from agentsandbox.profiles import load_profile_env
 
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "env": {"X_USER": "manual"},
         "capabilities": [{
-            "label": "x", "hosts": ["x.com"], "secret": "keychain:x",
-            "injection": {"kind": "basic", "username": "real", "username_env": "X_USER"},
+            "label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x",
+            "injection": {"kind": "basic", "username": {"value": "real", "guest_env": "X_USER"}},
         }],
     }))
     with pytest.raises(CapabilityError, match="X_USER"):
         load_profile_env(resolve_profile("p"))
 
 
-def test_username_env_colliding_with_another_capabilitys_placeholder_is_an_error(profile_dir):
+def test_username_guest_env_colliding_with_another_capabilitys_placeholder_is_an_error(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "a", "hosts": ["a.com"], "secret": "keychain:a", "env": "SHARED"},
+            {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "SHARED"},
             {
-                "label": "b", "hosts": ["b.com"], "secret": "keychain:b",
-                "injection": {"kind": "basic", "username": "u", "username_env": "SHARED"},
+                "label": "b", "when": {"hosts": ["b.com"]}, "secret": "keychain:b",
+                "injection": {"kind": "basic", "username": {"value": "u", "guest_env": "SHARED"}},
             },
         ],
     }))
@@ -249,22 +322,22 @@ def test_username_env_colliding_with_another_capabilitys_placeholder_is_an_error
         load_profile(resolve_profile("p"))
 
 
-def test_two_capabilities_cannot_share_a_placeholder_env_var(profile_dir):
+def test_two_capabilities_cannot_share_a_placeholder_guest_env(profile_dir):
     """Pre-existing gap, closed by the same collision check: two placeholders
     landing on one guest env var would mean the second silently overwrites
     the first."""
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "a", "hosts": ["a.com"], "secret": "keychain:a", "env": "SHARED"},
-            {"label": "b", "hosts": ["b.com"], "secret": "keychain:b", "env": "SHARED"},
+            {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "SHARED"},
+            {"label": "b", "when": {"hosts": ["b.com"]}, "secret": "keychain:b", "guest_env": "SHARED"},
         ],
     }))
     with pytest.raises(CapabilityError, match="SHARED"):
         load_profile(resolve_profile("p"))
 
 
-def test_the_wiremock_example_derives_its_username_env(profile_dir):
+def test_the_wiremock_example_derives_its_username_guest_env(profile_dir):
     """The shipped example demonstrates the feature by using it to fix its
     own former duplication of WIREMOCK_USER."""
     from agentsandbox.profiles import load_profile_env
@@ -334,11 +407,13 @@ def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
         "env": {"API_BASE": "https://api.example.com"},
         "capabilities": [{
             "label": "svc",
-            "env": "SVC_TOKEN",
-            "hosts": ["api.example.com"],
-            "methods": ["GET", "POST"],
-            "paths": ["/v1/*"],
-            "deny_paths": ["/v1/admin/*"],
+            "guest_env": "SVC_TOKEN",
+            "when": {
+                "hosts": ["api.example.com"],
+                "methods": ["GET", "POST"],
+                "paths": ["/v1/*"],
+                "deny_paths": ["/v1/admin/*"],
+            },
             "secret": "pass:svc/token",
             "injection": {"kind": "header", "header": "X-Key", "template": "{secret}"},
         }],

@@ -64,7 +64,7 @@ def short_id(token_hash_hex: str) -> str:
 class SecretRef:
     """Where the *real* credential lives. Never the credential itself."""
 
-    backend: str = "keychain"  # keychain | pass | box | file
+    backend: str = "keychain"  # keychain | pass | env | file
     service: str = ""
     account: str = ""
     #: Which store to look in, when the backend has more than one. For ``pass``
@@ -96,7 +96,7 @@ class InjectionSpec:
     #: Guest env var that mirrors `username`, so the guest's own tooling can
     #: build a matching Basic-auth header without the value being written
     #: twice in the profile. Basic auth only, and only alongside `username`.
-    username_env: str | None = None
+    username_guest_env: str | None = None
 
     def validate(self) -> None:
         if self.kind not in SUPPORTED_INJECTIONS:
@@ -106,13 +106,13 @@ class InjectionSpec:
             )
         if self.kind == "header" and "{secret}" not in self.template:
             raise PolicyDenied("invalid_injection", "header template must contain {secret}")
-        if self.username_env and self.kind != "basic":
+        if self.username_guest_env and self.kind != "basic":
             raise PolicyDenied(
-                "invalid_injection", "username_env only makes sense for basic auth"
+                "invalid_injection", "username.guest_env only makes sense for basic auth"
             )
-        if self.username_env and not (self.username or "").strip():
+        if self.username_guest_env and not (self.username or "").strip():
             raise PolicyDenied(
-                "invalid_injection", "username_env requires username to be set"
+                "invalid_injection", "username.guest_env requires username.value to be set"
             )
 
     def to_dict(self) -> dict:
@@ -125,7 +125,7 @@ class InjectionSpec:
             header=data.get("header", "Authorization"),
             template=data.get("template", "Bearer {secret}"),
             username=data.get("username"),
-            username_env=data.get("username_env"),
+            username_guest_env=data.get("username_guest_env"),
         )
 
 
@@ -284,10 +284,10 @@ class CapabilitySpec:
     injection: InjectionSpec = field(default_factory=InjectionSpec)
     ttl_seconds: int = DEFAULT_TTL_SECONDS
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
-    #: Box variable the placeholder is delivered as inside the guest,
-    #: e.g. ``GITHUB_TOKEN``. Without this the operator has to copy the
-    #: placeholder by hand, and it changes every session.
-    env_var: str = ""
+    #: Guest env var the placeholder is delivered as, e.g. ``GITHUB_TOKEN``.
+    #: Without this the operator has to copy the placeholder by hand, and it
+    #: changes every session.
+    guest_env: str = ""
 
 
 class CapabilityStore:

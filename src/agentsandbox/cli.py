@@ -387,9 +387,9 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         for spec in load_profile(profile_path):
             token, cap = manager.issue_capability(spec)
             print(f"  cap {cap.cap_id:<18} {spec.label} ({', '.join(spec.methods)} {', '.join(spec.hosts)})")
-            if spec.env_var:
-                capability_env[spec.env_var] = token
-                print(f"    guest env: ${spec.env_var}")
+            if spec.guest_env:
+                capability_env[spec.guest_env] = token
+                print(f"    guest env: ${spec.guest_env}")
             else:
                 print(f"    placeholder: {token}  (add \"box\" to the profile to inject it)")
 
@@ -638,9 +638,10 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
         '    "version": 1,\n'
         '    "capabilities": [\n'
         "      {\n"
-        f'        "label": "{spec.label}", "env": "{env_guess}",\n'
-        f'        "hosts": {json.dumps(spec.hosts)},\n'
-        f'        "methods": {json.dumps(spec.methods)}, "paths": {json.dumps(spec.path_globs)},\n'
+        f'        "label": "{spec.label}",\n'
+        f'        "guest_env": "{env_guess}",\n'
+        f'        "when": {{"hosts": {json.dumps(spec.hosts)}, "methods": {json.dumps(spec.methods)}, '
+        f'"paths": {json.dumps(spec.path_globs)}}},\n'
         f'        "secret": "{spec.secret.backend}:{spec.secret.service}'
         f'{":" + spec.secret.account if spec.secret.account else ""}"\n'
         "      }\n"
@@ -918,7 +919,7 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
         }.get(inject.kind, inject.kind)
 
         print(f"\n  - label: {spec.label}")
-        print(f"    placeholder:  ${spec.env_var}" if spec.env_var else
+        print(f"    placeholder:  ${spec.guest_env}" if spec.guest_env else
               "    placeholder:  (none - copy it from `asbx cap issue` by hand)")
         print(f"    secret:       {spec.secret.backend}:{spec.secret.service}"
               f"{':' + spec.secret.account if spec.secret.account else ''}")

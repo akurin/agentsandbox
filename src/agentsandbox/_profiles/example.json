@@ -11,19 +11,23 @@
   "capabilities": [
     {
       "label": "read repos",
-      "env": "GITHUB_TOKEN",
-      "hosts": ["api.github.com"],
-      "methods": ["GET", "HEAD"],
-      "paths": ["/repos/*", "/user"],
+      "guest_env": "GITHUB_TOKEN",
+      "when": {
+        "hosts": ["api.github.com"],
+        "methods": ["GET", "HEAD"],
+        "paths": ["/repos/*", "/user"]
+      },
       "secret": "pass:github/read-only-token"
     },
 
     {
       "label": "completions",
-      "env": "OPENAI_API_KEY",
-      "hosts": ["api.openai.com"],
-      "methods": ["POST"],
-      "paths": ["/v1/chat/completions", "/v1/embeddings"],
+      "guest_env": "OPENAI_API_KEY",
+      "when": {
+        "hosts": ["api.openai.com"],
+        "methods": ["POST"],
+        "paths": ["/v1/chat/completions", "/v1/embeddings"]
+      },
       "secret": "keychain:asbx-openai:default"
     },
 
@@ -31,11 +35,13 @@
       "_comment_deny": "deny_paths is checked before paths, so a broad allow can keep a few endpoints out of reach. Use it where an API mixes routine and destructive operations under one prefix.",
       "_comment_ttl": "ttl is in seconds, and 0 - the default - means the capability never expires, because an agent may run for days. Set it only for a grant meant to lapse on its own; extend one with `asbx cap renew`.",
       "label": "deploy tooling",
-      "env": "INTERNAL_TOKEN",
-      "hosts": ["api.internal.example.com"],
-      "methods": ["GET", "POST", "DELETE"],
-      "paths": ["/v1/*"],
-      "deny_paths": ["/v1/admin/*", "/v1/*/purge"],
+      "guest_env": "INTERNAL_TOKEN",
+      "when": {
+        "hosts": ["api.internal.example.com"],
+        "methods": ["GET", "POST", "DELETE"],
+        "paths": ["/v1/*"],
+        "deny_paths": ["/v1/admin/*", "/v1/*/purge"]
+      },
       "ttl": 1800,
       "secret": "pass:internal/deploy-token",
       "injection": {

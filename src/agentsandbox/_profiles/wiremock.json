@@ -8,29 +8,33 @@
   "capabilities": [
     {
       "label": "admin API",
-      "env": "WIREMOCK_PASSWORD",
-      "hosts": ["wiremock.example.com"],
+      "guest_env": "WIREMOCK_PASSWORD",
+      "when": {
+        "hosts": ["wiremock.example.com"],
 
-      "_comment_methods": "POST is not a write here: /__admin/requests/find is a search. Method is a poor proxy for danger on this API, so the deny list below carries the weight.",
-      "methods": ["GET", "POST", "PUT", "DELETE"],
+        "_comment_methods": "POST is not a write here: /__admin/requests/find is a search. Method is a poor proxy for danger on this API, so the deny list below carries the weight.",
+        "methods": ["GET", "POST", "PUT", "DELETE"],
 
-      "paths": ["/__admin/*"],
+        "paths": ["/__admin/*"],
 
-      "_comment_deny": "A shared WireMock is shared with other people. These endpoints hit all of them: reset clears the whole request journal, mappings/reset drops every stub, shutdown stops the server. Scoped deletes (requests/remove with a RequestPattern) stay available.",
-      "deny_paths": [
-        "/__admin/reset",
-        "/__admin/requests/reset",
-        "/__admin/mappings/reset",
-        "/__admin/shutdown"
-      ],
+        "_comment_deny": "A shared WireMock is shared with other people. These endpoints hit all of them: reset clears the whole request journal, mappings/reset drops every stub, shutdown stops the server. Scoped deletes (requests/remove with a RequestPattern) stay available.",
+        "deny_paths": [
+          "/__admin/reset",
+          "/__admin/requests/reset",
+          "/__admin/mappings/reset",
+          "/__admin/shutdown"
+        ]
+      },
 
-      "_comment_secret": "pass: keeps credentials in the store you already back up. keychain:SERVICE:ACCOUNT works too.",
+      "_comment_secret": "pass: keeps credentials in the store you already back up. keychain:SERVICE:ACCOUNT works too - or the explicit form, {\"backend\": \"pass\", \"entry\": \"wiremock/developer\"}.",
       "secret": "pass:wiremock/developer",
-      "_comment_injection": "username_env mirrors username into the guest's plain environment (here, WIREMOCK_USER) so a tool inside the guest can build a matching Basic-auth header - the value is written once, not once per place it's needed.",
+      "_comment_injection": "username.guest_env mirrors username.value into the guest's plain environment (here, WIREMOCK_USER) so a tool inside the guest can build a matching Basic-auth header - the value is written once, not once per place it's needed.",
       "injection": {
         "kind": "basic",
-        "username": "developer",
-        "username_env": "WIREMOCK_USER"
+        "username": {
+          "value": "developer",
+          "guest_env": "WIREMOCK_USER"
+        }
       }
     }
   ]

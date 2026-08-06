@@ -42,6 +42,16 @@ def asbx_home(tmp_path, monkeypatch):
     monkeypatch.setenv("ASBX_HOME", str(home))
     monkeypatch.delenv("ASBX_SESSION", raising=False)
 
+    # profiles.py falls back to Path.home() / ".config/asbx/profiles" when
+    # ASBX_PROFILE_DIR isn't set - without this, a test that resolves a
+    # profile by name without setting that env var reads whatever actually
+    # exists in the real machine's home directory instead of the shipped
+    # examples, which is exactly as hermetic as it sounds.
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.delenv("ASBX_PROFILE_DIR", raising=False)
+
     # A built default image, because that is the state of a host where anything
     # can be created: `asbx create` refuses an image that does not exist rather
     # than deferring the failure to the first boot. Tests that care about the

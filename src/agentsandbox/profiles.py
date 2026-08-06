@@ -1,9 +1,22 @@
 """Capability profiles: declare once, issue many.
 
 A profile is a list of capability specs, none of which contain a real
-credential — each one names a SecretRef (``keychain:service:account``) that
-already lives in the macOS Keychain.  Profiles are safe to check into a repo:
-they describe what a project needs, not how to authenticate.
+credential — each one names a secret reference that already lives in the
+macOS Keychain, ``pass``, an env var, or a file.  Profiles are safe to check
+into a repo: they describe what a project needs, not how to authenticate.
+
+Every field says both what it holds and which direction it moves - nothing
+in a capability entry should require guessing:
+
+* ``label`` - what this is called (required; there is no provider field to
+  fall back on).
+* ``guest_env`` - which guest environment variable receives the minted
+  placeholder.
+* ``when`` - the complete condition: where this can be used and what it can
+  do there (``hosts``, ``methods``, ``paths``, ``deny_paths``, ``resources``,
+  ``operations``).
+* ``secret`` - where the real credential comes from.
+* ``injection`` - how it gets attached to the outbound request.
 
 Example (``~/.config/asbx/profiles/oss-contributor.json``)::
 
@@ -12,20 +25,21 @@ Example (``~/.config/asbx/profiles/oss-contributor.json``)::
       "capabilities": [
         {
           "label": "github",
-          "hosts": ["api.github.com"],
-          "methods": ["GET", "HEAD"],
-          "paths": ["/repos/acme/*"],
+          "when": {
+            "hosts": ["api.github.com"],
+            "methods": ["GET", "HEAD"],
+            "paths": ["/repos/acme/*"]
+          },
           "secret": "keychain:asbx-github:me"
         },
         {
           "label": "npm",
-          "hosts": ["registry.npmjs.org"],
+          "when": {"hosts": ["registry.npmjs.org"]},
           "secret": "keychain:asbx-npm:me"
         },
         {
           "label": "openai",
-          "hosts": ["api.openai.com"],
-          "methods": ["POST"],
+          "when": {"hosts": ["api.openai.com"], "methods": ["POST"]},
           "secret": "keychain:asbx-openai:default"
         }
       ]
@@ -134,6 +148,11 @@ def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str]]:
         except (KeyError, TypeError, ValueError, PolicyDenied) as exc:
             raise CapabilityError(f"profile {path}, entry {i}: {exc}") from exc
 
+    # This `env` is the profile-wide block of plain, non-secret guest
+    # variables - a different thing from any capability's `guest_env`, which
+    # names where one specific value (a placeholder, a username) lands. Both
+    # end up in the same guest environment, which is exactly why collisions
+    # between them are checked below.
     raw_env = data.get("env", {})
     if not isinstance(raw_env, dict):
         raise CapabilityError(f"profile {path}: 'env' must be a mapping")
@@ -141,13 +160,13 @@ def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str]]:
     if conflict := _guest_env_collision(raw_env, specs):
         raise CapabilityError(f"profile {path}: {conflict}")
 
-    # username_env mirrors injection.username into the guest's plain
-    # environment, so the guest's own tooling can build a matching Basic-auth
-    # header without the value being written twice in the file.
+    # injection.username.guest_env mirrors injection.username.value into the
+    # guest's plain environment, so the guest's own tooling can build a
+    # matching Basic-auth header without the value being written twice.
     plain_env = {str(k): str(v) for k, v in raw_env.items()}
     for spec in specs:
-        if spec.injection.username_env:
-            plain_env[spec.injection.username_env] = spec.injection.username or ""
+        if spec.injection.username_guest_env:
+            plain_env[spec.injection.username_guest_env] = spec.injection.username or ""
 
     return specs, plain_env
 
@@ -155,15 +174,15 @@ def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str]]:
 def _guest_env_collision(raw_env: dict, specs: list[CapabilitySpec]) -> str | None:
     """Two different sources landing on the same guest environment variable
     name is never useful - one would silently overwrite the other, whether
-    it's the profile's own `env` block, a capability's placeholder `env`, or
-    a `username_env`. Returns an error message naming the conflict, or None
-    if there is none.
+    it's the profile's own `env` block, a capability's `guest_env`, or a
+    `username.guest_env`. Returns an error message naming the conflict, or
+    None if there is none.
     """
     seen: dict[str, str] = {str(k): "the profile's env block" for k in raw_env}
     for spec in specs:
         for name, source in (
-            (spec.env_var, f"the placeholder env for {spec.label!r}"),
-            (spec.injection.username_env, f"the username_env for {spec.label!r}"),
+            (spec.guest_env, f"the guest_env for {spec.label!r}"),
+            (spec.injection.username_guest_env, f"the username.guest_env for {spec.label!r}"),
         ):
             if not name:
                 continue
@@ -177,43 +196,104 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
     secret = _resolve_secret_ref(entry.get("secret"))
     if default_store and not secret.store:
         secret.store = default_store
-    injection = InjectionSpec.from_dict(entry.get("injection", {}))
+    injection = _resolve_injection(entry.get("injection", {}))
     injection.validate()
 
     label = str(entry.get("label", ""))
     if not label:
         raise CapabilityError("a capability must have a label")
 
+    when = entry.get("when")
+    if not isinstance(when, dict):
+        raise CapabilityError("a capability needs a 'when' block naming its hosts")
+    hosts = _as_list(when.get("hosts", []))
+    if not hosts:
+        raise CapabilityError("'when.hosts' must name at least one host")
+
     return CapabilitySpec(
-        hosts=_as_list(entry["hosts"]),
+        hosts=hosts,
         label=label,
         account=str(entry.get("account", "")),
-        resources=_as_list(entry.get("resources", [])),
-        methods=_as_list(entry.get("methods", ["GET"])),
-        path_globs=_as_list(entry.get("paths", ["/*"])),
-        deny_path_globs=_as_list(entry.get("deny_paths", [])),
-        operations=_as_list(entry.get("operations", [])),
+        resources=_as_list(when.get("resources", [])),
+        methods=_as_list(when.get("methods", ["GET"])),
+        path_globs=_as_list(when.get("paths", ["/*"])),
+        deny_path_globs=_as_list(when.get("deny_paths", [])),
+        operations=_as_list(when.get("operations", [])),
         secret=secret,
         injection=injection,
         ttl_seconds=int(entry.get("ttl", DEFAULT_TTL_SECONDS)),
         max_response_bytes=int(entry.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)),
-        env_var=str(entry.get("env", "")),
+        guest_env=str(entry.get("guest_env", "")),
     )
 
 
+#: Which field a secret's explicit-object form names its identifier with,
+#: per backend - the term each backend actually uses for it, rather than one
+#: generic name stretched over all four.
+_SECRET_IDENTIFIER_KEY = {
+    "keychain": "service",
+    "pass": "entry",
+    "env": "name",
+    "file": "path",
+}
+
+
 def _resolve_secret_ref(value: str | dict | None) -> SecretRef:
-    """``keychain:SERVICE[:ACCOUNT]``, ``pass:path/to/entry``, ``env:NAME`` or ``file:/path``."""
+    """``keychain:SERVICE[:ACCOUNT]``, ``pass:path/to/entry``, ``env:NAME`` or
+    ``file:/path`` as a compact string; or an explicit object naming the
+    field the way that backend does - see ``_SECRET_IDENTIFIER_KEY``.
+    """
     if value is None:
         raise CapabilityError("a profile capability must declare a secret")
     if isinstance(value, dict):
-        return SecretRef.from_dict(value)
+        return _secret_ref_from_dict(value)
     backend, _, rest = str(value).partition(":")
-    if backend not in ("keychain", "pass", "env", "file"):
+    if backend not in _SECRET_IDENTIFIER_KEY:
         raise CapabilityError(f"unknown secret backend {backend!r}")
     service, _, account = rest.partition(":")
     if not service:
         raise CapabilityError("secret reference is missing its service/name")
     return SecretRef(backend=backend, service=service, account=account)
+
+
+def _secret_ref_from_dict(data: dict) -> SecretRef:
+    backend = data.get("backend", "keychain")
+    key = _SECRET_IDENTIFIER_KEY.get(backend)
+    if key is None:
+        raise CapabilityError(f"unknown secret backend {backend!r}")
+    identifier = data.get(key)
+    if not identifier:
+        raise CapabilityError(f"a {backend!r} secret needs {key!r}")
+    return SecretRef(
+        backend=backend,
+        service=str(identifier),
+        account=str(data.get("account", "")),
+        store=str(data.get("store", "")),
+    )
+
+
+def _resolve_injection(data: dict) -> InjectionSpec:
+    """``username`` is either a plain string, or ``{"value": ..., "guest_env":
+    ...}`` when the guest's own tooling also needs it. Nested, not a second
+    flat ``username_guest_env`` field, so there is nothing shaped like it to
+    swap it with.
+    """
+    username_field = data.get("username")
+    username: str | None = None
+    username_guest_env: str | None = None
+    if isinstance(username_field, dict):
+        username = username_field.get("value")
+        username_guest_env = username_field.get("guest_env")
+    elif username_field is not None:
+        username = str(username_field)
+
+    return InjectionSpec(
+        kind=data.get("kind", "bearer"),
+        header=data.get("header", "Authorization"),
+        template=data.get("template", "Bearer {secret}"),
+        username=username,
+        username_guest_env=username_guest_env,
+    )
 
 
 def _as_list(value: Any) -> list:

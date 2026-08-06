@@ -111,9 +111,11 @@ them by hand every time:
   "capabilities": [
     {
       "label": "github",
-      "hosts": ["api.github.com"],
-      "methods": ["GET", "HEAD"],
-      "paths": ["/repos/acme/*"],
+      "when": {
+        "hosts": ["api.github.com"],
+        "methods": ["GET", "HEAD"],
+        "paths": ["/repos/acme/*"]
+      },
       "secret": "keychain:asbx-github:me"
     }
   ]
@@ -183,6 +185,14 @@ A value that decodes as a JSON object with `access_token` is treated as an
 OAuth bundle rather than a plain token: the broker refreshes it against
 `token_url` with the stored `refresh_token` when it's within 60s of expiry,
 and writes the refreshed bundle back if it came from Keychain.
+
+In a profile, `secret` can also be an explicit object instead of the compact
+string, naming the identifier the way that backend actually does —
+`{"backend": "pass", "entry": "neo/TOKEN"}`, `{"backend": "env", "name":
+"TOKEN"}`, `{"backend": "file", "path": "/run/secrets/token"}`, or
+`{"backend": "keychain", "service": "...", "account": "..."}`. `cap issue
+--secret` only takes the compact string, since a CLI flag has nowhere to put
+an object.
 
 ### `secret` — Keychain credentials
 `secret set --service NAME [--account NAME]` (prompts, never echoes) — writes

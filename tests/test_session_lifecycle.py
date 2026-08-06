@@ -440,8 +440,16 @@ def test_starting_with_a_profile_issues_all_capabilities(tmp_path, monkeypatch):
     (profile_dir / "testproj.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "github", "hosts": ["api.github.com"], "secret": "keychain:asbx-github:bot", "methods": ["GET"]},
-            {"label": "npm", "hosts": ["registry.npmjs.org"], "secret": "keychain:asbx-npm:bot", "methods": ["GET"]},
+            {
+                "label": "github",
+                "when": {"hosts": ["api.github.com"], "methods": ["GET"]},
+                "secret": "keychain:asbx-github:bot",
+            },
+            {
+                "label": "npm",
+                "when": {"hosts": ["registry.npmjs.org"], "methods": ["GET"]},
+                "secret": "keychain:asbx-npm:bot",
+            },
         ],
     }))
     monkeypatch.setenv("ASBX_PROFILE_DIR", str(profile_dir))
