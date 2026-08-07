@@ -11,17 +11,21 @@ Everything under a box name of the form `it-<hex>` is this suite's own; nothing
 here ever touches a box you created by hand, even under a different
 `ASBX_HOME` - box names and session ids are unrelated across the two.
 
-Every test that depends on ``test_image`` runs once per supported guest
-family (see ``FAMILY_IMAGES`` below), not just against Debian - a family's
-own packaging quirks (Fedora's wg-quick.target auto-starting the tunnel unit,
-its nftables.service loading a different config path, systemd-resolved
-blocking sshd's own D-Bus-backed PAM stack) are invisible to a suite that
-only ever boots one distro, which is exactly how a real "Failed Units: 1 /
-wg-quick@wg0.service" bug reached a user before any test caught it. A family
-whose image isn't built is skipped, not failed - `make vm-image` for one
-distro shouldn't block running the suite against another. Override with
-`ASBX_TEST_IMAGE` (e.g. `ubuntu-26.04`) to run against exactly one image
-instead of fanning out across every family.
+Every test that depends on ``test_image`` runs once per image in
+``TEST_IMAGES`` below, not just against Debian - an image's own packaging
+quirks (Fedora's wg-quick.target auto-starting the tunnel unit, its
+nftables.service loading a different config path, systemd-resolved blocking
+sshd's own D-Bus-backed PAM stack) are invisible to a suite that only ever
+boots one distro, which is exactly how a real "Failed Units: 1 /
+wg-quick@wg0.service" bug reached a user before any test caught it. Ubuntu
+gets its own entry despite sharing Debian's `GuestFamily` (apt,
+systemd-networkd, the same CA-trust mechanism): it's still a distinct
+published image with its own kernel and package versions, and the original
+tunnel-bootstrap race this suite guards against was itself a Debian-image
+bug, not a Debian-family one. An image that isn't built is skipped, not
+failed - `make vm-image` for one distro shouldn't block running the suite
+against another. Override with `ASBX_TEST_IMAGE` to run against exactly one
+image instead of fanning out across every one.
 """
 
 from __future__ import annotations
@@ -42,11 +46,10 @@ from helpers import (
     wait_for_console,
 )
 
-#: One representative image per supported `GuestFamily` - kept here rather
-#: than derived from `guest_families.FAMILIES` because a family name doesn't
-#: determine an image name (an image is a specific release build; a box
-#: could point at `fedora-45` just as well as `fedora-44`).
-FAMILY_IMAGES = {"debian": "debian-13", "fedora": "fedora-44"}
+#: Every image this suite exercises. Not one-per-`GuestFamily` - Ubuntu and
+#: Debian share one, but are still separate published images worth booting
+#: independently (see the module docstring).
+TEST_IMAGES = ["debian-13", "ubuntu-26.04", "fedora-44"]
 
 
 def _integration_env_problem() -> str | None:
@@ -75,7 +78,7 @@ def integration_env():
 
 def _candidate_images() -> list[str]:
     override = os.environ.get("ASBX_TEST_IMAGE")
-    return [override] if override else list(FAMILY_IMAGES.values())
+    return [override] if override else list(TEST_IMAGES)
 
 
 @pytest.fixture(scope="session", params=_candidate_images(), ids=lambda image: image)
