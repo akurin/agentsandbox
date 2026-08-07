@@ -7,6 +7,45 @@ real credential — from the macOS Keychain, `pass`, or wherever else you keep
 one — and returns a sanitized response. The agent never sees the credential,
 and the guest never has a network path that bypasses either.
 
+## Why this exists
+
+`asbx` is deliberately opinionated, not a general-purpose sandboxing
+framework — it's shaped by my own actual list of things an agent needs to do
+against real infrastructure, without ever holding a real credential to do
+it:
+
+- **Agents get a real AWS development environment**, not a mock of one. A
+  box is a disposable VM with its own tunnel and its own capability store —
+  gone the moment the session ends.
+- **No agent ever holds a real secret**, full stop. That's the whole design
+  above: the guest gets a capability placeholder or a dummy AWS key, never
+  the thing it stands in for.
+- **Agents deploy real AWS CDK stacks.** `cdk deploy` signs its own traffic
+  with a working AWS credential the whole way through — SigV4 covers the
+  entire request, not one header, so a normal capability doesn't fit.
+  [`aws_autosign`](#aws-requests) hands the guest a dummy key instead and has
+  the broker re-sign for real, for any AWS host the session's policy allows.
+- **A deployed stack can carry a real secret value — a Lambda's env var, an
+  RDS password in a CloudFormation parameter — without the agent that
+  deployed it ever seeing that value.** A `body`-kind capability (see
+  `cap issue --injection body` [below](#cap--capabilities)) substitutes the
+  real secret into the template body itself, after the guest builds it and
+  before it's forwarded, so the placeholder is what the agent writes and the
+  real value is what AWS receives.
+- **Agents call internal services behind HTTP Basic auth** the same way —
+  `cap issue --injection basic --username NAME`, credential injected by the
+  broker, never typed or seen by the guest.
+- **Agents call external OAuth-protected services.** Store a token bundle
+  (`access_token`/`refresh_token`/`token_url`) as the secret and the broker
+  refreshes it on the guest's behalf, transparently, before it expires.
+- **Agents run arbitrary code against the AWS SDK** — not just the CDK CLI.
+  `aws_autosign` re-signs whatever the guest's SDK of choice signs, for
+  whichever service it's calling, the same way it handles `cdk deploy`.
+
+If your use cases look different from this list, `asbx` will probably feel
+oddly shaped for them — the mechanisms below were built to make this list
+work well, not to be a general-purpose credential proxy.
+
 ## How it works
 
 ```
@@ -167,9 +206,24 @@ omitted name: `box ssh neo -o ConnectTimeout=5 -- git status`.
 `image ls` · `image rm NAME [--force]` · `image gc [--dry-run]`
 
 ### `cap` — capabilities
-`cap issue --box NAME --label LABEL --host HOST --secret REF [--method M]... [--path GLOB]... [--resource R]... [--operation OP] [--injection bearer|header|basic] [--ttl SECONDS]`
+`cap issue --box NAME --label LABEL --host HOST --secret REF [--method M]... [--path GLOB]... [--resource R]... [--operation OP] [--injection bearer|header|basic|body] [--username NAME] [--ttl SECONDS]`
 `cap ls --box NAME` · `cap renew CAP_ID --ttl SECONDS` · `cap revoke CAP_ID`
 `cap try CAP_ID --url URL [--method M] [--via-broker]` — send one request through the broker exactly as the guest would, from the host, no VM boot required; add `--via-broker` to also exercise the running broker's transport rather than an in-process copy of its logic.
+
+`--injection` controls how the broker attaches the credential once it's
+resolved:
+
+| kind | the guest sends... | the broker turns it into |
+|---|---|---|
+| `bearer` (default) | the placeholder, in `Authorization` | `Authorization: Bearer <secret>` |
+| `header` | the placeholder, in `--header NAME` (`--template` for the value shape) | the real value in that header |
+| `basic` | nothing extra — `--username NAME` names the login, the secret is the password | `Authorization: Basic base64(NAME:secret)` |
+| `body` | the placeholder embedded anywhere in the request body (a CloudFormation template's Lambda env var, say) | the placeholder substituted for the real secret in the body itself, before the request is forwarded — nothing needs to add a header at all |
+
+`body` is what makes deploying a stack that carries a real secret value safe
+to hand to an agent: the agent writes the placeholder into the template it's
+building, never the value, and the substitution happens after the guest
+constructs the request but before it leaves the broker.
 
 `REF` names where the real credential lives, never the credential itself —
 one of four backends:
