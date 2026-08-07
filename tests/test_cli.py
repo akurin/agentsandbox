@@ -106,6 +106,32 @@ def test_doctor_says_so_when_nothing_is_built():
     assert "none built" in cli._describe_images()[0]
 
 
+def test_resolve_guest_family_name_reads_the_images_own_metadata():
+    from agentsandbox.vm.vfkit import resolve_guest_family_name
+
+    _build_image("fedora-44", "fedora-44")
+    import json
+
+    from agentsandbox.vm.vfkit import image_metadata_path
+
+    meta = json.loads(image_metadata_path("fedora-44").read_text())
+    meta["family"] = "fedora"
+    image_metadata_path("fedora-44").write_text(json.dumps(meta))
+
+    assert resolve_guest_family_name("fedora-44") == "fedora"
+
+
+def test_resolve_guest_family_name_defaults_to_debian_for_images_built_before_it_existed():
+    """Every image build-image.sh produced before the "family" field existed
+    has no such key - and the legacy unnamed image has no metadata file at
+    all - both must still boot as debian rather than erroring."""
+    from agentsandbox.vm.vfkit import resolve_guest_family_name
+
+    _build_image("ubuntu-24.04", "ubuntu")  # metadata with no "family" key
+    assert resolve_guest_family_name("ubuntu-24.04") == "debian"
+    assert resolve_guest_family_name("no-such-image") == "debian"
+
+
 def test_an_environment_records_the_image_it_was_created_with():
     """The point of the whole thing: `asbx reset` must rebuild from the image
     the box was created with, not from whatever was built last."""

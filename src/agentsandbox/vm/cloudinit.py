@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 from pathlib import Path
 
 from ..session import Mount, Session, mount_tag
+from .guest_families import DEBIAN, GuestFamily
 
 GUEST_DIR = Path(__file__).with_name("guest")
 
@@ -33,6 +35,32 @@ def _b64(content: str) -> str:
 
 def _guest_file(name: str) -> str:
     return (GUEST_DIR / name).read_text()
+
+
+def _guest_file_rendered(name: str, **fields: str) -> str:
+    """A static guest file with a few `{token}`-style placeholders filled
+    in - the same file-per-concern convention as `_guest_file`, just for
+    the handful of files that carry one or two family-specific tokens
+    (a systemd unit's dependency name, a group name) rather than being
+    fully static."""
+    return _guest_file(name).format(**fields)
+
+
+def render_family_env(family: GuestFamily) -> str:
+    """Guest-side facts `bootstrap.sh` needs but must not hardcode, written
+    once and sourced early - what keeps bootstrap.sh a single script shared
+    across every guest family rather than templated or forked per family.
+
+    Values are shell-quoted (not just interpolated) since
+    `stale_cert_cleanup_cmd` carries its own embedded quoting.
+    """
+    fields = {
+        "CA_CERT_SOURCE_DIR": family.ca_cert_source_dir,
+        "CA_BUNDLE_PATH": family.ca_bundle_path,
+        "CA_TRUST_UPDATE_CMD": family.ca_trust_update_cmd,
+        "STALE_CERT_CLEANUP_CMD": family.stale_cert_cleanup_cmd,
+    }
+    return "".join(f"{name}={shlex.quote(value)}\n" for name, value in fields.items())
 
 
 def _write_file(path: str, content: str, permissions: str = "0644", owner: str = "root:root") -> dict:
@@ -98,6 +126,7 @@ def render_user_data(
     ssh_host_key: str = "",
     ssh_host_pub: str = "",
     ssh_authorized_key: str = "",
+    family: GuestFamily = DEBIAN,
 ) -> str:
     # Checked first, before anything is built. Without the session CA every
     # https call inside the guest fails certificate verification, surfacing as
@@ -137,11 +166,16 @@ def render_user_data(
             "/usr/local/bin/asbx-run-untrusted", _guest_file("run-untrusted.sh"), "0755"
         ),
         _write_file(
-            "/etc/systemd/system/asbx-forward@.service", _guest_file("asbx-forward@.service")
+            "/etc/systemd/system/asbx-forward@.service",
+            _guest_file_rendered("asbx-forward@.service", nobody_group=family.nobody_group),
         ),
         _write_file(
             "/etc/systemd/system/asbx-netcheck.service", _guest_file("asbx-netcheck.service")
         ),
+        # Facts bootstrap.sh needs but must not hardcode - see
+        # render_family_env's docstring for why this exists as a separate
+        # sourced file rather than templating bootstrap.sh itself.
+        _write_file("/etc/asbx/family.env", render_family_env(family), "0644"),
         # Autologin on the virtio console. The guest has no SSH and no
         # password; the console is the operator's only channel into it, and it
         # is reachable from the host alone - the guest cannot open it outward.
@@ -212,12 +246,12 @@ def render_user_data(
             ),
             _write_file(
                 "/etc/systemd/system/asbx-sshd-vsock.service",
-                _guest_file("asbx-sshd-vsock.service"),
+                _guest_file_rendered("asbx-sshd-vsock.service", ssh_service=family.ssh_service),
             ),
         ]
 
     write_files.append(
-        _write_file("/usr/local/share/ca-certificates/asbx-session-ca.crt", ca_cert, "0644")
+        _write_file(f"{family.ca_cert_source_dir}/asbx-session-ca.crt", ca_cert, "0644")
     )
 
     # Guest diagnostics go to the host, so a guest that powers itself off still
@@ -245,9 +279,10 @@ def render_user_data(
     # over vsock, which the host alone can dial, so it is no more exposed for
     # having started earlier.
     if ssh_host_key and ssh_authorized_key:
+        if family.has_ssh_socket:
+            runcmd.append(["systemctl", "unmask", f"{family.ssh_service}.socket"])
         runcmd += [
-            ["systemctl", "unmask", "ssh.socket"],
-            ["systemctl", "enable", "--now", "ssh.service"],
+            ["systemctl", "enable", "--now", f"{family.ssh_service}.service"],
             ["systemctl", "enable", "--now", "asbx-sshd-vsock.service"],
         ]
     runcmd.append(["/usr/local/bin/asbx-bootstrap"])

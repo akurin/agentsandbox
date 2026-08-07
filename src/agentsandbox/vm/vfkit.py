@@ -75,6 +75,20 @@ def image_metadata_path(name: str) -> Path:
     return images_dir() / f"{name}.json"
 
 
+def resolve_guest_family_name(name: str) -> str:
+    """Which :mod:`agentsandbox.vm.guest_families` entry this image's guest
+    is. Defaults to ``"debian"`` for any image with no ``family`` key in its
+    metadata - every image built before that field existed, including the
+    legacy unnamed image."""
+    meta = image_metadata_path(name)
+    if not meta.exists():
+        return "debian"
+    try:
+        return json.loads(meta.read_text()).get("family", "debian")
+    except (OSError, ValueError):
+        return "debian"
+
+
 def resolve_image(name: str) -> Path:
     """Find the disk image a box names.
 
@@ -157,6 +171,9 @@ class VmConfig:
     #: "warn" records the verdict and carries on, which is what you want when
     #: debugging a guest that will not stay up.
     netcheck: str = "halt"
+    #: Which `guest_families` entry this image's guest is - "debian" for
+    #: every image built before that field existed.
+    guest_family: str = "debian"
 
 
 class VfkitDriver:
@@ -254,6 +271,7 @@ class VfkitDriver:
         session CA *certificate* (never the key), the static network facts, and
         the fail-closed nftables ruleset.
         """
+        from . import guest_families
         from .cloudinit import render_user_data
 
         self.cloud_init_dir.mkdir(parents=True, exist_ok=True)
@@ -284,6 +302,7 @@ class VfkitDriver:
             ssh_host_key=self.vm.ssh_host_key,
             ssh_host_pub=self.vm.ssh_host_pub,
             ssh_authorized_key=self.vm.ssh_authorized_key,
+            family=guest_families.get_family(self.vm.guest_family),
         )
         user_data_path = self.cloud_init_dir / "user-data"
         write_private_file(user_data_path, user_data)

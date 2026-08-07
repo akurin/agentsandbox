@@ -15,6 +15,11 @@ if [ "$#" -eq 0 ]; then
     exit 64
 fi
 
+# Family-specific facts (the CA bundle path here) - see bootstrap.sh and
+# render_family_env's docstring for why this is a sourced file rather than
+# a hardcoded path.
+. /etc/asbx/family.env
+
 # Scrub the environment rather than filter it: anything not listed here does
 # not cross the boundary, including future variables nobody thought about.
 exec sudo -u builder -H env -i \
@@ -22,9 +27,9 @@ exec sudo -u builder -H env -i \
     HOME=/home/builder \
     LANG="${LANG:-C.UTF-8}" \
     TERM="${TERM:-dumb}" \
-    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
-    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
-    NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
-    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE="$CA_BUNDLE_PATH" \
+    REQUESTS_CA_BUNDLE="$CA_BUNDLE_PATH" \
+    NODE_EXTRA_CA_CERTS="$CA_BUNDLE_PATH" \
+    CURL_CA_BUNDLE="$CA_BUNDLE_PATH" \
     PWD="$PWD" \
     "$@"

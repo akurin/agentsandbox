@@ -27,7 +27,13 @@ from .errors import SandboxError
 from .keychain import KeychainProvider
 from .manager import SessionManager, check_host, stop_session_by_id
 from .session import STATE_STOPPED, Mount, Session, list_sessions, resolve_session_id
-from .vm.vfkit import DEFAULT_IMAGE, VmConfig, default_golden_image, resolve_image
+from .vm.vfkit import (
+    DEFAULT_IMAGE,
+    VmConfig,
+    default_golden_image,
+    resolve_guest_family_name,
+    resolve_image,
+)
 
 EXIT_USAGE = 2
 EXIT_DENIED = 3
@@ -426,6 +432,7 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         # from what it was created with rather than from whatever was built
         # on this host most recently.
         golden_image=resolve_image(box.image) if box else default_golden_image(),
+        guest_family=resolve_guest_family_name(box.image if box else DEFAULT_IMAGE),
         # sshd only exists in a box, where `asbx box ssh` needs it. A
         # one-off session keeps the smaller surface of console-only access.
         **_ssh_vm_config(box, session),
@@ -1513,6 +1520,7 @@ def cmd_image_list(args: argparse.Namespace) -> int:
         print(f"no images built in {images_dir()}")
         print("  ./vm/build-image.sh                     debian (the default)")
         print("  ASBX_DISTRO=ubuntu ./vm/build-image.sh  ubuntu")
+        print("  ASBX_DISTRO=fedora ./vm/build-image.sh  fedora")
         return 0
 
     for image in images:

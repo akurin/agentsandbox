@@ -40,8 +40,80 @@ if [ -z "$IMAGE_NAME" ]; then
 fi
 GOLDEN="$IMAGES_DIR/$IMAGE_NAME.raw"
 VFKIT="${ASBX_VFKIT:-$(command -v vfkit || echo /opt/podman/bin/vfkit)}"
-PACKAGES="${ASBX_PACKAGES:-wireguard-tools nftables socat ca-certificates curl git python3 python3-venv}"
 TIMEOUT="${ASBX_PREPARE_TIMEOUT:-900}"
+
+# Which guest_families entry this image is - read from the metadata
+# build-image.sh wrote, not re-declared here, so this script never disagrees
+# with what the image was actually built as. Defaults to debian for any
+# image built before the "family" field existed.
+FAMILY="${ASBX_FAMILY:-}"
+if [ -z "$FAMILY" ] && [ -f "$IMAGES_DIR/$IMAGE_NAME.json" ]; then
+    FAMILY="$(sed -n 's/.*"family": *"\([^"]*\)".*/\1/p' "$IMAGES_DIR/$IMAGE_NAME.json")"
+fi
+FAMILY="${FAMILY:-debian}"
+
+# python3-venv does not exist as a separate package on Fedora - venv ships
+# in the base python3 package there.
+if [ "$FAMILY" = "fedora" ]; then
+    DEFAULT_PACKAGES="wireguard-tools nftables socat ca-certificates curl git python3"
+else
+    DEFAULT_PACKAGES="wireguard-tools nftables socat ca-certificates curl git python3 python3-venv"
+fi
+PACKAGES="${ASBX_PACKAGES:-$DEFAULT_PACKAGES}"
+
+# GRUB's console=hvc0 mechanism differs by family: Debian/Ubuntu use a
+# /etc/default/grub.d drop-in plus update-grub/grub-mkconfig; Fedora's arm64
+# cloud images boot via BLS entries grubby manages, with no update-grub
+# binary and no single grub.cfg grub-mkconfig would regenerate.
+if [ "$FAMILY" = "fedora" ]; then
+    IFS= read -r -d '' GRUB_RUNCMD <<'BLOCK' || true
+  - [ sh, -c, "grubby --update-kernel=ALL --args='console=hvc0'" ]
+  - [ sh, -c, "grubby --info=ALL | grep -q 'console=hvc0' && echo 'ASBX-CONSOLE ok' > /dev/hvc0 || echo 'ASBX-CONSOLE MISSING' > /dev/hvc0" ]
+BLOCK
+else
+    IFS= read -r -d '' GRUB_RUNCMD <<'BLOCK' || true
+  - [ mkdir, -p, /etc/default/grub.d ]
+  - [ sh, -c, "printf 'GRUB_CMDLINE_LINUX=\"\"\\nGRUB_CMDLINE_LINUX_DEFAULT=\"console=ttyS0,115200n8 console=hvc0\"\\nGRUB_TERMINAL=console\\n' > /etc/default/grub.d/99-asbx-console.cfg" ]
+  - [ sh, -c, "update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg" ]
+  - [ sh, -c, "grep -q 'console=hvc0' /boot/grub/grub.cfg && echo 'ASBX-CONSOLE ok' > /dev/hvc0 || echo 'ASBX-CONSOLE MISSING' > /dev/hvc0" ]
+BLOCK
+fi
+
+# openssh-server's unit is `ssh`(+`.socket`) on Debian/Ubuntu, `sshd` (no
+# socket unit) on Fedora.
+if [ "$FAMILY" = "fedora" ]; then
+    IFS= read -r -d '' SSH_DISABLE_RUNCMD <<'BLOCK' || true
+  - [ sh, -c, "systemctl disable --now sshd 2>/dev/null || true" ]
+BLOCK
+else
+    IFS= read -r -d '' SSH_DISABLE_RUNCMD <<'BLOCK' || true
+  - [ sh, -c, "systemctl disable --now ssh 2>/dev/null || true" ]
+  - [ sh, -c, "systemctl disable --now ssh.socket 2>/dev/null || true" ]
+BLOCK
+fi
+
+# Fedora Cloud's default network backend is NetworkManager, not
+# systemd-networkd - unlike Debian/Ubuntu's cloud images, which don't ship
+# it active. Left in place, NetworkManager keeps managing the link and the
+# systemd-networkd config every session boot writes (static address, no
+# default route - the whole "the only route out is the tunnel" design)
+# never actually takes effect. Debian/Ubuntu need nothing here.
+if [ "$FAMILY" = "fedora" ]; then
+    IFS= read -r -d '' NETWORK_BACKEND_RUNCMD <<'BLOCK' || true
+  - [ sh, -c, "systemctl disable --now NetworkManager 2>/dev/null || true" ]
+  - [ sh, -c, "systemctl mask NetworkManager 2>/dev/null || true" ]
+BLOCK
+else
+    NETWORK_BACKEND_RUNCMD=""
+fi
+
+# dpkg/rpm, purely for the diagnostic marker written below - functionally
+# inert either way since the real check is `command -v` further down.
+if [ "$FAMILY" = "fedora" ]; then
+    PKG_VERIFY_CMD="rpm -q wireguard-tools nftables socat"
+else
+    PKG_VERIFY_CMD="dpkg -l wireguard-tools nftables socat"
+fi
 
 if [ ! -f "$GOLDEN" ]; then
     echo "!! no image named '$IMAGE_NAME' at $GOLDEN" >&2
@@ -117,19 +189,18 @@ runcmd:
   # A drop-in rather than sed on /etc/default/grub: GRUB emits the LINUX
   # variable first and the LINUX_DEFAULT one after it, so the image's own
   # console= settings in the second would override anything written to the
-  # first. Drop-ins are sourced last and both distros support them.
-  - [ mkdir, -p, /etc/default/grub.d ]
-  - [ sh, -c, "printf 'GRUB_CMDLINE_LINUX=\"\"\\nGRUB_CMDLINE_LINUX_DEFAULT=\"console=ttyS0,115200n8 console=hvc0\"\\nGRUB_TERMINAL=console\\n' > /etc/default/grub.d/99-asbx-console.cfg" ]
-  - [ sh, -c, "update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg" ]
-  # Verify it landed. A console that is not captured makes every later failure
-  # invisible, so this is worth failing the prepare over.
-  - [ sh, -c, "grep -q 'console=hvc0' /boot/grub/grub.cfg && echo 'ASBX-CONSOLE ok' > /dev/hvc0 || echo 'ASBX-CONSOLE MISSING' > /dev/hvc0" ]
+  # first. Drop-ins are sourced last on the families that use them; Fedora's
+  # BLS/grubby mechanism needs no drop-in at all - both are built above, into
+  # GRUB_RUNCMD, and inserted as one block. Verify it landed either way. A
+  # console that is not captured makes every later failure invisible, so
+  # this is worth failing the prepare over.
+$GRUB_RUNCMD
   # Nothing should be listening in a session guest.
   # sshd stays installed but does not listen on any network interface. The
   # session bootstrap binds it to loopback and bridges it to a vsock port, so
   # the host can dial in and nothing else can - not the LAN, not the tunnel.
-  - [ sh, -c, "systemctl disable --now ssh 2>/dev/null || true" ]
-  - [ sh, -c, "systemctl disable --now ssh.socket 2>/dev/null || true" ]
+$SSH_DISABLE_RUNCMD
+$NETWORK_BACKEND_RUNCMD
   - [ sh, -c, "systemctl enable systemd-networkd 2>/dev/null || true" ]
   # The interface never gets a default route - wg-quick installs the only route
   # there is - so systemd-networkd-wait-online can never call the link routable
@@ -167,7 +238,7 @@ runcmd:
   - [ sh, -c, "modprobe virtiofs 2>/dev/null || true" ]
   - [ mkdir, -p, /mnt/asbxprep ]
   - [ sh, -c, "mount -t virtiofs asbxprep /mnt/asbxprep" ]
-  - [ sh, -c, "{ echo \"prepared \$(date -Is)\"; dpkg -l wireguard-tools nftables socat 2>/dev/null | tail -5; } > /mnt/asbxprep/prepared" ]
+  - [ sh, -c, "{ echo \"prepared \$(date -Is)\"; $PKG_VERIFY_CMD 2>/dev/null | tail -5; } > /mnt/asbxprep/prepared" ]
   - [ sh, -c, "sync; umount /mnt/asbxprep || true" ]
   # Second, independent signal: which of the packages we actually need are now
   # installed. If virtio-fs failed, this still tells the host what happened.

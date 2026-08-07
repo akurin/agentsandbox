@@ -1,8 +1,8 @@
 [Unit]
 Description=agentsandbox: bridge vsock to the local sshd
 Documentation=man:sshd(8)
-After=ssh.service
-Requires=ssh.service
+After={ssh_service}.service
+Requires={ssh_service}.service
 
 [Service]
 Type=exec

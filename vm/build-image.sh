@@ -12,12 +12,15 @@
 #   ./vm/build-image.sh                            # debian 13 arm64, the default
 #   ASBX_DISTRO=ubuntu ./vm/build-image.sh         # ubuntu 26.04 LTS arm64
 #   ASBX_DISTRO=ubuntu-24.04 ./vm/build-image.sh   # a pinned older release
+#   ASBX_DISTRO=fedora ./vm/build-image.sh         # fedora 44 arm64
 #   ASBX_IMAGE_SIZE=40G ./vm/build-image.sh
 #
-# Anything with cloud-init, apt, and wireguard-tools/nftables/socat in its
-# archive will work; the listed choices are the ones that have been run.
-# Point ASBX_IMAGE_URL/ASBX_IMAGE_SHA_URL/ASBX_IMAGE_SHA_ALGO elsewhere for
-# something else.
+# Anything with cloud-init and wireguard-tools/nftables/socat available (in
+# the image's own archive, or installable through it) will work; the listed
+# choices are the ones that have been run. Point ASBX_IMAGE_URL/
+# ASBX_IMAGE_SHA_URL/ASBX_IMAGE_SHA_ALGO/ASBX_FAMILY elsewhere for something
+# else - FAMILY has to name one of agentsandbox.vm.guest_families' entries,
+# since that is what the guest bootstrap actually branches on.
 set -euo pipefail
 
 IMAGES_DIR="${ASBX_HOME:-$HOME/.agentsandbox}/images"
@@ -25,37 +28,49 @@ IMAGE_SIZE="${ASBX_IMAGE_SIZE:-20G}"
 DISTRO="${ASBX_DISTRO:-debian}"
 
 # All of these are "generic cloud" images: cloud-init built in, small, and
-# carrying wireguard-tools, nftables and socat in the archive - what the guest
-# bootstrap needs and cannot install for itself once the tunnel is the only way
-# out.
+# carrying (or able to install, once prepared) wireguard-tools, nftables and
+# socat - what the guest bootstrap needs and cannot install for itself once
+# the tunnel is the only way out.
 #
-# The checksum algorithm is per-distro, not cosmetic: Debian publishes
-# SHA512SUMS, Ubuntu SHA256SUMS. Verifying a SHA-256 file with `shasum -a 512`
-# does not fail cleanly, it just never matches.
+# The checksum *format*, not just the algorithm, is per-distro: Debian
+# publishes SHA512SUMS and Ubuntu SHA256SUMS in the same coreutils
+# "<hash> file" style; Fedora publishes a single PGP-clearsigned file with
+# "SHA256 (file) = hash" lines, which the shared verification block below
+# cannot parse the same way - it gets its own branch.
 #
-# `debian` and `ubuntu` are aliases for the current stable release of each and
-# will move over time. That is safe here only because the *image name* always
-# carries the version: an alias that moves produces ubuntu-26.04 rather than
-# quietly rebuilding something called "ubuntu". Name the release explicitly
-# when you want it pinned.
+# `debian`, `ubuntu` and `fedora` are aliases for the current stable release
+# of each and will move over time. That is safe here only because the
+# *image name* always carries the version: an alias that moves produces
+# ubuntu-26.04 rather than quietly rebuilding something called "ubuntu".
+# Name the release explicitly when you want it pinned.
 case "$DISTRO" in
     debian | debian-13)
         DEFAULT_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2"
         DEFAULT_SHA_URL="https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
         DEFAULT_ALGO=512
         DEFAULT_NAME=debian-13
+        FAMILY=debian
         ;;
     ubuntu | ubuntu-26.04 | resolute)
         DEFAULT_URL="https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-arm64.img"
         DEFAULT_SHA_URL="https://cloud-images.ubuntu.com/resolute/current/SHA256SUMS"
         DEFAULT_ALGO=256
         DEFAULT_NAME=ubuntu-26.04
+        FAMILY=debian
         ;;
     ubuntu-24.04 | noble)
         DEFAULT_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img"
         DEFAULT_SHA_URL="https://cloud-images.ubuntu.com/noble/current/SHA256SUMS"
         DEFAULT_ALGO=256
         DEFAULT_NAME=ubuntu-24.04
+        FAMILY=debian
+        ;;
+    fedora | fedora-44)
+        DEFAULT_URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-44-1.7.aarch64.qcow2"
+        DEFAULT_SHA_URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/aarch64/images/Fedora-Cloud-44-1.7-aarch64-CHECKSUM"
+        DEFAULT_ALGO=256
+        DEFAULT_NAME=fedora-44
+        FAMILY=fedora
         ;;
     *)
         cat >&2 <<'USAGE'
@@ -64,9 +79,10 @@ case "$DISTRO" in
      debian, debian-13          Debian 13 (trixie)
      ubuntu, ubuntu-26.04       Ubuntu 26.04 LTS (resolute) - current LTS
      ubuntu-24.04, noble        Ubuntu 24.04 LTS
+     fedora, fedora-44          Fedora Cloud Base 44
 
    For anything else, set ASBX_IMAGE_URL, ASBX_IMAGE_SHA_URL,
-   ASBX_IMAGE_SHA_ALGO and ASBX_IMAGE_NAME explicitly.
+   ASBX_IMAGE_SHA_ALGO, ASBX_IMAGE_NAME and ASBX_FAMILY explicitly.
 USAGE
         exit 2
         ;;
@@ -75,6 +91,7 @@ esac
 IMAGE_URL="${ASBX_IMAGE_URL:-$DEFAULT_URL}"
 IMAGE_SHA_URL="${ASBX_IMAGE_SHA_URL:-$DEFAULT_SHA_URL}"
 IMAGE_SHA_ALGO="${ASBX_IMAGE_SHA_ALGO:-$DEFAULT_ALGO}"
+FAMILY="${ASBX_FAMILY:-$FAMILY}"
 
 # Images are named, and boxes record which one they were built from, so
 # rebuilding one distro cannot silently rebase boxes onto another.
@@ -94,28 +111,49 @@ fi
 
 echo "==> verifying checksum (sha$IMAGE_SHA_ALGO)"
 sums="SHA${IMAGE_SHA_ALGO}SUMS"
+if [ "$FAMILY" = "fedora" ]; then
+    sums="CHECKSUM"
+fi
 if ! curl -fsL --proto '=https' -o "$sums" "$IMAGE_SHA_URL"; then
     echo "!! could not fetch checksums" >&2
     exit 1
 fi
 
-# Ubuntu writes "<hash> *<file>" (the coreutils binary marker), Debian writes
-# "<hash>  <file>". Anchoring on the filename alone covers both; anchoring on
-# a leading space silently matched nothing on Ubuntu, which would have looked
-# like "not listed" rather than a format difference.
-line="$(grep -E "[ *]${qcow}\$" "$sums" || true)"
-if [ -z "$line" ]; then
-    echo "!! $qcow is not listed in $sums" >&2
-    exit 1
+if [ "$FAMILY" = "fedora" ]; then
+    # Fedora's -CHECKSUM file is one PGP-clearsigned file with "SHA256
+    # (file) = hash" lines, not the coreutils "hash  file"/"hash *file"
+    # style `shasum -c` expects - compared by hand instead. Same trust
+    # level as the coreutils path below: verified over HTTPS, not
+    # additionally checking the PGP signature itself.
+    expected="$(grep -F "SHA256 (${qcow}) = " "$sums" | sed 's/.* = //')"
+    if [ -z "$expected" ]; then
+        echo "!! $qcow is not listed in $sums" >&2
+        exit 1
+    fi
+    actual="$(shasum -a 256 "$qcow" | awk '{print $1}')"
+    if [ "$expected" != "$actual" ]; then
+        echo "!! checksum mismatch - refusing to build an image we cannot verify" >&2
+        exit 1
+    fi
+else
+    # Ubuntu writes "<hash> *<file>" (the coreutils binary marker), Debian writes
+    # "<hash>  <file>". Anchoring on the filename alone covers both; anchoring on
+    # a leading space silently matched nothing on Ubuntu, which would have looked
+    # like "not listed" rather than a format difference.
+    line="$(grep -E "[ *]${qcow}\$" "$sums" || true)"
+    if [ -z "$line" ]; then
+        echo "!! $qcow is not listed in $sums" >&2
+        exit 1
+    fi
+    if [ "$(printf '%s\n' "$line" | wc -l)" -ne 1 ]; then
+        echo "!! $qcow matched more than one line in $sums" >&2
+        exit 1
+    fi
+    printf '%s\n' "$line" | shasum -a "$IMAGE_SHA_ALGO" -c - || {
+        echo "!! checksum mismatch - refusing to build an image we cannot verify" >&2
+        exit 1
+    }
 fi
-if [ "$(printf '%s\n' "$line" | wc -l)" -ne 1 ]; then
-    echo "!! $qcow matched more than one line in $sums" >&2
-    exit 1
-fi
-printf '%s\n' "$line" | shasum -a "$IMAGE_SHA_ALGO" -c - || {
-    echo "!! checksum mismatch - refusing to build an image we cannot verify" >&2
-    exit 1
-}
 
 if ! command -v qemu-img >/dev/null 2>&1; then
     cat >&2 <<'EOF'
@@ -137,6 +175,7 @@ cat >"$IMAGES_DIR/$IMAGE_NAME.json" <<EOF
 {
   "name": "$IMAGE_NAME",
   "distro": "$DISTRO",
+  "family": "$FAMILY",
   "image_url": "$IMAGE_URL",
   "size": "$IMAGE_SIZE",
   "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",

@@ -119,6 +119,59 @@ def test_guest_gets_the_ca_certificate_but_never_the_ca_key(session, driver):
     assert session.paths.ca_key.read_text() not in rendered
 
 
+def test_the_ca_cert_path_follows_the_guest_family(session, driver):
+    """Debian's ca-certificates and Fedora's ca-trust disagree on where a
+    locally-added CA cert goes - the rendered write_files entry has to
+    match whichever family this session's image actually is."""
+    from agentsandbox.vm.guest_families import FEDORA
+
+    debian_files = files_in(user_data(session))
+    assert "/usr/local/share/ca-certificates/asbx-session-ca.crt" in debian_files
+
+    fedora_files = files_in(user_data(session, family=FEDORA))
+    assert "/etc/pki/ca-trust/source/anchors/asbx-session-ca.crt" in fedora_files
+    assert "/usr/local/share/ca-certificates/asbx-session-ca.crt" not in fedora_files
+
+
+def test_family_env_carries_the_facts_bootstrap_sh_needs(session, driver):
+    from agentsandbox.vm.guest_families import FEDORA
+
+    files = files_in(user_data(session, family=FEDORA))
+    env = files["/etc/asbx/family.env"]
+    assert "CA_CERT_SOURCE_DIR=/etc/pki/ca-trust/source/anchors" in env
+    assert "CA_BUNDLE_PATH=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem" in env
+    assert "CA_TRUST_UPDATE_CMD='update-ca-trust extract'" in env
+    # Fedora's ca-trust extract regenerates the whole bundle each time -
+    # nothing to clean up, unlike Debian's hash-keyed symlink farm.
+    assert "STALE_CERT_CLEANUP_CMD=''" in env
+
+
+def test_ssh_unit_names_and_the_nobody_group_follow_the_guest_family(session, driver):
+    from agentsandbox.vm.guest_families import FEDORA
+
+    rendered = user_data(
+        session,
+        family=FEDORA,
+        ssh_host_key="HOSTKEY",
+        ssh_host_pub="ssh-ed25519 AAAA host",
+        ssh_authorized_key="ssh-ed25519 AAAA client",
+    )
+    payload = json.loads(rendered.split("\n", 1)[1])
+    flat = " ".join(
+        " ".join(c) if isinstance(c, list) else str(c) for c in payload["runcmd"]
+    )
+    assert "sshd.service" in flat
+    assert "ssh.socket" not in flat  # Fedora has no socket-activated unit to unmask
+
+    files = files_in(rendered)
+    sshd_vsock = files["/etc/systemd/system/asbx-sshd-vsock.service"]
+    assert "sshd.service" in sshd_vsock
+
+    forward_unit = files["/etc/systemd/system/asbx-forward@.service"]
+    assert "Group=nobody" in forward_unit
+    assert "Group=nogroup" not in forward_unit
+
+
 def test_guest_gets_the_fail_closed_firewall(session, driver):
     files = files_in(user_data(session))
     nft = files["/etc/nftables.conf"]

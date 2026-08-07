@@ -172,7 +172,21 @@ def test_unquoted_heredocs_only_reference_variables_the_script_sets(script):
     text = script.read_text()
     assigned = set(re.findall(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=", text, re.M))
     assigned |= set(re.findall(r"for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in", text))
+    # `IFS= read -r -d '' NAME <<'BLOCK'` - a per-family runcmd fragment
+    # built into a variable rather than assigned with `=`, so the pattern
+    # above never sees it.
+    assigned |= set(re.findall(r"read\s+-r\s+-d\s+''\s+([A-Za-z_][A-Za-z0-9_]*)", text))
     assigned |= {"HOME", "PATH", "PWD", "USER", "SHELL", "TMPDIR", "1", "@"}
+    # Sourced from /etc/asbx/family.env (rendered by cloudinit.py's
+    # render_family_env) - a real external file at boot time, so grep can't
+    # see the assignment; its fixed set of field names is added by hand.
+    if re.search(r"\.\s+/etc/asbx/family\.env", text):
+        assigned |= {
+            "CA_CERT_SOURCE_DIR",
+            "CA_BUNDLE_PATH",
+            "CA_TRUST_UPDATE_CMD",
+            "STALE_CERT_CLEANUP_CMD",
+        }
 
     unknown = []
     for number, line in _unquoted_heredoc_bodies(text):
@@ -192,19 +206,7 @@ def test_the_provisioning_cloud_config_renders_and_parses():
     logs an error nobody reads, and the image comes out looking prepared. This
     catches it on the host, where the message goes to a person.
     """
-    yaml = pytest.importorskip("yaml")
-
-    text = (REPO / "vm/prepare-image.sh").read_text()
-    heredoc = text[text.index('cat >"$WORK/user-data" <<EOF') : text.index('cat >"$WORK/meta-data"')]
-
-    work = Path(tempfile.mkdtemp())
-    script = f'set -euo pipefail\nWORK={work}\nPACKAGES="wireguard-tools socat"\n{heredoc}'
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-
-    rendered = (work / "user-data").read_text()
-    assert rendered.startswith("#cloud-config")
-    document = yaml.safe_load(rendered.split("\n", 1)[1])
+    document = _prepare_cloud_config(packages="wireguard-tools socat")
     assert document["runcmd"]
     assert "wireguard-tools" in document["packages"]
 
@@ -233,18 +235,7 @@ def test_the_wait_online_dropin_is_a_valid_unit_file():
     \\n, which systemd ignores - the unit kept its default two-minute timeout
     and nothing reported a problem. Delivered as a YAML file it cannot happen.
     """
-    yaml = pytest.importorskip("yaml")
-
-    text = (REPO / "vm/prepare-image.sh").read_text()
-    heredoc = text[text.index('cat >"$WORK/user-data" <<EOF') : text.index('cat >"$WORK/meta-data"')]
-    work = Path(tempfile.mkdtemp())
-    result = subprocess.run(
-        ["bash", "-c", f'set -euo pipefail\nWORK={work}\nPACKAGES="socat"\n{heredoc}'],
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 0, result.stderr
-
-    document = yaml.safe_load((work / "user-data").read_text().split("\n", 1)[1])
+    document = _prepare_cloud_config()
     dropin = next(
         f for f in document["write_files"] if "wait-online" in f["path"]
     )
@@ -255,17 +246,38 @@ def test_the_wait_online_dropin_is_a_valid_unit_file():
     assert "\\n" not in dropin["content"]    # literal backslash-n means it failed
 
 
-def _prepare_cloud_config():
+def _prepare_cloud_config(*, packages: str = "socat") -> dict:
+    """Render prepare-image.sh's user-data heredoc standalone, the way the
+    script does, and parse it.
+
+    The heredoc references a handful of per-family runcmd fragments
+    (GRUB_RUNCMD, SSH_DISABLE_RUNCMD, NETWORK_BACKEND_RUNCMD, PKG_VERIFY_CMD)
+    that the script itself builds earlier, branching on which guest family
+    is being prepared - stood in for here with harmless placeholders, since
+    what these tests check (the cloud-config parses, the wait-online
+    drop-in is well-formed, netplan/DHCP handling) is the same regardless
+    of family.
+    """
     yaml = pytest.importorskip("yaml")
     text = (REPO / "vm/prepare-image.sh").read_text()
     heredoc = text[text.index('cat >"$WORK/user-data" <<EOF') : text.index('cat >"$WORK/meta-data"')]
     work = Path(tempfile.mkdtemp())
-    result = subprocess.run(
-        ["bash", "-c", f'set -euo pipefail\nWORK={work}\nPACKAGES="socat"\n{heredoc}'],
-        capture_output=True, text=True,
+    script = (
+        "set -euo pipefail\n"
+        f"WORK={work}\n"
+        f'PACKAGES="{packages}"\n'
+        "GRUB_RUNCMD='  - [ \"true\" ]'\n"
+        "SSH_DISABLE_RUNCMD='  - [ \"true\" ]'\n"
+        "NETWORK_BACKEND_RUNCMD='  - [ \"true\" ]'\n"
+        'PKG_VERIFY_CMD="true"\n'
+        f"{heredoc}"
     )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    return yaml.safe_load((work / "user-data").read_text().split("\n", 1)[1])
+
+    rendered = (work / "user-data").read_text()
+    assert rendered.startswith("#cloud-config")
+    return yaml.safe_load(rendered.split("\n", 1)[1])
 
 
 def test_netplan_is_removed_so_its_generator_cannot_override_the_timeout():

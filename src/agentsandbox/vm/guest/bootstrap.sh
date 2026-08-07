@@ -45,6 +45,12 @@ log() { echo "[asbx-bootstrap] $*"; }
 # case: the tunnel can be up while the capability file is still world-readable.
 trap 'rc=$?; log "FAILED at line $LINENO (exit $rc)"; exit $rc' ERR
 
+# Facts that differ across guest families (CA trust paths/commands, the
+# ssh unit name) - written by cloudinit.py's render_family_env, so this
+# script stays the same one file across every family rather than being
+# templated or forked per distro.
+. /etc/asbx/family.env
+
 # -- trust the session CA ------------------------------------------------------
 # The certificate only: the CA private key stays on the Mac, so nothing in here
 # can mint certificates for anything.
@@ -53,34 +59,37 @@ trap 'rc=$?; log "FAILED at line $LINENO (exit $rc)"; exit $rc' ERR
 # mitmproxy with a cert this CA signed, so a failure here turns into
 # "certificate verify failed" on everything - which is why the result is
 # checked rather than swallowed.
-CA_SRC=/usr/local/share/ca-certificates/asbx-session-ca.crt
+CA_SRC="$CA_CERT_SOURCE_DIR/asbx-session-ca.crt"
 if [ -s "$CA_SRC" ]; then
     # A stale CA from a previous run of this disk must go: boxes reuse
     # the disk but get a fresh CA every boot, so the old one is worthless and
-    # its presence is confusing.
-    find /etc/ssl/certs -name 'asbx-session-ca.pem' -delete 2>/dev/null || true
+    # its presence is confusing. Empty on families whose trust-update command
+    # regenerates the whole bundle from source each time, with nothing to leak.
+    if [ -n "$STALE_CERT_CLEANUP_CMD" ]; then
+        eval "$STALE_CERT_CLEANUP_CMD" 2>/dev/null || true
+    fi
 
     # `|| true` matters: this script runs under `set -o pipefail`, and a
     # non-zero exit here would abort the whole bootstrap - taking the tunnel
     # with it - when the useful response is to report and carry on.
-    update-ca-certificates 2>&1 | sed 's/^/[asbx-bootstrap] ca: /' || true
+    eval "$CA_TRUST_UPDATE_CMD" 2>&1 | sed 's/^/[asbx-bootstrap] ca: /' || true
 
     # Verify rather than assume: the bundle must actually contain our CA, or
     # every https request in this guest fails with a confusing TLS error.
-    if grep -qF "$(sed -n '2p' "$CA_SRC")" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then
+    if grep -qF "$(sed -n '2p' "$CA_SRC")" "$CA_BUNDLE_PATH" 2>/dev/null; then
         log "session CA is in the system trust store"
     else
-        log "WARNING: session CA is not in /etc/ssl/certs/ca-certificates.crt;"
+        log "WARNING: session CA is not in $CA_BUNDLE_PATH;"
         log "         https inside the guest will fail certificate verification"
     fi
 
     # Language runtimes that ship their own trust stores need pointing at it.
-    cat >/etc/profile.d/asbx-ca.sh <<'EOF'
-export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
-export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+    cat >/etc/profile.d/asbx-ca.sh <<EOF
+export SSL_CERT_FILE=$CA_BUNDLE_PATH
+export REQUESTS_CA_BUNDLE=$CA_BUNDLE_PATH
+export NODE_EXTRA_CA_CERTS=$CA_BUNDLE_PATH
+export CURL_CA_BUNDLE=$CA_BUNDLE_PATH
+export GIT_SSL_CAINFO=$CA_BUNDLE_PATH
 EOF
     chmod 0644 /etc/profile.d/asbx-ca.sh
 else
@@ -115,7 +124,16 @@ if [ -n "$IFACE" ]; then
         sleep 0.25
     done
 fi
-systemctl enable --now nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
+# `enable --now` on its own is not enough to trust: nftables.service's
+# default ExecStart doesn't necessarily load /etc/nftables.conf at all - on
+# Fedora it loads /etc/sysconfig/nftables.conf by convention, an empty/
+# default file on a fresh image, so the service starts successfully having
+# loaded none of our ruleset, and the `||` fallback below it never triggers
+# because nothing failed. Loading our own file explicitly and always,
+# regardless of what the service unit's own default did, is what actually
+# guarantees the fail-closed ruleset is the one in the kernel.
+systemctl enable --now nftables >/dev/null 2>&1 || true
+nft -f /etc/nftables.conf
 
 log "bringing up the tunnel"
 # This script owns the tunnel's lifecycle, not systemd. On a reused box

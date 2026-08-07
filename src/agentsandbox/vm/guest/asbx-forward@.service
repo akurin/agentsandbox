@@ -9,7 +9,7 @@ Restart=on-failure
 RestartSec=2
 # The forwarder only ever touches loopback and the vsock device.
 User=nobody
-Group=nogroup
+Group={nobody_group}
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

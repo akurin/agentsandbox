@@ -31,6 +31,7 @@ credentials - talks to mitmproxy over a unix socket and never returns a secret.
 |---|---|
 | CLI, box/session lifecycle, argument parsing | `src/agentsandbox/cli.py`, `manager.py`, `box.py`, `session.py` |
 | Golden image build + guest bootstrap | `vm/build-image.sh`, `vm/prepare-image.sh`, `src/agentsandbox/vm/cloudinit.py`, `vm/guest/*` |
+| Guest family facts (CA trust, ssh unit, ...) | `src/agentsandbox/vm/guest_families.py` |
 | vfkit driver (disk, NIC socket, vsock devices) | `src/agentsandbox/vm/vfkit.py` |
 | L2 gateway - the actual fail-closed control | `src/agentsandbox/vm/gateway.py` |
 | Per-session WireGuard identity | `src/agentsandbox/wireguard.py` |
@@ -155,9 +156,25 @@ cloud-init finishes, and halts the boot (or just logs, under
 gateway, not the control - it catches guest-side misconfiguration so it fails
 loudly instead of looking like a working sandbox.
 
+**Guest families.** `vm/guest_families.py` holds the small, closed set of
+facts that actually differ between systemd-based guest distros - where a
+locally-added CA cert goes and how the trust store gets refreshed, the
+openssh-server unit name, the `nobody` group - looked up from the image's
+own metadata (`"family": "debian"|"fedora"`, defaulting to `"debian"` for
+every image built before that field existed) and threaded through
+`cloudinit.py`'s rendering. `bootstrap.sh` itself stays one script shared
+across every family: it sources `/etc/asbx/family.env`, written once from
+that same table, rather than being templated or forked per distro.
+Everything else - nftables, wg-quick, sudoers, package installation via
+cloud-init's own `packages:` directive - is already identical across every
+family this covers. Deliberately scoped to systemd-based distros only: the
+entire service-activation strategy is `systemctl`/unit-file based with no
+non-systemd analog, so a family like Alpine would need a parallel
+guest-integration backend, not a new table entry.
+
 ## Verified by the test suite
 
-`make test` - 512 passing, plus 3 skipped when outbound unix sockets are
+`make test` - 534 passing, plus 3 skipped when outbound unix sockets are
 blocked (some sandboxed CI environments do this; a real Mac shell does not) -
 no network, no VM boot required.
 
@@ -203,12 +220,21 @@ no network, no VM boot required.
   read-only flag reaching the device list), cloud-init (CA cert but never the
   CA key, 0600 tunnel config, `builder` account with no capability access,
   IPv6 off, no default route)
+- guest families: unknown/missing family names fall back to debian rather
+  than erroring, an image's own metadata resolves to the right family
+  (including the legacy unnamed image), rendered cloud-init actually differs
+  between families where it should (CA cert path, `/etc/asbx/family.env`,
+  the ssh unit name and `nobody` group in the two family-specific unit
+  files) and is identical where it shouldn't
 - lifecycle: per-session identities, revocation on stop, purge, box vs.
   session state reconciliation after a crashed supervisor, CLI paths
 
 ## Verified on real hardware
 
-A guest booted under vfkit on macOS 26 / Apple silicon, Debian 13 cloud image:
+A guest booted under vfkit on macOS 26 / Apple silicon, Debian 13 cloud image
+(and, for the guest-family-specific pieces - CA trust, the ssh unit name,
+nftables activation, systemd-networkd vs NetworkManager - Fedora 44 as well,
+see "Guest families" below):
 
 - the guest boots, cloud-init consumes the NoCloud seed, and the bootstrap runs
 - the L2 gateway serves DHCP, answers ARP and relays WireGuard; `wg show` in the
@@ -246,19 +272,31 @@ security-relevant rather than merely broken:
    refuses to start if any of them is non-empty.
 2. **The guest was told mitmproxy's real (random) port** instead of the
    gateway's fixed virtual endpoint, so every handshake was dropped.
-3. **The tunnel's own resolver was killed by our own hooks** - `udp_start`,
+3. **Fedora's `nftables.service` doesn't load `/etc/nftables.conf` by its own
+   default** - it loads `/etc/sysconfig/nftables.conf` by convention, empty
+   on a fresh image, so `systemctl enable --now nftables` "succeeds" having
+   loaded none of the fail-closed ruleset, and a fallback keyed on that
+   command failing never triggers because nothing failed. `nft -f
+   /etc/nftables.conf` now runs unconditionally, not as a fallback.
+4. **Fedora Cloud Base ships no `/etc/pki/tls/certs/ca-bundle.crt`** - the
+   symlink a full Fedora install has by convention isn't part of the
+   minimal cloud image, so a locally-added CA cert never reaches anything
+   pointed at that path; curl fails to even open the file. The real,
+   always-present output of `update-ca-trust extract` is
+   `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`.
+5. **The tunnel's own resolver was killed by our own hooks** - `udp_start`,
    `tcp_start` and `server_connect` all refused `10.0.0.53:53` before
    `dns_request` could allow it.
-4. **`systemd-networkd-wait-online` stalled every boot for two minutes**,
+6. **`systemd-networkd-wait-online` stalled every boot for two minutes**,
    because cloud-init defaults the NIC to DHCP and nothing answered. The
    gateway now serves DHCP itself - an address and netmask, never a router or
    DNS option.
-5. **netcheck read `ip route show default`**, which is empty under `wg-quick`'s
+7. **netcheck read `ip route show default`**, which is empty under `wg-quick`'s
    policy routing; it asks `ip route get` now.
-6. **Teardown closed the gateway sockets under a selecting thread** (EBADF), and
+8. **Teardown closed the gateway sockets under a selecting thread** (EBADF), and
    `os.kill(0, …)` treated an unset pid as alive - the latter would have
    signalled the whole process group.
-7. **Debian's `systemd-networkd` was already running before cloud-init wrote
+9. **Debian's `systemd-networkd` was already running before cloud-init wrote
    the guest's network config.** `enable --now` on an already-active unit is
    a no-op start, so the interface never rescanned - the link WireGuard's
    packets go out on stayed unmanaged (no address, administratively down),
