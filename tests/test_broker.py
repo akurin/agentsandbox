@@ -16,7 +16,13 @@ import pytest
 
 
 from agentsandbox.audit import AuditLog
-from agentsandbox.broker.core import BrokerCore, BrokerRequest, BrokerResponse, scrub_secret
+from agentsandbox.broker.core import (
+    BrokerCore,
+    BrokerRequest,
+    BrokerResponse,
+    scrub_minted_credentials,
+    scrub_secret,
+)
 from agentsandbox.broker.upstream import UpstreamResponse
 from agentsandbox.capabilities import AwsAutosignSpec, CapabilitySpec, InjectionSpec, SecretRef
 from agentsandbox.errors import BrokerError, UpstreamError
@@ -411,6 +417,24 @@ def test_body_injection_still_refuses_the_placeholder_in_a_url(session, store, e
 AWS_SIGNING_KEYS = {"access_key_id": "AKIDEXAMPLE", "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}
 DUMMY_ACCESS_KEY_ID = "AKIADUMMYFORTESTS0001"
 
+ASSUME_ROLE_RESPONSE = b"""<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleResult>
+    <Credentials>
+      <AccessKeyId>ASIAREALTEMPKEY00001</AccessKeyId>
+      <SecretAccessKey>realSecretAccessKeyValue1234567890</SecretAccessKey>
+      <SessionToken>realSessionTokenValueAbcdef1234567890</SessionToken>
+      <Expiration>2026-08-07T12:00:00Z</Expiration>
+    </Credentials>
+    <AssumedRoleUser>
+      <AssumedRoleId>AROAEXAMPLE:session</AssumedRoleId>
+      <Arn>arn:aws:sts::590183945173:assumed-role/deploy-role/session</Arn>
+    </AssumedRoleUser>
+  </AssumeRoleResult>
+  <ResponseMetadata>
+    <RequestId>abc-123</RequestId>
+  </ResponseMetadata>
+</AssumeRoleResponse>"""
+
 
 def _autosign_core(
     session, store, executor, *, extra_secrets: dict | None = None, access_key_id: str = DUMMY_ACCESS_KEY_ID
@@ -460,6 +484,26 @@ def test_aws_autosign_signs_with_the_signing_secret(session, store, executor):
     assert "us-east-1/sts/aws4_request" in headers["Authorization"]
     assert "X-Amz-Date" in headers
     assert headers["Host"] == "api.github.com"
+
+
+def test_aws_autosign_scrubs_a_minted_credential_from_the_response(session, store, executor):
+    """A dummy-signed sts:AssumeRole call, re-signed with the real signing
+    secret, can genuinely succeed - the real profile may well be allowed to
+    assume the role the guest asked for. Left unscrubbed, AWS's answer would
+    be a fresh, fully-working temporary credential the guest could use
+    directly for every subsequent call, bypassing the broker entirely."""
+    executor.response = UpstreamResponse(
+        status_code=200,
+        headers=[("Content-Type", "text/xml")],
+        body=ASSUME_ROLE_RESPONSE,
+    )
+    core = _autosign_core(session, store, executor)
+    response = core.handle(_autosign_request(body=b"Action=AssumeRole&RoleArn=x"))
+
+    assert response.decision == "allow"
+    assert b"ASIAREALTEMPKEY00001" not in response.body
+    assert b"realSecretAccessKeyValue1234567890" not in response.body
+    assert DUMMY_ACCESS_KEY_ID.encode() in response.body
 
 
 def test_aws_autosign_region_and_service_come_from_the_guests_own_scope(session, store, executor):
@@ -566,6 +610,35 @@ def test_body_injection_composes_with_aws_autosign(session, store, executor):
     headers = dict(executor.last["headers"] + executor.last["credential_headers"])
     assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
     assert "us-east-1/s3/aws4_request" in headers["Authorization"]
+
+
+def test_body_injection_composed_with_autosign_also_scrubs_minted_credentials(session, store, executor):
+    """The same scrubbing `_perform_aws_autosign` gets applies on the
+    combined body-injection-plus-autosign path too - it shares the same
+    executor.execute call site, so a minted credential could leak here just
+    as easily."""
+    executor.response = UpstreamResponse(
+        status_code=200,
+        headers=[("Content-Type", "text/xml")],
+        body=ASSUME_ROLE_RESPONSE,
+    )
+    core = _autosign_core(session, store, executor, extra_secrets={"github-token": SECRET})
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="deploy-secret",
+            hosts=["api.github.com"],
+            methods=["PUT"],
+            secret=SecretRef(service="github-token"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    body = json.dumps({"Environment": {"Variables": {"API_KEY": token}}}).encode()
+    response = core.handle(_autosign_request(capability=token, method="PUT", body=body, service="s3"))
+
+    assert response.decision == "allow"
+    assert b"ASIAREALTEMPKEY00001" not in response.body
+    assert b"realSecretAccessKeyValue1234567890" not in response.body
+    assert DUMMY_ACCESS_KEY_ID.encode() in response.body
 
 
 def test_aws_autosign_signing_secret_must_be_a_json_bundle(session, store, executor):
@@ -807,6 +880,33 @@ def test_request_and_response_round_trip_over_json():
 
 def test_scrub_secret_handles_empty_secret():
     assert scrub_secret(b"body", "") == b"body"
+
+
+def test_scrub_minted_credentials_replaces_access_key_secret_and_token():
+    scrubbed = scrub_minted_credentials(ASSUME_ROLE_RESPONSE, "AKIADUMMY00000000000")
+    assert b"ASIAREALTEMPKEY00001" not in scrubbed
+    assert b"realSecretAccessKeyValue1234567890" not in scrubbed
+    assert b"realSessionTokenValueAbcdef1234567890" not in scrubbed
+    assert b"AKIADUMMY00000000000" in scrubbed
+    # Everything else survives - CDK still sees a well-formed, successful
+    # AssumeRole response, just with a credential that isn't real.
+    assert b"2026-08-07T12:00:00Z" in scrubbed
+    assert b"AssumedRoleUser" in scrubbed
+    assert b"arn:aws:sts::590183945173:assumed-role/deploy-role/session" in scrubbed
+
+
+def test_scrub_minted_credentials_is_a_noop_without_a_credentials_block():
+    body = (
+        b"<GetCallerIdentityResponse><GetCallerIdentityResult>"
+        b"<Account>590183945173</Account></GetCallerIdentityResult>"
+        b"</GetCallerIdentityResponse>"
+    )
+    assert scrub_minted_credentials(body, "AKIADUMMY00000000000") == body
+
+
+def test_scrub_minted_credentials_tolerates_malformed_xml():
+    body = b"not xml at all {"
+    assert scrub_minted_credentials(body, "AKIADUMMY00000000000") == body
 
 
 class CountingProvider(StaticResolver):  # noqa: F811

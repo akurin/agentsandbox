@@ -174,7 +174,14 @@ no network, no VM boot required.
   read from the guest's own signature scope, signing secret never cached,
   both credential-bundle key casings accepted, expired credentials refused,
   a secret backend failure turned into a clean denial rather than a dead
-  connection, signed headers split so a redirect can't carry them off-origin
+  connection, signed headers split so a redirect can't carry them off-origin,
+  a re-signed request that mints its own fresh credential (`sts:AssumeRole`
+  succeeding because the real signing profile actually can assume the role
+  the guest asked for, say) has that credential scrubbed from the response
+  before it reaches the guest - keyed on any `Credentials` element the
+  response happens to carry, not a fixed action list, so the call itself
+  still succeeds and tooling that depends on that (the CDK CLI, for one)
+  keeps working
 - `aws_profile` backend: resolves through an injectable session factory so
   tests never touch a real `~/.aws`, botocore errors (no such profile, an
   expired SSO login) turned into the same clean denial as any other secret

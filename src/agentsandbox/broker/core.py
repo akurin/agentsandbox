@@ -15,7 +15,9 @@ import base64
 import binascii
 import json
 import re
+import secrets
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -583,6 +585,7 @@ class BrokerCore:
                 credential_headers,
                 cap.max_response_bytes,
             )
+            upstream.body = scrub_minted_credentials(upstream.body, self.aws_autosign.access_key_id)
         else:
             # A SigV4-shaped Authorization header that isn't this session's
             # aws_autosign marker means the guest is authenticating with some
@@ -794,6 +797,7 @@ class BrokerCore:
             credential_headers,
             DEFAULT_MAX_RESPONSE_BYTES,
         )
+        upstream.body = scrub_minted_credentials(upstream.body, self.aws_autosign.access_key_id)
         if upstream.truncated:
             raise PolicyDenied(
                 "response_too_large",
@@ -852,6 +856,62 @@ def build_credential_headers(cap: Capability, secret: str) -> list[tuple[str, st
     if spec.kind == "header":
         return [(spec.header, spec.template.format(secret=secret))]
     raise PolicyDenied("unsupported_injection", f"cannot inject {spec.kind!r}")
+
+
+def scrub_minted_credentials(body: bytes, dummy_access_key_id: str) -> bytes:
+    """Replace a real, independently-usable AWS credential minted by a
+    re-signed request with the session's own dummy marker, before the
+    response reaches the guest.
+
+    A dummy-signed ``sts:AssumeRole`` (or ``GetSessionToken``, or similar)
+    re-signed with the real ``aws_autosign.signing_secret`` can genuinely
+    succeed - the real profile may well be allowed to assume the role the
+    guest asked for - and AWS's answer is then a fresh, fully-working
+    temporary credential. Forwarded as-is, that credential lets the guest
+    authenticate directly for every subsequent call, bypassing the broker
+    entirely - the whole point of ``aws_autosign`` undone in one response.
+
+    ``AssumeRole`` itself is not denied: tooling that depends on it
+    succeeding (the CDK CLI falls back to its base credential gracefully
+    when it fails, but plenty of other tools do not) keeps working. Only
+    ``AccessKeyId`` is rewritten to the session's *existing* dummy marker
+    rather than a freshly minted one - `_looks_like_dummy_aws_request`
+    already recognises it, in the addon process, with no new state to
+    synchronise across that boundary - and ``SecretAccessKey``/
+    ``SessionToken`` become meaningless values, since the broker never
+    verifies the guest's own signature, only the access key.
+
+    Not scoped to STS or to ``AssumeRole`` by name: any AWS-autosigned
+    response carrying a ``Credentials`` element (matched by local name,
+    ignoring the namespace prefix) with these three children is scrubbed,
+    regardless of which service or action produced it - Cognito Identity's
+    ``GetCredentialsForIdentity`` has the same shape under a different
+    service. A response with no such element - the overwhelming majority,
+    ``GetCallerIdentity``, every S3 call, ... - passes through byte-for-byte
+    unchanged, as does a malformed or non-XML body.
+    """
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return body
+
+    changed = False
+    for elem in root.iter():
+        if elem.tag.rpartition("}")[-1] != "Credentials":
+            continue
+        for child in elem:
+            replacement = {
+                "AccessKeyId": dummy_access_key_id,
+                "SecretAccessKey": secrets.token_urlsafe(30),
+                "SessionToken": secrets.token_urlsafe(60),
+            }.get(child.tag.rpartition("}")[-1])
+            if replacement is not None:
+                child.text = replacement
+                changed = True
+
+    if not changed:
+        return body
+    return ET.tostring(root, encoding="utf-8")
 
 
 def scrub_secret(body: bytes, secret: str) -> bytes:
