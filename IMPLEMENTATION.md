@@ -213,37 +213,19 @@ A guest booted under vfkit on macOS 26 / Apple silicon, Debian 13 cloud image:
   DNS hook refuses names outside the session allowlist
 - guest diagnostics survive a guest that powers itself off, via the virtio-fs
   log share, and `asbx box diag` collects them in one command
-
-Since then, in ordinary interactive use rather than a formal test pass: real
-`--mount` shares into a running guest, and the vsock-based SSH channel
-(`box ssh`, plus ad-hoc `ssh -L` tunnels riding the same connection) reaching
-a real process listening inside the guest - including forwarding a port an
-in-guest process chose at runtime, which `--forward` itself can't do since it
-needs the port named at `box start`. `aws_autosign` was exercised end to end
-against real AWS traffic from a full `cdk deploy` - `sts:GetCallerIdentity`,
-CloudFormation, and an S3 asset upload with SSE-KMS, none of it declared to
-`asbx` in advance beyond the signing secret.
-
-### Bugs real AWS traffic found
-
-1. **A secret backend failing (a signing-credential file with the wrong
-   permissions, in this case) killed the broker connection outright.**
-   `BrokerCore.handle` only caught `PolicyDenied`/`UpstreamError`; a
-   `BrokerError` propagated past it, the per-connection handler thread died,
-   and the guest saw an opaque "broker unavailable" for what was actually a
-   precise, fixable `chmod` away. Now caught and turned into a clean
-   `502 secret_unavailable` naming the real problem.
-2. **A dangling `x-amz-sdk-checksum-algorithm` header failed real S3 uploads**
-   that a synthetic signing test never would have: the header itself signs
-   and verifies fine, but S3 separately enforces that it never appears
-   without a matching `x-amz-checksum-*` value or trailer - both of which are
-   correctly stripped as stale once the body changes. Now stripped alongside
-   them.
-3. **`aws configure export-credentials` emits PascalCase
-   (`AccessKeyId`/`SecretAccessKey`/`SessionToken`/`Expiration`)**, not this
-   profile format's own snake_case - both are accepted now, so a host-side
-   refresh job can write that command's output to a file verbatim instead of
-   needing a reshaping step.
+- a real `--mount` share into a running guest, and the vsock-based SSH channel
+  (`box ssh`, plus ad-hoc `ssh -L` tunnels riding the same connection)
+  reaching a real process inside the guest, including a port the in-guest
+  process chose at runtime - which `--forward` itself can't do, since it
+  needs the port named at `box start`
+- `aws_autosign` re-signs real AWS traffic from a full `cdk deploy` -
+  `sts:GetCallerIdentity`, CloudFormation, and an S3 asset upload with
+  SSE-KMS - none of it declared to `asbx` in advance beyond the signing
+  secret
+- a brokered credential, end to end: a capability issued against a running
+  box, then presented from inside the guest, is recognized, resolved,
+  substituted into the real request, and the response scrubbed and returned
+  - confirmed via `broker.request`/`broker.response` in the audit log
 
 ### Bugs that first boot found
 
@@ -269,17 +251,22 @@ security-relevant rather than merely broken:
 6. **Teardown closed the gateway sockets under a selecting thread** (EBADF), and
    `os.kill(0, …)` treated an unset pid as alive - the latter would have
    signalled the whole process group.
+7. **Debian's `systemd-networkd` was already running before cloud-init wrote
+   the guest's network config.** `enable --now` on an already-active unit is
+   a no-op start, so the interface never rescanned - the link WireGuard's
+   packets go out on stayed unmanaged (no address, administratively down),
+   with no error anywhere: `wg-quick up` only configures wg0 itself, so the
+   guest believed the tunnel was fine while nothing left it. Bootstrap now
+   restarts the unit unconditionally and waits for the link to report
+   configured before continuing.
 
 ## Still not verified
 
-1. **A brokered credential from inside the guest, end to end.** The broker is
-   covered by tests and the placeholder path works host-side (`cap try`), but
-   no session has used a real Keychain credential from inside a booted guest.
-2. **`--forward`'s actual proxied connection.** The listener and its
+1. **`--forward`'s actual proxied connection.** The listener and its
    `[HOST:]GUEST` parsing are tested; the vsock hop to a real guest-side
    listener has been exercised via `box ssh`'s SSH channel, not via
    `--forward` itself.
-3. **HTTP/3 over QUIC.** Enabled and configured, but everything exercised so
+2. **HTTP/3 over QUIC.** Enabled and configured, but everything exercised so
    far negotiated HTTP/2 or HTTP/1.1.
 
 ## Known limitations

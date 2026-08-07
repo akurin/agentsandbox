@@ -94,7 +94,27 @@ fi
 # -- kernel and network --------------------------------------------------------
 sysctl --system >/dev/null 2>&1 || true
 
-systemctl enable --now systemd-networkd >/dev/null 2>&1 || true
+systemctl enable systemd-networkd >/dev/null 2>&1 || true
+# Some images (observed on Debian's cloud image) socket-activate
+# systemd-networkd very early in boot, well before cloud-init's write_files
+# stage puts 10-asbx.network on disk. `enable --now` is then a no-op start on
+# an already-active unit - it never rescans - so the link WireGuard's
+# handshake packets go out on stays permanently unmanaged: no address,
+# administratively down, nothing ever transmitted. The tunnel looks fine from
+# the guest's own side (`wg-quick up` only configures wg0 itself, it never
+# checks that the interface underneath can actually send anything), so this
+# fails silently: no error here, no error from wg-quick, just a guest that
+# never relays a single frame. `restart` guarantees a fresh scan against
+# whatever .network files exist right now, no matter when networkd first
+# came up.
+systemctl restart systemd-networkd >/dev/null 2>&1 || true
+IFACE=$(ls /sys/class/net 2>/dev/null | grep -m1 '^en')
+if [ -n "$IFACE" ]; then
+    for _ in $(seq 1 20); do
+        networkctl status "$IFACE" 2>/dev/null | grep -q "State:.*configured" && break
+        sleep 0.25
+    done
+fi
 systemctl enable --now nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
 
 log "bringing up the tunnel"
