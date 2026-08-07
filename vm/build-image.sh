@@ -203,13 +203,13 @@ cat <<EOF
 
     2. Use it, either in a new box:
 
-           asbx create NAME --project DIR --image $IMAGE_NAME
+           asbx box create NAME --image $IMAGE_NAME --mount HOST:GUEST
 
        or by moving an existing one, which rebuilds its disk from scratch
        and discards everything installed inside the guest:
 
-           asbx set NAME --image $IMAGE_NAME
-           asbx reset NAME
+           asbx box set NAME --image $IMAGE_NAME
+           asbx box reset NAME
 
     The prepare step boots the image once with ordinary networking to install
     wireguard-tools, nftables and socat. A guest can only reach the WireGuard

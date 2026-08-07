@@ -340,7 +340,7 @@ if [ -f "$WORK/signal/prepared" ] || [ -n "$console_report" ]; then
 
     echo ""
     echo "    $IMAGE_NAME can now bring up its tunnel."
-    echo "    Next: asbx create NAME --project DIR --image $IMAGE_NAME"
+    echo "    Next: asbx box create NAME --image $IMAGE_NAME --mount HOST:GUEST"
 else
     cat >&2 <<EOF
 

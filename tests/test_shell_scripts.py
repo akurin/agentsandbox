@@ -66,7 +66,7 @@ def test_no_unescaped_backticks_in_an_interpolating_heredoc(script):
 def test_the_build_banner_still_names_the_commands_it_recommends():
     """The symptom the backtick bug produced: a sentence with a hole in it."""
     banner = (REPO / "vm/build-image.sh").read_text()
-    for command in ("asbx create", "asbx set", "asbx reset", "prepare-image.sh"):
+    for command in ("asbx box create", "asbx box set", "asbx box reset", "prepare-image.sh"):
         assert command in banner
 
 
