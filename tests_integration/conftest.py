@@ -11,14 +11,22 @@ Everything under a box name of the form `it-<hex>` is this suite's own; nothing
 here ever touches a box you created by hand, even under a different
 `ASBX_HOME` - box names and session ids are unrelated across the two.
 
-Default image is `debian-13`, the same default `asbx box create` itself
-uses - this suite verifies the actual default experience, not a
-convenient stand-in for it. Override with `ASBX_TEST_IMAGE` (e.g.
-`ubuntu-26.04`) to run it against a different image.
+Every test that depends on ``test_image`` runs once per supported guest
+family (see ``FAMILY_IMAGES`` below), not just against Debian - a family's
+own packaging quirks (Fedora's wg-quick.target auto-starting the tunnel unit,
+its nftables.service loading a different config path, systemd-resolved
+blocking sshd's own D-Bus-backed PAM stack) are invisible to a suite that
+only ever boots one distro, which is exactly how a real "Failed Units: 1 /
+wg-quick@wg0.service" bug reached a user before any test caught it. A family
+whose image isn't built is skipped, not failed - `make vm-image` for one
+distro shouldn't block running the suite against another. Override with
+`ASBX_TEST_IMAGE` (e.g. `ubuntu-26.04`) to run against exactly one image
+instead of fanning out across every family.
 """
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 
@@ -29,11 +37,16 @@ from helpers import (
     current_session,
     gateway_stats,
     new_box_name,
+    ssh_run,
     wait_for_condition,
     wait_for_console,
 )
 
-DEFAULT_TEST_IMAGE = "debian-13"
+#: One representative image per supported `GuestFamily` - kept here rather
+#: than derived from `guest_families.FAMILIES` because a family name doesn't
+#: determine an image name (an image is a specific release build; a box
+#: could point at `fedora-45` just as well as `fedora-44`).
+FAMILY_IMAGES = {"debian": "debian-13", "fedora": "fedora-44"}
 
 
 def _integration_env_problem() -> str | None:
@@ -60,11 +73,23 @@ def integration_env():
         pytest.skip(f"integration environment not available: {problem}")
 
 
-@pytest.fixture(scope="session")
-def test_image() -> str:
-    import os
+def _candidate_images() -> list[str]:
+    override = os.environ.get("ASBX_TEST_IMAGE")
+    return [override] if override else list(FAMILY_IMAGES.values())
 
-    return os.environ.get("ASBX_TEST_IMAGE", DEFAULT_TEST_IMAGE)
+
+@pytest.fixture(scope="session", params=_candidate_images(), ids=lambda image: image)
+def test_image(request) -> str:
+    from agentsandbox.vm.vfkit import resolve_image
+
+    image = request.param
+    if not resolve_image(image).exists():
+        distro = image.rsplit("-", 1)[0]
+        pytest.skip(
+            f"{image} is not built - run `ASBX_DISTRO={distro} ./vm/build-image.sh` "
+            f"then `ASBX_IMAGE_NAME={image} ./vm/prepare-image.sh`"
+        )
+    return image
 
 
 def _boot_box(image: str, *, allow: list[str], name: str | None = None):
@@ -97,6 +122,14 @@ def _boot_box(image: str, *, allow: list[str], name: str | None = None):
         timeout=60,
         description=f"the L2 gateway to relay a real frame for {box_name} (tunnel never came up)",
     )
+    # `[asbx-bootstrap] ready` and a relaying tunnel both come from the
+    # guest's own code path, so a boot-ordering race in some *other* unit -
+    # exactly what let "Failed Units: 1 / wg-quick@wg0.service" reach a user
+    # on Fedora with neither of the above ever catching it - needs its own,
+    # independent check.
+    result = ssh_run(box_name, "systemctl --failed --no-legend --plain", timeout=15)
+    assert result.returncode == 0, f"systemctl --failed itself failed on {box_name}: {result.stderr}"
+    assert not result.stdout.strip(), f"{box_name} has failed systemd units:\n{result.stdout}"
     return box_name, session
 
 

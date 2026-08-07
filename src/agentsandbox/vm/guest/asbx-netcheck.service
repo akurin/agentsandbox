@@ -1,6 +1,13 @@
 [Unit]
 Description=agentsandbox fail-closed verification
-After=wg-quick@wg0.service nftables.service
+# multi-user.target does not wait on cloud-final.service, so without this the
+# [Install] WantedBy below can race bootstrap.sh's own runcmd invocation:
+# this unit's own Wants=wg-quick@wg0.service pulls the tunnel up, then checks
+# nftables before bootstrap.sh has had a chance to load the real ruleset (its
+# job, not any unit's), sees "tunnel up, nftables empty" and - correctly, by
+# its own fail-closed logic - powers the guest off. Ordering after cloud-final
+# means this early auto-start only ever runs once bootstrap.sh already has.
+After=wg-quick@wg0.service nftables.service cloud-final.service
 Wants=wg-quick@wg0.service
 
 [Service]

@@ -139,7 +139,18 @@ log "bringing up the tunnel"
 # This script owns the tunnel's lifecycle, not systemd. On a reused box
 # disk an enabled wg-quick@wg0 unit would race us and bring wg0 up with the
 # previous run's config before cloud-init even starts.
-systemctl disable wg-quick@wg0.service >/dev/null 2>&1 || true
+#
+# `disable` alone is not enough: it only removes the unit's own [Install]
+# symlinks, it does nothing about some *other* unit's Wants=/Requires=
+# pulling it in regardless - observed on Fedora, where wg-quick.target
+# (part of wireguard-tools' own packaging, unlike Debian's) does exactly
+# that during normal boot, race this script's own `wg-quick up wg0` below,
+# lose ("wg0' already exists"), and show up as a failed unit on every
+# login even though the tunnel itself came up fine. `mask` replaces the
+# unit file with a symlink to /dev/null, so nothing can start it - not an
+# automatic pull-in, not an explicit `systemctl start` - regardless of who
+# asks.
+systemctl mask wg-quick@wg0.service >/dev/null 2>&1 || true
 
 # And tear down whatever is already there: `wg-quick up` fails on an existing
 # interface, which under `set -e` used to take the rest of this script with it
@@ -159,14 +170,23 @@ fi
 # explicitly, and leave a plain /etc/resolv.conf behind as the fallback so name
 # resolution never depends on that integration existing.
 log "pointing DNS at the tunnel resolver"
+# `timeout` matters as much as `|| true` here: observed on Fedora, where
+# resolvectl can block indefinitely on its D-Bus call to systemd-resolved
+# right after wg0 was just torn down and recreated - and since sshd's own
+# PAM/nss stack also goes through D-Bus, a wedged dbus-broker call here
+# doesn't just stall this script, it stalls login too. `|| true` alone does
+# nothing against a hang: it only runs once the command exits, and this one
+# wasn't going to exit on its own.
 if command -v resolvectl >/dev/null 2>&1; then
-    resolvectl dns wg0 10.0.0.53 2>/dev/null || true
-    resolvectl domain wg0 '~.' 2>/dev/null || true
-    resolvectl default-route wg0 true 2>/dev/null || true
+    timeout 5 resolvectl dns wg0 10.0.0.53 2>/dev/null || true
+    timeout 5 resolvectl domain wg0 '~.' 2>/dev/null || true
+    timeout 5 resolvectl default-route wg0 true 2>/dev/null || true
 fi
+log "resolvectl done"
 rm -f /etc/resolv.conf
 printf 'nameserver 10.0.0.53\noptions timeout:2 attempts:2\n' >/etc/resolv.conf
 chmod 0644 /etc/resolv.conf
+log "resolv.conf written"
 
 # -- accounts ------------------------------------------------------------------
 # The agent may drop privilege to `builder`, and nothing else. Package installs
@@ -195,9 +215,11 @@ chown agent:agent /run/asbx/capabilities.env
 chmod 0600 /run/asbx/capabilities.env
 
 install -d -m 0755 -o builder -g builder /home/builder
+log "accounts done"
 
 # -- fail-closed verification --------------------------------------------------
-systemctl enable --now asbx-netcheck.service >/dev/null 2>&1 || true
+timeout 15 systemctl enable --now asbx-netcheck.service >/dev/null 2>&1 || true
+log "netcheck unit enabled"
 
 if ! /usr/local/bin/asbx-netcheck; then
     log "FATAL: guest is not fail-closed, powering off"
