@@ -166,7 +166,7 @@ no network, no VM boot required.
   `api.github.com.evil.test`, DNS rebinding, unresolvable names failing closed
 - capabilities: hash-only storage, session/host/method/path/resource binding,
   expiry, request and byte budgets, revocation, unsupported injections refused
-- broker: credential injection shapes (bearer/header/basic), guest auth
+- broker: credential injection shapes (bearer/header/basic/body), guest auth
   headers stripped, placeholder leak detection, brokered-response scrubbing of
   echoed credentials and `Set-Cookie`, oversized responses refused, audit
   containing neither the secret nor the placeholder
@@ -279,12 +279,27 @@ security-relevant rather than merely broken:
   vsock devices at boot and cannot hot-plug, so both `--mount` and `--forward`
   take effect on the next `box start`, never live. `box set --mount-add`/
   `--mount-rm` change a box's config; they still need a restart to apply.
-- **Only `bearer`, `header` and `basic` credential injection are implemented
-  for capabilities** - an unsupported injection kind is a `PolicyDenied`, not
-  a best-effort attempt. AWS SigV4 is handled separately, by `aws_autosign`
-  (see README): a session-wide re-signing rule rather than a per-capability
-  injection kind, since AWS requests usually need the whole thing re-signed,
-  not one value substituted into an otherwise-real signature.
+- **`bearer`, `header`, `basic` and `body` credential injection are
+  implemented for capabilities** - an unsupported injection kind is a
+  `PolicyDenied`, not a best-effort attempt. AWS SigV4 is handled separately,
+  by `aws_autosign` (see README): a session-wide re-signing rule rather than
+  a per-capability injection kind, since AWS requests usually need the whole
+  thing re-signed, not one value substituted into an otherwise-real
+  signature. `body` is the one kind meant to end up persisted upstream - a
+  capability's placeholder embedded in content the guest constructs (a
+  CloudFormation template's Lambda env var, say) rather than presented back
+  by the guest itself - which is why every other kind still refuses a
+  placeholder found outside a header. It composes with `aws_autosign`: a
+  request can be both dummy-signed and carry a body-kind placeholder in the
+  same content (a `cdk deploy` asset upload, for instance), and substitution
+  always happens before re-signing, so the signature covers the real bytes.
+  A body-kind request that carries a SigV4 Authorization header which is
+  *not* the session's aws_autosign marker - a real AWS credential the guest
+  picked up some other way, not one asbx gave it - is refused outright
+  (`body_injection_conflicts_with_aws_signature`) rather than stripped and
+  forwarded unauthenticated: substitution invalidates whatever signature
+  covers the body regardless of whose credential produced it, and asbx has
+  no way to re-sign with a credential it does not control.
 - **One WireGuard peer per session** (a mitmproxy constraint), which is also
   why a leaked config from an old session authenticates to nothing.
 - **A forwarded port has no access control beyond loopback binding.** Unlike

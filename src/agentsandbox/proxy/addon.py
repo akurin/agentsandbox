@@ -117,16 +117,28 @@ class SandboxAddon:
             self._forward_or_kill(flow, dest)
             return
 
-        if location != "header":
-            self._deny(
-                flow,
-                "capability_misplaced",
-                f"a capability must be sent in a request header, not in the {location}",
-                dest=dest,
-            )
+        if location == "header":
+            self._broker(flow, dest, placeholder)
             return
 
-        self._broker(flow, dest, placeholder)
+        if location == "body":
+            # Unlike header/url/cookie, a body-carried placeholder isn't
+            # automatically a leak: a capability explicitly configured with
+            # injection.kind "body" is meant to have its placeholder embedded
+            # in content the guest constructs (a CloudFormation template's
+            # Lambda env var, say). Only the broker can tell the difference -
+            # it has the capability store - so both cases are routed there;
+            # everything that isn't actually a body-kind capability still
+            # gets refused, by BrokerCore._authorize.
+            self._broker_body(flow, dest, placeholder)
+            return
+
+        self._deny(
+            flow,
+            "capability_misplaced",
+            f"a capability must be sent in a request header, not in the {location}",
+            dest=dest,
+        )
 
     # There is deliberately no `response` hook on the pass-through path.
     #
@@ -340,6 +352,39 @@ class SandboxAddon:
             response = self.broker.call(broker_request)
         except BrokerError as exc:
             # Fail closed: if the broker is unreachable, nothing is authorised.
+            self.audit.emit("broker.unavailable", host=dest.host, error=str(exc))
+            self._deny(flow, "broker_unavailable", "the secrets broker is not available", dest=dest)
+            return
+        flow.response = _to_mitm_response(response)
+
+    def _broker_body(self, flow: http.HTTPFlow, dest: Destination, placeholder: str) -> None:
+        """A placeholder found in the request body, not a header.
+
+        `aws_autosign` is threaded through the same way `_broker_aws_autosign`
+        sets it: this request may simultaneously need body substitution *and*
+        a full SigV4 re-sign (a `cdk deploy` asset upload, dummy-signed by the
+        guest's own credential, whose body happens to carry a body-kind
+        capability's placeholder) - the broker is what decides, and needs
+        both pieces of information to do it.
+        """
+        req = flow.request
+        broker_request = BrokerRequest(
+            session_id=self.session.session_id,
+            capability=placeholder,
+            method=req.method,
+            scheme=dest.scheme,
+            host=dest.host,
+            port=dest.port,
+            target=req.path,
+            headers=[(k, v) for k, v in req.headers.items(multi=True)],
+            body=req.raw_content or b"",
+            operation=req.headers.get("x-asbx-operation"),
+            flow_id=flow.id,
+            aws_autosign=self._looks_like_dummy_aws_request(req),
+        )
+        try:
+            response = self.broker.call(broker_request)
+        except BrokerError as exc:
             self.audit.emit("broker.unavailable", host=dest.host, error=str(exc))
             self._deny(flow, "broker_unavailable", "the secrets broker is not available", dest=dest)
             return

@@ -316,6 +316,98 @@ def test_basic_and_header_injection_shapes(session, store, executor, resolver):
     assert executor.last["credential_headers"] == [("X-Api-Key", SECRET)]
 
 
+def test_body_injection_substitutes_into_the_request_body(session, store, executor, resolver):
+    """The one injection kind explicitly meant to have its placeholder end up
+    persisted upstream - a CloudFormation template's Lambda env var, say."""
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="deploy-secret",
+            hosts=["api.github.com"],
+            methods=["PUT"],
+            secret=SecretRef(service="github-token"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    body = json.dumps({"Environment": {"Variables": {"API_KEY": token}}}).encode()
+    response = core.handle(
+        make_request(
+            token,
+            host="api.github.com",
+            method="PUT",
+            target="/template.json",
+            headers=[("Content-Type", "application/json")],
+            body=body,
+        )
+    )
+    assert response.decision == "allow"
+    assert token.encode() not in executor.last["body"]
+    assert SECRET.encode() in executor.last["body"]
+    assert executor.last["credential_headers"] == []
+
+
+def test_body_injection_refuses_a_foreign_aws_signature(session, store, executor, resolver):
+    """A SigV4 Authorization header that isn't this session's aws_autosign
+    marker (aws_autosign=False here) means the guest is using some AWS
+    credential asbx does not control - a leaked real one, or a differently
+    configured profile. Modifying the body would invalidate that signature
+    regardless of whose credential produced it, so this must be refused with
+    a real explanation rather than silently stripped and forwarded broken."""
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="deploy-secret",
+            hosts=["api.github.com"],
+            methods=["PUT"],
+            secret=SecretRef(service="github-token"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    body = json.dumps({"Environment": {"Variables": {"API_KEY": token}}}).encode()
+    foreign_auth = (
+        "AWS4-HMAC-SHA256 Credential=ASIAREALLOOKINGKEY0001/20260807/eu-central-1/s3/aws4_request, "
+        "SignedHeaders=host, Signature=deadbeef"
+    )
+    response = core.handle(
+        make_request(
+            token,
+            host="api.github.com",
+            method="PUT",
+            target="/template.json",
+            headers=[("Content-Type", "application/json"), ("Authorization", foreign_auth)],
+            body=body,
+        )
+    )
+    assert response.reason == "body_injection_conflicts_with_aws_signature"
+    assert executor.calls == []
+
+
+def test_body_injection_still_refuses_the_placeholder_in_a_url(session, store, executor, resolver):
+    """Only the body is exempted for this kind - not the URL, which leaks the
+    same way it does for every other capability."""
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="deploy-secret",
+            hosts=["api.github.com"],
+            methods=["PUT"],
+            secret=SecretRef(service="github-token"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    response = core.handle(
+        make_request(
+            token,
+            host="api.github.com",
+            method="PUT",
+            target=f"/template.json?token={token}",
+            headers=[("Content-Type", "application/json")],
+            body=b"{}",
+        )
+    )
+    assert response.reason == "capability_in_url"
+
+
 AWS_SIGNING_KEYS = {"access_key_id": "AKIDEXAMPLE", "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}
 DUMMY_ACCESS_KEY_ID = "AKIADUMMYFORTESTS0001"
 
@@ -447,6 +539,33 @@ def test_aws_autosign_stale_signing_headers_from_the_guest_are_dropped(session, 
     assert "x-amz-checksum-sha256" not in headers
     assert "x-amz-sdk-checksum-algorithm" not in headers
     assert "x-amz-trailer" not in headers
+
+
+def test_body_injection_composes_with_aws_autosign(session, store, executor):
+    """The exact shape this kind exists for: a `cdk deploy`-style asset
+    upload, dummy-signed by the guest's own AWS credential, whose body also
+    carries a body-kind capability's placeholder. Substitution has to happen
+    before signing - the signature must cover the real bytes, not the
+    placeholder the request was built with."""
+    core = _autosign_core(session, store, executor, extra_secrets={"github-token": SECRET})
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="deploy-secret",
+            hosts=["api.github.com"],
+            methods=["PUT"],
+            secret=SecretRef(service="github-token"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    body = json.dumps({"Environment": {"Variables": {"API_KEY": token}}}).encode()
+    response = core.handle(_autosign_request(capability=token, method="PUT", body=body, service="s3"))
+
+    assert response.decision == "allow"
+    assert token.encode() not in executor.last["body"]
+    assert SECRET.encode() in executor.last["body"]
+    headers = dict(executor.last["headers"] + executor.last["credential_headers"])
+    assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+    assert "us-east-1/s3/aws4_request" in headers["Authorization"]
 
 
 def test_aws_autosign_signing_secret_must_be_a_json_bundle(session, store, executor):

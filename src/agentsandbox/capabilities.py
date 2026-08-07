@@ -44,7 +44,7 @@ from .netpolicy import Destination, any_host_matches
 #: Injection strategies the broker knows how to perform safely. Anything else
 #: is refused rather than approximated - "deny unsupported authenticated
 #: protocols by default".
-SUPPORTED_INJECTIONS = frozenset({"bearer", "header", "basic"})
+SUPPORTED_INJECTIONS = frozenset({"bearer", "header", "basic", "body"})
 
 
 def new_placeholder() -> str:

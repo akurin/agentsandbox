@@ -289,7 +289,14 @@ class BrokerCore:
         started = time.monotonic()
         cap: Capability | None = None
         try:
-            if req.aws_autosign:
+            if req.capability:
+                cap = self._resolve(req)
+                self._authorize(req, cap)
+                if cap.injection.kind == "body":
+                    response = self._perform_body(req, cap)
+                else:
+                    response = self._perform(req, cap)
+            elif req.aws_autosign:
                 if self.aws_autosign is None:
                     raise PolicyDenied(
                         "aws_autosign_disabled",
@@ -297,9 +304,13 @@ class BrokerCore:
                     )
                 response = self._perform_aws_autosign(req)
             else:
-                cap = self._resolve(req)
-                self._authorize(req, cap)
-                response = self._perform(req, cap)
+                # Not reachable through the addon - it only calls in with a
+                # capability, or with aws_autosign=True, never neither. Kept
+                # as an explicit failure rather than falling through, for
+                # whatever else constructs a BrokerRequest directly.
+                raise PolicyDenied(
+                    "empty_request", "request carries neither a capability nor an aws_autosign marker"
+                )
         except PolicyDenied as denied:
             response = denial(
                 denied.reason,
@@ -382,7 +393,7 @@ class BrokerCore:
             path=req.path,
             operation=req.operation,
         )
-        self._reject_leaked_placeholders(req)
+        self._reject_leaked_placeholders(req, cap)
         self._reject_username_mismatch(req, cap)
 
     def _reject_username_mismatch(self, req: BrokerRequest, cap: Capability) -> None:
@@ -433,18 +444,25 @@ class BrokerCore:
                     "with nothing appended",
                 )
 
-    def _reject_leaked_placeholders(self, req: BrokerRequest) -> None:
-        """A capability belongs in a header, nowhere else.
+    def _reject_leaked_placeholders(self, req: BrokerRequest, cap: Capability) -> None:
+        """A capability belongs in a header, with one deliberate exception.
 
-        In a URL it ends up in server logs, referrers and browser history; in a
-        body it may be persisted by the upstream service. Both are refused
-        rather than quietly rewritten, so the agent gets a clear error.
+        In a URL it ends up in server logs, referrers and browser history -
+        always refused, no matter the capability's kind. In a body it may be
+        persisted by the upstream service, which is normally exactly what
+        must not happen - refused rather than quietly rewritten, so the agent
+        gets a clear error - *unless* the capability was explicitly issued
+        with injection.kind "body", where persisting it upstream is the
+        entire point (a secret meant to end up embedded in content the guest
+        constructs, not presented back by the guest itself).
         """
         if find_placeholders(req.target):
             raise PolicyDenied(
                 "capability_in_url",
                 "put the capability in a request header, not in the URL",
             )
+        if cap.injection.kind == "body":
+            return
         if len(req.body) <= _BODY_SCAN_LIMIT and find_placeholders(
             req.body.decode("utf-8", "ignore")
         ):
@@ -519,22 +537,133 @@ class BrokerCore:
             cap_id=cap.cap_id,
         )
 
-    def _perform_aws_autosign(self, req: BrokerRequest) -> BrokerResponse:
-        """No capability, no placeholder: the guest signed with its session's
-        dummy AWS credential (it has no real one), so any request carrying it
-        gets re-signed wholesale with the session's ``aws_autosign.
-        signing_secret``, regardless of destination.
+    def _perform_body(self, req: BrokerRequest, cap: Capability) -> BrokerResponse:
+        """Body-kind capability: the placeholder is meant to end up embedded
+        in content the guest constructs (a CloudFormation template's Lambda
+        env var, say), not presented back by the guest itself.
+
+        Substituted here, into the raw body, before anything is forwarded -
+        and before any aws_autosign re-signing below, since a SigV4
+        signature has to cover the bytes that actually go out, not the
+        placeholder version. The same request can need both: a `cdk deploy`
+        asset upload is dummy-signed by the guest's own AWS credential *and*
+        may carry a body-kind capability's placeholder in its content.
+        """
+        secret = self.resolver.fetch(cap.secret)
+        redactor.register_secret(secret)
+        body = req.body.replace(req.capability.encode(), secret.encode())
+
+        self.audit.emit(
+            "broker.request",
+            cap_id=cap.cap_id,
+            label=cap.label,
+            method=req.method,
+            host=req.host,
+            path=req.path,
+            body_bytes=len(body),
+            flow=req.flow_id,
+        )
+
+        if req.aws_autosign:
+            if self.aws_autosign is None:
+                raise PolicyDenied(
+                    "aws_autosign_disabled",
+                    "this session has no AWS auto-sign credential configured",
+                )
+            credentials, region, service = self._resolve_aws_signing_credentials(req)
+            signed_headers, credential_headers = self._sign_aws_request(
+                req, body, region, service, credentials
+            )
+            upstream = self.executor.execute(
+                req.dest,
+                req.method,
+                req.target,
+                signed_headers,
+                body,
+                credential_headers,
+                cap.max_response_bytes,
+            )
+        else:
+            # A SigV4-shaped Authorization header that isn't this session's
+            # aws_autosign marker means the guest is authenticating with some
+            # other AWS credential asbx does not control - a leaked real one,
+            # or a differently-configured profile the guest picked up on its
+            # own. Modifying the body invalidates whatever signature covers
+            # it regardless of whose credential produced it, so stripping
+            # Authorization below (as every other body-kind request does)
+            # would silently discard a credential that might otherwise have
+            # worked, and forward an unauthenticated request that fails
+            # upstream for a reason with nothing to do with this capability.
+            # Refuse with the real explanation instead.
+            auth_header = next((v for k, v in req.headers if k.lower() == "authorization"), "")
+            if auth_header.startswith("AWS4-HMAC-SHA256 "):
+                raise PolicyDenied(
+                    "body_injection_conflicts_with_aws_signature",
+                    "this request is signed with an AWS credential this session's "
+                    "aws_autosign does not control - modifying the body would "
+                    "invalidate that signature. The guest must sign AWS requests "
+                    "with its own dummy AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for "
+                    "aws_autosign to re-sign them, not a separately configured "
+                    "profile or cached login session.",
+                )
+            headers = [
+                (name, value)
+                for name, value in req.headers
+                if name.lower() not in STRIP_REQUEST_HEADERS
+                and name.lower() not in HOP_BY_HOP
+                and CAPABILITY_PREFIX not in value
+            ]
+            headers = [h for h in headers if h[0].lower() != "accept-encoding"]
+            headers.append(("Accept-Encoding", "identity"))
+            upstream = self.executor.execute(
+                req.dest,
+                req.method,
+                req.target,
+                headers,
+                body,
+                [],
+                cap.max_response_bytes,
+            )
+
+        if upstream.truncated:
+            self.store.record_usage(cap, cap.max_response_bytes)
+            raise PolicyDenied(
+                "response_too_large",
+                f"upstream response exceeded {cap.max_response_bytes} bytes",
+            )
+
+        resp_body = scrub_secret(upstream.body, secret)
+        resp_headers = [
+            (k, v)
+            for k, v in sanitize_response_headers(upstream.headers)
+            if secret not in v and CAPABILITY_PREFIX not in v
+        ]
+        resp_headers.append(("Content-Length", str(len(resp_body))))
+        resp_headers.append(("X-Asbx-Decision", "allow"))
+        if upstream.redirects:
+            resp_headers.append(("X-Asbx-Redirects", str(upstream.redirects)))
+
+        self.store.record_usage(cap, len(resp_body))
+        return BrokerResponse(
+            status_code=upstream.status_code,
+            headers=resp_headers,
+            body=resp_body,
+            decision="allow",
+            cap_id=cap.cap_id,
+        )
+
+    def _resolve_aws_signing_credentials(
+        self, req: BrokerRequest
+    ) -> tuple[Credentials, str, str]:
+        """Fetch and validate the aws_autosign signing credential, and read
+        off the region/service to sign for.
 
         ``region``/``service`` come from the guest's own (necessarily
         invalid) credential scope rather than a declared table - the guest's
         SDK already worked those out correctly to build the request, it just
-        had nothing real to sign with. This can't be abused to sign something
-        it shouldn't: the real destination is still policy-checked below, and
-        a claimed scope that doesn't match what AWS expects for that
-        destination just gets rejected by AWS's own verification.
+        had nothing real to sign with.
         """
-        assert self.aws_autosign is not None  # checked by the caller
-        self.policy.check(req.dest)
+        assert self.aws_autosign is not None  # checked by callers
 
         auth_header = next((v for k, v in req.headers if k.lower() == "authorization"), "")
         scope = _parse_sigv4_scope(auth_header)
@@ -582,6 +711,24 @@ class BrokerCore:
             if value:
                 redactor.register_secret(str(value))
 
+        return Credentials(access_key_id, secret_access_key, session_token), region, service
+
+    def _sign_aws_request(
+        self,
+        req: BrokerRequest,
+        body: bytes,
+        region: str,
+        service: str,
+        credentials: Credentials,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        """Sign ``body`` for the given scope and split the result into
+        ordinary headers and credential-bearing ones.
+
+        ``body`` is taken as a parameter rather than read from ``req``
+        because a body-kind capability substitutes into it first - the
+        signature must cover the bytes that actually go out, not whatever
+        placeholder the guest built the request with.
+        """
         headers = [
             (name, value)
             for name, value in req.headers
@@ -602,14 +749,30 @@ class BrokerCore:
         aws_request = AWSRequest(
             method=req.method,
             url=f"{req.dest.origin}{req.target}",
-            data=req.body,
+            data=body,
             headers=dict(headers),
         )
-        credentials = Credentials(access_key_id, secret_access_key, session_token)
         signer_cls = S3SigV4Auth if service == "s3" else SigV4Auth
         signer_cls(credentials, service, region).add_auth(aws_request)
-        signed_headers, credential_headers = _split_signed_headers(
-            list(aws_request.headers.items())
+        return _split_signed_headers(list(aws_request.headers.items()))
+
+    def _perform_aws_autosign(self, req: BrokerRequest) -> BrokerResponse:
+        """No capability, no placeholder: the guest signed with its session's
+        dummy AWS credential (it has no real one), so any request carrying it
+        gets re-signed wholesale with the session's ``aws_autosign.
+        signing_secret``, regardless of destination.
+
+        This can't be abused to sign something it shouldn't: the real
+        destination is still policy-checked below, and a claimed scope that
+        doesn't match what AWS expects for that destination just gets
+        rejected by AWS's own verification.
+        """
+        assert self.aws_autosign is not None  # checked by the caller
+        self.policy.check(req.dest)
+
+        credentials, region, service = self._resolve_aws_signing_credentials(req)
+        signed_headers, credential_headers = self._sign_aws_request(
+            req, req.body, region, service, credentials
         )
 
         self.audit.emit(

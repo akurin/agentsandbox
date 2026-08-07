@@ -145,6 +145,10 @@ def test_header_injection_requires_a_secret_placeholder():
         InjectionSpec(kind="header", header="X-Api-Key", template="constant").validate()
 
 
+def test_body_injection_is_supported_with_no_extra_fields():
+    InjectionSpec(kind="body").validate()
+
+
 def test_dummy_aws_credentials_look_like_a_real_access_key():
     access_key_id, secret_access_key = new_dummy_aws_credentials()
     assert access_key_id.startswith("AKIA")

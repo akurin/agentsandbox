@@ -140,11 +140,19 @@ def test_capability_in_the_url_is_refused_before_it_leaves(addon, broker_stub):
     assert broker_stub.requests == []
 
 
-def test_capability_in_the_body_is_refused(addon, broker_stub):
+def test_capability_in_the_body_is_routed_to_the_broker(addon, broker_stub):
+    """Unlike the URL or a cookie, a body-carried placeholder isn't
+    automatically a leak - only the broker knows whether the capability
+    behind it was actually issued with injection.kind "body", so the addon
+    routes it there rather than denying outright. A capability that turns
+    out *not* to be body-kind is refused by the broker itself
+    (BrokerCore._authorize / _reject_leaked_placeholders), covered at that
+    layer in test_broker.py."""
     flow = http_flow(method=b"POST", content=f'{{"key":"{TOKEN}"}}'.encode())
     addon.request(flow)
-    assert flow.response.headers["X-Asbx-Reason"] == "capability_misplaced"
-    assert broker_stub.requests == []
+    assert len(broker_stub.requests) == 1
+    assert broker_stub.requests[0].capability == TOKEN
+    assert flow.response.status_code == 200
 
 
 def test_capability_in_a_cookie_is_refused(addon, broker_stub):
@@ -203,6 +211,27 @@ def test_a_session_without_aws_autosign_leaves_the_same_request_alone(session, b
     addon.request(flow)
     assert flow.response is None  # left for mitmproxy to forward
     assert broker_stub.requests == []
+
+
+def test_a_body_placeholder_on_a_dummy_signed_request_is_flagged_for_autosign(
+    autosign_session, broker_stub
+):
+    """The exact shape a `cdk deploy` asset upload takes: dummy-signed by the
+    guest's own AWS credential, with a body-kind capability's placeholder
+    embedded in the content. The broker needs both pieces of information to
+    decide - so the addon threads `aws_autosign` through `_broker_body`
+    exactly the way `_broker_aws_autosign` already does for the pure case."""
+    addon = SandboxAddon(autosign_session, broker_stub, audit=NullAuditLog(autosign_session.session_id))
+    flow = http_flow(
+        method=b"PUT",
+        headers=[("Host", "api.github.com"), ("Authorization", _autosign_header(DUMMY_ACCESS_KEY_ID))],
+        content=f'{{"key":"{TOKEN}"}}'.encode(),
+    )
+    addon.request(flow)
+    assert len(broker_stub.requests) == 1
+    brokered = broker_stub.requests[0]
+    assert brokered.capability == TOKEN
+    assert brokered.aws_autosign is True
 
 
 def test_a_different_access_key_is_not_treated_as_this_sessions_autosign_marker(

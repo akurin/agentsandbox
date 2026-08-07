@@ -1928,7 +1928,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="keychain:SERVICE[:ACCOUNT]",
         help="where the real credential lives",
     )
-    issue.add_argument("--injection", choices=["bearer", "header", "basic"], default="bearer")
+    issue.add_argument("--injection", choices=["bearer", "header", "basic", "body"], default="bearer")
     issue.add_argument("--header", default="Authorization", help="header name for --injection header")
     issue.add_argument("--template", default="Bearer {secret}", help="value template, must contain {secret}")
     issue.add_argument("--username", help="username for --injection basic")
