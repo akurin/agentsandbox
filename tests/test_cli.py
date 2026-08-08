@@ -614,6 +614,53 @@ def test_a_box_starts_on_its_own_image_not_the_default(asbx_home, capsys):
     assert not [p for p in check_host() if "image" in p]
 
 
+def test_a_disk_already_held_open_is_reported_before_the_fork(capsys, monkeypatch):
+    """Virtualization.framework hosts each VM in its own out-of-process XPC
+    helper. If that helper is orphaned by a crash - never observed as a pid
+    any of asbx's own session records track - the next `box start` used to
+    fail deep inside Virtualization.framework with "the storage device
+    attachment is invalid", naming the symptom rather than the still-running
+    orphan actually causing it. This is the preflight that catches it first,
+    the same way a missing image is caught before the fork rather than
+    surfacing from a supervisor that already detached."""
+    from agentsandbox.box import Box
+
+    box = Box(name="locked", image=cli.DEFAULT_IMAGE)
+    box.save()
+    box.disk_path.write_bytes(b"x")
+    monkeypatch.setattr(cli, "find_disk_holders", lambda path: [12345])
+
+    assert cli.main(["box", "start", "locked"]) == cli.EXIT_USAGE
+
+    err = capsys.readouterr().err
+    assert "12345" in err
+    assert "kill -TERM 12345" in err
+
+
+def test_a_box_with_no_disk_yet_skips_the_lock_check(monkeypatch):
+    """A box that has never booted has no disk file at all - `has_disk` is
+    False, and there is nothing for any process to be holding open."""
+    import agentsandbox.daemon as daemon
+    from agentsandbox.box import Box
+
+    Box(name="fresh", image=cli.DEFAULT_IMAGE).save()
+    calls = []
+    monkeypatch.setattr(cli, "find_disk_holders", lambda path: calls.append(path) or [])
+
+    class _StoppedHere(Exception):
+        pass
+
+    def _sentinel(*a, **k):
+        raise _StoppedHere
+
+    monkeypatch.setattr(daemon, "spawn_supervisor", _sentinel)
+
+    with pytest.raises(_StoppedHere):
+        cli.main(["box", "start", "fresh"])
+
+    assert calls == []  # has_disk was False, so the check never even ran
+
+
 def test_the_host_check_still_notices_no_images_at_all():
     from agentsandbox.manager import check_host
     from agentsandbox.vm.vfkit import DEFAULT_IMAGE, image_path

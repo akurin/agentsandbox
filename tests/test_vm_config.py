@@ -82,6 +82,64 @@ def test_disk_is_per_session(driver, session):
     assert driver.disk_path.name == "disk.raw"
 
 
+# -- disk-lock detection ------------------------------------------------------
+#
+# Virtualization.framework hosts each VM in its own out-of-process XPC helper,
+# separate from vfkit's own process. A crash there can orphan that helper -
+# still holding the disk open - invisible to every one of asbx's own session
+# records, which only ever tracked vfkit's own pid. `find_disk_holders` is
+# what lets `box start` catch that before it fails deep inside
+# Virtualization.framework with "the storage device attachment is invalid".
+
+
+def test_find_disk_holders_parses_bare_pids(monkeypatch, tmp_path):
+    from agentsandbox.vm.vfkit import find_disk_holders
+
+    class FakeResult:
+        stdout = "78086\n80561\n"
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/sbin/lsof")
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: FakeResult())
+
+    assert find_disk_holders(tmp_path / "box.raw") == [78086, 80561]
+
+
+def test_find_disk_holders_is_empty_when_nothing_holds_the_disk(monkeypatch, tmp_path):
+    from agentsandbox.vm.vfkit import find_disk_holders
+
+    class FakeResult:
+        stdout = ""
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/sbin/lsof")
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: FakeResult())
+
+    assert find_disk_holders(tmp_path / "box.raw") == []
+
+
+def test_find_disk_holders_tolerates_a_missing_lsof(monkeypatch, tmp_path):
+    """Gates a clearer error message; never the boot path itself, so a host
+    without lsof must not make `box start` itself fail."""
+    from agentsandbox.vm.vfkit import find_disk_holders
+
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    assert find_disk_holders(tmp_path / "box.raw") == []
+
+
+def test_find_disk_holders_tolerates_lsof_itself_failing(monkeypatch, tmp_path):
+    import subprocess
+
+    from agentsandbox.vm.vfkit import find_disk_holders
+
+    def _raise(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="lsof", timeout=5)
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/sbin/lsof")
+    monkeypatch.setattr("subprocess.run", _raise)
+
+    assert find_disk_holders(tmp_path / "box.raw") == []
+
+
 # -- cloud-init --------------------------------------------------------------
 
 

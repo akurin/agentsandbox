@@ -31,6 +31,7 @@ from .vm.vfkit import (
     DEFAULT_IMAGE,
     VmConfig,
     default_golden_image,
+    find_disk_holders,
     resolve_guest_family_name,
     resolve_image,
 )
@@ -195,6 +196,22 @@ def cmd_box_start(args: argparse.Namespace) -> int:
         print(f"!! {box.name} needs image {box.image!r}, which is not built", file=sys.stderr)
         print("   asbx image ls                           what is built", file=sys.stderr)
         print(f"   asbx box set {box.name} --image NAME    point it at one of those", file=sys.stderr)
+        return EXIT_USAGE
+
+    # `_running_session_for` above only knows about vfkit's own pid. It misses
+    # the failure mode this catches: Virtualization.framework hosts each VM in
+    # a separate XPC helper process, which can outlive a crashed or killed
+    # vfkit and keep the disk open - invisible to every one of asbx's own
+    # session records, since none of them ever tracked that pid. Left
+    # undetected, the next start fails deep inside Virtualization.framework
+    # with "the storage device attachment is invalid", a real error that
+    # names the symptom rather than this cause.
+    if box.has_disk and (holders := find_disk_holders(box.disk_path)):
+        pids = " ".join(str(p) for p in holders)
+        print(f"!! {box.name}'s disk is already open by another process (pid {pids})", file=sys.stderr)
+        print("   this usually means a previous session's VM crashed without cleaning up", file=sys.stderr)
+        print(f"   stop it first:  kill -TERM {pids}", file=sys.stderr)
+        print(f"   then confirm:   lsof {box.disk_path}", file=sys.stderr)
         return EXIT_USAGE
 
     if args.fresh and box.has_disk:
@@ -530,6 +547,14 @@ def _supervise(manager: SessionManager, *, purge: bool = False) -> None:
                         print(f"  {line}", file=sys.stderr)
                     print(f"\nFull log: {log}", file=sys.stderr)
                     print(f"More context: asbx box diag {session.session_id}", file=sys.stderr)
+                    if "storage device attachment is invalid" in tail:
+                        # The disk-lock check in `cmd_box_start` runs before
+                        # this fork, so it cannot catch a lock acquired after
+                        # that check ran - re-check here, now that vfkit's
+                        # own crash confirms something is actually holding it.
+                        if holders := find_disk_holders(manager.vm.disk_path):
+                            pids = " ".join(str(p) for p in holders)
+                            print(f"\nDisk held open by pid {pids} - stop it: kill -TERM {pids}", file=sys.stderr)
                 break
             time.sleep(0.5)
     finally:

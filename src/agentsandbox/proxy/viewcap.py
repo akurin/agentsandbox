@@ -39,10 +39,16 @@ class ViewCap:
         self._trim()
 
     def _trim(self) -> None:
-        view = getattr(ctx.master, "addons", None)
-        if view is None or not ctx.master.addons.has_addon("view"):
+        # `AddonManager.has_addon` does not exist on the mitmproxy version this
+        # pins to - only `.get()`, which returns None for an addon that is not
+        # registered. Calling the nonexistent method here (found live, via a
+        # real box's mitmproxy.log full of AttributeErrors) meant `_trim` threw
+        # on every single response and error event, so the flow-list cap this
+        # addon exists for never actually ran.
+        manager = getattr(ctx.master, "addons", None)
+        flows = manager.get("view") if manager is not None else None
+        if flows is None:
             return  # mitmdump: no flow list to trim
-        flows = ctx.master.addons.get("view")
         excess = len(flows) - self.max_flows
         if excess < TRIM_BATCH:
             return

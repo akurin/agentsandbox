@@ -89,6 +89,45 @@ def resolve_guest_family_name(name: str) -> str:
         return "debian"
 
 
+def find_disk_holders(disk_path: Path) -> list[int]:
+    """PIDs with ``disk_path`` open right now, via ``lsof -t``.
+
+    Exists because of a real failure mode: Virtualization.framework hosts
+    each VM in its own out-of-process XPC helper
+    (``com.apple.Virtualization.VirtualMachine.xpc``), separate from vfkit's
+    own process. If that helper crashes, or vfkit is killed before it can
+    tell the helper to shut the VM down cleanly, the helper can be orphaned
+    - still holding the disk open - while every one of asbx's own liveness
+    checks (which only ever tracked vfkit's own pid) says the session is
+    long stopped. The next `box start` then boots a perfectly normal vfkit
+    process, which fails deep inside Virtualization.framework with "the
+    storage device attachment is invalid" - a real error, but one that names
+    the symptom rather than the still-running orphan causing it.
+
+    Best-effort: `lsof` missing or erroring returns an empty list rather than
+    raising, since this only ever gates a clearer error message, never the
+    boot path itself.
+    """
+    if shutil.which("lsof") is None:
+        return []
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, path is ours
+            ["lsof", "-t", str(disk_path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    pids = []
+    for line in result.stdout.splitlines():
+        try:
+            pids.append(int(line.strip()))
+        except ValueError:
+            continue
+    return pids
+
+
 def resolve_image(name: str) -> Path:
     """Find the disk image a box names.
 

@@ -140,6 +140,30 @@ class SandboxAddon:
             dest=dest,
         )
 
+    def responseheaders(self, flow: http.HTTPFlow) -> None:
+        """Stream a plain pass-through response instead of buffering the
+        whole body before relaying a single byte.
+
+        `stream_large_bodies` (the proxy-wide option) is deliberately never
+        set: it applies to *request* bodies too, and a CDK deploy's asset
+        upload - the exact large-payload case this project's own body-kind
+        capability and aws_autosign exist for - reads the full request body
+        synchronously in `request()`, via `req.raw_content`. Streaming a
+        request body delays the `request` hook until after the body has
+        already gone to the upstream, so `req.raw_content` would be empty
+        and the placeholder substitution would silently miss - a much worse
+        outcome than a slow download. Setting `.stream` here instead, only
+        for the one flow shape that is safe (see `_forward_or_kill` below,
+        the only place that sets `asbx_plain_forward`), affects only the
+        response side, only for a flow this addon never inspects the body
+        of anyway - so nothing is lost by never buffering it in the first
+        place. Found live: a plain download's time-to-first-byte matched its
+        *entire* transfer time - mitmproxy was fetching the whole body from
+        the real upstream before relaying any of it through the tunnel.
+        """
+        if flow.metadata.get("asbx_plain_forward") and flow.response is not None:
+            flow.response.stream = True
+
     # There is deliberately no `response` hook on the pass-through path.
     #
     # It used to scrub set-cookie, alt-svc and www-authenticate from every
@@ -325,6 +349,10 @@ class SandboxAddon:
         except PolicyDenied as denied:
             self._deny(flow, denied.reason, denied.message, dest=dest)
             return
+        # Read by `responseheaders` above: only a flow that took this exact
+        # path - mitmproxy fetching the real upstream response itself, never
+        # a synthetic one this addon built - is safe to stream.
+        flow.metadata["asbx_plain_forward"] = True
         self.audit.emit(
             "net.forward",
             method=flow.request.method,

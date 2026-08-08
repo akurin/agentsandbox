@@ -519,6 +519,47 @@ def test_the_addon_does_not_touch_pass_through_responses(addon):
         assert flow.response.headers[name] == value
 
 
+def test_a_plain_forward_streams_its_response(addon):
+    """The fix for a real bug: mitmproxy's default is to buffer a response's
+    entire body before relaying any of it, so a plain download's
+    time-to-first-byte was matching its *entire* transfer time. `request`
+    marks a plain-forwarded flow so `responseheaders` can turn streaming on
+    for it - safe here since the addon never inspects a pass-through body
+    anyway (see test_the_addon_does_not_touch_pass_through_responses above).
+    """
+    flow = http_flow()
+    addon.request(flow)  # the plain-forward path: marks the flow
+    assert flow.response is None  # left for mitmproxy to fetch for real
+
+    flow.response = tutils.tresp()
+    addon.responseheaders(flow)
+    assert flow.response.stream is True
+
+
+def test_a_brokered_response_is_never_streamed(addon, broker_stub):
+    """A brokered response is a synthetic one this addon built from bytes the
+    broker already has in hand, not a real upstream connection mitmproxy is
+    mid-fetch on - streaming it would be nonsensical, and `request` never
+    marks this flow as a plain forward in the first place."""
+    flow = http_flow(headers=[("Host", "api.github.com"), ("Authorization", f"Bearer {TOKEN}")])
+    addon.request(flow)
+    assert flow.response is not None  # the broker already answered
+
+    addon.responseheaders(flow)
+    assert not flow.response.stream
+
+
+def test_a_killed_flow_is_never_streamed(addon):
+    """A denied flow's response is this addon's own synthetic 403, never a
+    real upstream fetch - same reasoning as the brokered case above."""
+    flow = http_flow(host="evil.test")
+    addon.request(flow)
+    assert flow.response.status_code == 403
+
+    addon.responseheaders(flow)
+    assert not flow.response.stream
+
+
 def test_brokered_responses_are_still_sanitised():
     """The exception, and the reason `response` could go.
 
