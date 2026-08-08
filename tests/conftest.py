@@ -68,6 +68,21 @@ def asbx_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def fake_vfkit_path(monkeypatch):
+    """A handful of tests build a driver's argv just to inspect its
+    contents - device flags, socket paths - and never actually execute it.
+    `vfkit_path()` still resolves a real installed binary first, which
+    passed everywhere this was written and tested (vfkit is a real
+    prerequisite there) and only failed once CI ran on a plain Ubuntu
+    runner with no vfkit installed at all - a real binary was never the
+    thing being tested, only the strings built around it.
+    """
+    from agentsandbox.vm import vfkit
+
+    monkeypatch.setattr(vfkit, "vfkit_path", lambda: "/opt/homebrew/bin/vfkit")
+
+
+@pytest.fixture(autouse=True)
 def fake_dns(monkeypatch):
     def resolve(host: str):
         literal = netpolicy._as_ip(host)
