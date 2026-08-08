@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # The fast suite (make test) is hermetic - no VM boot, no network - and
+    # runs the same on any OS. ubuntu-latest is the cheapest GitHub-hosted
+    # runner, and nothing here needs Virtualization.framework or macOS's own
+    # Keychain: the real-VM suite (tests_integration/) is a separate concern,
+    # deliberately not run here (see tests_integration/conftest.py).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: make install
+
+      - name: Test
+        run: make test
+
+      - name: Lint
+        run: make lint
