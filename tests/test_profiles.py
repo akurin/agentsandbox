@@ -398,6 +398,113 @@ def test_two_capabilities_cannot_share_a_placeholder_guest_env(profile_dir):
         load_profile(resolve_profile("p"))
 
 
+def _travis_entry(**overrides):
+    entry = {
+        "label": "travis-auth",
+        "when": {"hosts": ["auth.travis-ci.example"], "methods": ["POST"], "paths": ["/oauth/token"]},
+        "injection": {"kind": "body"},
+        "secrets": {
+            "client_id": {
+                "secret": {"backend": "pass", "entry": "neo/TRAVIS_CLIENT_ID"},
+                "guest_env": "TRAVIS_CLIENT_ID",
+            },
+            "client_secret": {
+                "secret": {"backend": "pass", "entry": "neo/TRAVIS_CLIENT_SECRET"},
+                "guest_env": "TRAVIS_CLIENT_SECRET",
+            },
+        },
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_a_secrets_map_fans_out_into_one_spec_per_entry(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [_travis_entry()],
+    }))
+    specs = load_profile(resolve_profile("p"))
+    assert len(specs) == 2
+    by_env = {s.guest_env: s for s in specs}
+    assert set(by_env) == {"TRAVIS_CLIENT_ID", "TRAVIS_CLIENT_SECRET"}
+
+    client_id = by_env["TRAVIS_CLIENT_ID"]
+    assert client_id.label == "travis-auth: client_id"
+    assert client_id.secret.backend == "pass"
+    assert client_id.secret.service == "neo/TRAVIS_CLIENT_ID"
+    assert client_id.hosts == ["auth.travis-ci.example"]
+    assert client_id.methods == ["POST"]
+    assert client_id.path_globs == ["/oauth/token"]
+    assert client_id.injection.kind == "body"
+
+    client_secret = by_env["TRAVIS_CLIENT_SECRET"]
+    assert client_secret.label == "travis-auth: client_secret"
+    assert client_secret.secret.service == "neo/TRAVIS_CLIENT_SECRET"
+    # Same `when`/injection shared across the fan-out, not just the same values.
+    assert client_secret.hosts == client_id.hosts
+    assert client_secret.injection.kind == client_id.injection.kind
+
+
+def test_a_secrets_map_entry_requires_guest_env(profile_dir):
+    entry = _travis_entry()
+    del entry["secrets"]["client_id"]["guest_env"]
+    (profile_dir / "p.json").write_text(json.dumps({"version": 1, "capabilities": [entry]}))
+    with pytest.raises(CapabilityError, match="needs a 'guest_env'"):
+        load_profile(resolve_profile("p"))
+
+
+def test_a_secrets_map_guest_env_must_be_a_valid_identifier(profile_dir):
+    entry = _travis_entry()
+    entry["secrets"]["client_id"]["guest_env"] = "client-id"  # hyphen: illegal in `export NAME=value`
+    (profile_dir / "p.json").write_text(json.dumps({"version": 1, "capabilities": [entry]}))
+    with pytest.raises(CapabilityError, match="not a valid shell environment variable name"):
+        load_profile(resolve_profile("p"))
+
+
+def test_top_level_guest_env_must_also_be_a_valid_identifier(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [
+            {
+                "label": "a",
+                "when": {"hosts": ["a.com"]},
+                "secret": "keychain:a",
+                "guest_env": "9invalid",
+            }
+        ],
+    }))
+    with pytest.raises(CapabilityError, match="not a valid shell environment variable name"):
+        load_profile(resolve_profile("p"))
+
+
+def test_a_capability_cannot_declare_both_secret_and_secrets(profile_dir):
+    entry = _travis_entry()
+    entry["secret"] = "keychain:x"
+    (profile_dir / "p.json").write_text(json.dumps({"version": 1, "capabilities": [entry]}))
+    with pytest.raises(CapabilityError, match="either 'secret' or 'secrets', not both"):
+        load_profile(resolve_profile("p"))
+
+
+def test_fanned_out_guest_envs_still_collide_with_other_capabilities(profile_dir):
+    """The existing collision check applies to the fan-out too - it runs
+    against the final, expanded spec list, not the raw profile entries."""
+    entry = _travis_entry()
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [
+            entry,
+            {
+                "label": "other",
+                "when": {"hosts": ["other.example.net"]},
+                "secret": "keychain:x",
+                "guest_env": "TRAVIS_CLIENT_ID",
+            },
+        ],
+    }))
+    with pytest.raises(CapabilityError, match="TRAVIS_CLIENT_ID"):
+        load_profile(resolve_profile("p"))
+
+
 def test_the_wiremock_example_derives_its_username_guest_env(profile_dir):
     """The shipped example demonstrates the feature by using it to fix its
     own former duplication of WIREMOCK_USER."""

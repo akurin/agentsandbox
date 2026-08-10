@@ -29,7 +29,7 @@ from .audit import AuditLog, redactor
 from .broker.core import BrokerCore
 from .broker.server import BrokerServer, issue_token
 from .broker.upstream import UpstreamExecutor
-from .capabilities import CapabilityStore, CapabilitySpec
+from .capabilities import Capability, CapabilityStore, CapabilitySpec
 from .errors import SessionError
 from .keychain import SecretResolver
 from .netpolicy import DestinationPolicy
@@ -207,6 +207,35 @@ class SessionManager:
         issued: list[tuple[str, object]] = []
         for spec in specs:
             issued.append(self.issue_capability(spec))
+        return issued
+
+    def sync_from_profile(self, name: str) -> list[tuple[CapabilitySpec, str, Capability]]:
+        """Issue whatever `name` has gained since this session last minted
+        its capabilities, without touching what is already live.
+
+        A capability's `label` is the only stable identifier it has (no
+        provider field to fall back on - see `capabilities.py`), so it is
+        also the only thing this can compare against: a spec whose label
+        already belongs to a live, unrevoked capability is left alone.
+
+        Deliberately additive-only. A spec whose scope changed under an
+        *existing* label (a different host, secret, or injection kind) is
+        not detected here and keeps the old capability - that is a rescope,
+        not an addition, and `asbx box stop`/`start` is what re-reads the
+        profile from a clean slate. Likewise nothing here revokes a
+        capability whose label was removed from the profile.
+        """
+        from .profiles import load_profile, resolve_profile
+
+        path = resolve_profile(name)
+        specs = load_profile(path)
+        live_labels = {cap.label for cap in self.store.list() if not cap.revoked}
+        issued: list[tuple[CapabilitySpec, str, Capability]] = []
+        for spec in specs:
+            if spec.label in live_labels:
+                continue
+            token, cap = self.issue_capability(spec)
+            issued.append((spec, token, cap))
         return issued
 
     # -- lifecycle ----------------------------------------------------------

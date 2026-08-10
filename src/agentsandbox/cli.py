@@ -834,6 +834,87 @@ def cmd_cap_revoke(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_cap_sync(args: argparse.Namespace) -> int:
+    """Mint whatever a profile has gained since this box last started, and
+    push the new placeholders into the already-running guest - no restart.
+
+    Additive on both sides: `SessionManager.sync_from_profile` only mints
+    labels that are not already live, and this only *appends* to the
+    guest's env file rather than rewriting it, so nothing an already-open
+    shell already sourced is disturbed. A capability whose scope changed
+    under an existing label, or one removed from the profile, needs
+    `asbx box stop`/`start` instead - this never revokes or re-mints.
+    """
+    import subprocess
+
+    from .box import Box, SshIdentity
+    from .manager import SessionManager
+
+    session = _resolve_session(args.box)
+    box = Box.load(session.box_name) if session.box_name else None
+    if box is None or not box.profile:
+        print("!! this box has no profile to sync from", file=sys.stderr)
+        return EXIT_USAGE
+
+    issued = SessionManager(session).sync_from_profile(box.profile)
+    if not issued:
+        print("nothing new - every capability in the profile is already issued")
+        return 0
+
+    new_env: dict[str, str] = {}
+    for spec, token, cap in issued:
+        print(f"  cap {cap.cap_id:<18} {spec.label} ({', '.join(spec.methods)} {', '.join(spec.hosts)})")
+        if spec.guest_env:
+            new_env[spec.guest_env] = token
+            print(f"    guest env: ${spec.guest_env}")
+        else:
+            print(f'    placeholder: {token}  (add "guest_env" to the profile to inject it)')
+
+    if not new_env:
+        return 0
+
+    identity = SshIdentity(box.ssh_dir)
+    if not identity.exists:
+        print(f"!! {box.name} has no ssh keys; recreate it with `asbx box create`", file=sys.stderr)
+        return EXIT_USAGE
+    socket_path = session.paths.run / "ssh.sock"
+    if not socket_path.exists():
+        print(f"!! {box.name} has no ssh channel at {socket_path} - is it still running?", file=sys.stderr)
+        return EXIT_USAGE
+
+    proxy = f"{shlex.quote(sys.executable)} -m agentsandbox.cli vsock-proxy {shlex.quote(str(socket_path))}"
+    identity.write_client_config(box.name, proxy)
+
+    # Appended, never rewritten: a concurrent reader of the file (a shell
+    # mid-`source`) sees either the old content or the old content plus
+    # this addition, never a half-written file.
+    addition = "".join(f"export {name}={value}\n" for name, value in sorted(new_env.items()))
+    try:
+        subprocess.run(
+            [
+                "ssh",
+                "-F",
+                str(identity.config),
+                f"asbx-{box.name}",
+                "--",
+                "tee -a /run/asbx/capabilities.env >/dev/null",
+            ],
+            input=addition.encode(),
+            check=True,
+            timeout=20,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(f"!! could not reach {box.name} over ssh to deliver the new vars: {exc}", file=sys.stderr)
+        print("   the capabilities were still issued, and are usable by their placeholder", file=sys.stderr)
+        return 1
+
+    print(f"\npushed {len(new_env)} new var(s) to {box.name}'s /run/asbx/capabilities.env")
+    print("  a new `asbx box ssh` picks them up automatically")
+    print("  an already-open shell needs: source /run/asbx/capabilities.env")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # secrets
 
@@ -2011,6 +2092,12 @@ def build_parser() -> argparse.ArgumentParser:
     revoke = cap_sub.add_parser("revoke", parents=[box_flag], help="revoke one capability, or 'all'")
     revoke.add_argument("cap_id")
     revoke.set_defaults(func=cmd_cap_revoke)
+
+    cap_sub.add_parser(
+        "sync",
+        parents=[box_flag],
+        help="mint capabilities the profile has gained, and push them into the running guest",
+    ).set_defaults(func=cmd_cap_sync)
 
     # -- secret -----------------------------------------------------------
     secret = sub.add_parser("secret", help="credentials in the macOS keychain")

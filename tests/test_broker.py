@@ -24,7 +24,14 @@ from agentsandbox.broker.core import (
     scrub_secret,
 )
 from agentsandbox.broker.upstream import UpstreamResponse
-from agentsandbox.capabilities import AwsAutosignSpec, CapabilitySpec, InjectionSpec, SecretRef
+from agentsandbox.capabilities import (
+    AwsAutosignSpec,
+    CapabilitySpec,
+    InjectionSpec,
+    SecretRef,
+    short_id,
+    token_hash,
+)
 from agentsandbox.errors import BrokerError, UpstreamError
 from agentsandbox.keychain import SecretResolver, StaticResolver
 
@@ -350,6 +357,124 @@ def test_body_injection_substitutes_into_the_request_body(session, store, execut
     assert token.encode() not in executor.last["body"]
     assert SECRET.encode() in executor.last["body"]
     assert executor.last["credential_headers"] == []
+
+
+def test_body_injection_substitutes_every_placeholder_in_one_body(session, store, executor):
+    """The Travis-style OAuth password grant: client_id/client_secret/
+    username/password each need their own secret substituted into their own
+    x-www-form-urlencoded field of one POST - not just the first placeholder
+    the addon happened to find."""
+    resolver = StaticResolver(
+        {
+            "client-id": "id-12345",
+            "client-secret": "sec-abcde",
+            "the-username": "bot@example.com",
+            "the-password": "hunter2",
+        }
+    )
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    client_id_token, _ = store.issue(
+        CapabilitySpec(
+            label="travis-auth: client_id",
+            hosts=["api.github.com"],
+            methods=["POST"],
+            secret=SecretRef(service="client-id"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    client_secret_token, _ = store.issue(
+        CapabilitySpec(
+            label="travis-auth: client_secret",
+            hosts=["api.github.com"],
+            methods=["POST"],
+            secret=SecretRef(service="client-secret"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    username_token, _ = store.issue(
+        CapabilitySpec(
+            label="travis-auth: username",
+            hosts=["api.github.com"],
+            methods=["POST"],
+            secret=SecretRef(service="the-username"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    password_token, _ = store.issue(
+        CapabilitySpec(
+            label="travis-auth: password",
+            hosts=["api.github.com"],
+            methods=["POST"],
+            secret=SecretRef(service="the-password"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    body = (
+        f"grant_type=password&client_id={client_id_token}&client_secret={client_secret_token}"
+        f"&username={username_token}&password={password_token}"
+    ).encode()
+    response = core.handle(
+        make_request(
+            client_id_token,
+            host="api.github.com",
+            method="POST",
+            target="/oauth/token",
+            headers=[("Content-Type", "application/x-www-form-urlencoded")],
+            body=body,
+            extra_capabilities=[client_secret_token, username_token, password_token],
+        )
+    )
+    assert response.decision == "allow"
+    sent = executor.last["body"]
+    assert sent == (
+        b"grant_type=password&client_id=id-12345&client_secret=sec-abcde"
+        b"&username=bot@example.com&password=hunter2"
+    )
+    for token in (client_id_token, client_secret_token, username_token, password_token):
+        assert token.encode() not in sent
+
+
+def test_an_unauthorized_extra_placeholder_denies_the_whole_body_request(
+    session, store, executor, resolver
+):
+    """One bad secret among several must not partially substitute - the
+    request either goes out whole, or not at all."""
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    good_token, _ = store.issue(
+        CapabilitySpec(
+            label="travis-auth: client_id",
+            hosts=["api.github.com"],
+            methods=["POST"],
+            secret=SecretRef(service="github-token"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    # Scoped to a different host, so authorizing it in the same request fails.
+    mismatched_token, _ = store.issue(
+        CapabilitySpec(
+            label="travis-auth: client_secret",
+            hosts=["other.example.net"],
+            methods=["POST"],
+            secret=SecretRef(service="github-token"),
+            injection=InjectionSpec(kind="body"),
+        )
+    )
+    body = f"client_id={good_token}&client_secret={mismatched_token}".encode()
+    response = core.handle(
+        make_request(
+            good_token,
+            host="api.github.com",
+            method="POST",
+            target="/oauth/token",
+            headers=[("Content-Type", "application/x-www-form-urlencoded")],
+            body=body,
+            extra_capabilities=[mismatched_token],
+        )
+    )
+    assert response.decision == "deny"
+    assert response.reason == "host_not_permitted"
+    assert response.cap_id == short_id(token_hash(mismatched_token))
+    assert executor.calls == []
 
 
 def test_body_injection_refuses_a_foreign_aws_signature(session, store, executor, resolver):

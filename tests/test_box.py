@@ -457,6 +457,116 @@ def test_cli_ssh_places_flags_before_the_destination_and_command_after(
     assert captured["argv"][3:] == expected_tail
 
 
+def _running_box_with_profile(project, tmp_path, monkeypatch, capsys, *profile_entries):
+    """A box created with a profile, plus a live (fake-pid) session and an
+    `ssh.sock` marker - the state `cap sync` needs to believe it can reach
+    a running guest, without an actual VM."""
+    import json
+    import os
+
+    from agentsandbox.manager import SessionManager
+    from agentsandbox.session import STATE_RUNNING
+
+    monkeypatch.setenv("ASBX_PROFILE_DIR", str(tmp_path))
+    (tmp_path / "p.json").write_text(
+        json.dumps({"version": 1, "capabilities": list(profile_entries)})
+    )
+
+    cli.main(["box", "create", "neo", "--mount", f"{project}:{project}", "--profile", "p"])
+    capsys.readouterr()
+
+    manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
+    manager.session.state = STATE_RUNNING
+    manager.session.supervisor_pid = os.getpid()
+    manager.session.save()
+    manager.session.paths.run.mkdir(parents=True, exist_ok=True)
+    (manager.session.paths.run / "ssh.sock").write_text("")
+    return manager
+
+
+def test_cap_sync_pushes_only_the_new_guest_env_over_ssh(project, tmp_path, capsys, monkeypatch):
+    """The whole point: a secret added to the profile after the box already
+    started reaches the running guest without a restart, and nothing about
+    an already-live label gets touched or re-sent."""
+    import json
+    import subprocess
+
+    manager = _running_box_with_profile(
+        project,
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "A"},
+    )
+    # "a" already live, as if this box had already started once with it.
+    manager.sync_from_profile("p")
+    capsys.readouterr()
+
+    (tmp_path / "p.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "capabilities": [
+                    {
+                        "label": "a",
+                        "when": {"hosts": ["a.com"]},
+                        "secret": "keychain:a",
+                        "guest_env": "A",
+                    },
+                    {
+                        "label": "b",
+                        "when": {"hosts": ["b.com"]},
+                        "secret": "keychain:b",
+                        "guest_env": "B",
+                    },
+                ],
+            }
+        )
+    )
+
+    captured = {}
+
+    def fake_run(argv, *, input=None, **kwargs):
+        captured["argv"] = argv
+        captured["input"] = input
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert cli.main(["cap", "sync", "--box", "neo"]) == 0
+    out = capsys.readouterr().out
+    assert "guest env: $B" in out
+    assert "$A" not in out  # "a" was already live - sync must not touch it
+
+    assert captured["argv"][0] == "ssh"
+    assert captured["argv"][-2:] == ["--", "tee -a /run/asbx/capabilities.env >/dev/null"]
+    assert captured["input"].startswith(b"export B=")
+    assert captured["input"].count(b"\n") == 1  # only the one new var, appended once
+    assert b"export A=" not in captured["input"]
+
+
+def test_cap_sync_is_a_noop_when_nothing_is_new(project, tmp_path, capsys, monkeypatch):
+    manager = _running_box_with_profile(
+        project,
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "A"},
+    )
+    manager.sync_from_profile("p")
+    capsys.readouterr()
+
+    import subprocess
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("ssh should never be invoked when there is nothing new")
+
+    monkeypatch.setattr(subprocess, "run", fail_if_called)
+
+    assert cli.main(["cap", "sync", "--box", "neo"]) == 0
+    assert "nothing new" in capsys.readouterr().out
+
+
 def test_a_crashed_supervisor_does_not_block_the_box(project, capsys):
     """A session left marked RUNNING by a crash must not wedge it forever."""
     from agentsandbox.cli import _running_session_for

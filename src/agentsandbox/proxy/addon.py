@@ -108,7 +108,7 @@ class SandboxAddon:
         req = flow.request
         dest = Destination(req.scheme.lower(), req.pretty_host.lower(), req.port)
 
-        placeholder, location = self._find_capability(flow)
+        placeholder, location, extra_placeholders = self._find_capability(flow)
 
         if placeholder is None:
             if self._looks_like_dummy_aws_request(req):
@@ -130,7 +130,13 @@ class SandboxAddon:
             # it has the capability store - so both cases are routed there;
             # everything that isn't actually a body-kind capability still
             # gets refused, by BrokerCore._authorize.
-            self._broker_body(flow, dest, placeholder)
+            #
+            # `extra_placeholders` covers the case of a single request body
+            # needing several secrets substituted at once (an OAuth password
+            # grant POSTing client_id/client_secret/username/password as four
+            # separate form fields) - every placeholder found gets forwarded
+            # to the broker, not just the first.
+            self._broker_body(flow, dest, placeholder, extra_placeholders)
             return
 
         self._deny(
@@ -297,38 +303,47 @@ class SandboxAddon:
 
     # -- internals ----------------------------------------------------------
 
-    def _find_capability(self, flow: http.HTTPFlow) -> tuple[str | None, str]:
-        """Locate a capability placeholder and where it was carried."""
+    def _find_capability(self, flow: http.HTTPFlow) -> tuple[str | None, str, list[str]]:
+        """Locate a capability placeholder and where it was carried.
+
+        Returns ``(primary, location, extra)``. ``extra`` is only ever
+        non-empty for a body-carried placeholder - every other location
+        (header, cookie, url) still resolves to exactly one, same as before.
+        """
         req = flow.request
         for name in CAPABILITY_HEADERS:
             value = req.headers.get(name)
             if value:
                 found = find_placeholders(value)
                 if found:
-                    return found[0], "header"
+                    return found[0], "header", []
                 # `curl -u user:cap_v1_...` base64-encodes the credentials, so
                 # the placeholder is invisible in the raw header. Look inside,
                 # otherwise every basic-auth tool needs rewriting to use a
                 # bearer token it does not otherwise want.
                 if placeholder := _placeholder_in_basic_auth(value):
-                    return placeholder, "header"
+                    return placeholder, "header", []
         for name, value in req.headers.items(multi=True):
             if CAPABILITY_PREFIX in value:
                 if name.lower() == "cookie":
-                    return (find_placeholders(value) or [None])[0], "cookie"
+                    return (find_placeholders(value) or [None])[0], "cookie", []
                 found = find_placeholders(value)
                 if found:
-                    return found[0], "header"
+                    return found[0], "header", []
         if CAPABILITY_PREFIX in req.path:
             found = find_placeholders(req.path)
             if found:
-                return found[0], "url"
+                return found[0], "url", []
         content = req.raw_content or b""
         if content and len(content) <= _BODY_SCAN_LIMIT:
             found = find_placeholders(content.decode("utf-8", "ignore"))
             if found:
-                return found[0], "body"
-        return None, ""
+                # A body can legitimately carry several distinct secrets (see
+                # the docstring on `_broker_body`) - de-duplicated, since the
+                # same placeholder appearing twice needs only one substitution.
+                distinct = list(dict.fromkeys(found))
+                return distinct[0], "body", distinct[1:]
+        return None, "", []
 
     def _looks_like_dummy_aws_request(self, req: http.Request) -> bool:
         """Was this signed with the session's own dummy AWS credential?
@@ -385,7 +400,13 @@ class SandboxAddon:
             return
         flow.response = _to_mitm_response(response)
 
-    def _broker_body(self, flow: http.HTTPFlow, dest: Destination, placeholder: str) -> None:
+    def _broker_body(
+        self,
+        flow: http.HTTPFlow,
+        dest: Destination,
+        placeholder: str,
+        extra_placeholders: list[str] | None = None,
+    ) -> None:
         """A placeholder found in the request body, not a header.
 
         `aws_autosign` is threaded through the same way `_broker_aws_autosign`
@@ -394,6 +415,10 @@ class SandboxAddon:
         guest's own credential, whose body happens to carry a body-kind
         capability's placeholder) - the broker is what decides, and needs
         both pieces of information to do it.
+
+        `extra_placeholders` carries any other secrets the same body needs -
+        each still resolved and authorized independently by the broker, just
+        substituted into one outgoing request.
         """
         req = flow.request
         broker_request = BrokerRequest(
@@ -409,6 +434,7 @@ class SandboxAddon:
             operation=req.headers.get("x-asbx-operation"),
             flow_id=flow.id,
             aws_autosign=self._looks_like_dummy_aws_request(req),
+            extra_capabilities=list(extra_placeholders or []),
         )
         try:
             response = self.broker.call(broker_request)

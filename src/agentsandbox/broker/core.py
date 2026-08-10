@@ -137,6 +137,12 @@ class BrokerRequest:
     #: wholesale with the session's own signing secret, regardless of
     #: destination.
     aws_autosign: bool = False
+    #: Other placeholders found in the same body, beyond `capability` (the
+    #: first one found). Only ever non-empty for a body-kind request - an
+    #: OAuth password grant POSTing client_id/client_secret/username/password
+    #: as four separate form fields needs all four substituted in one pass,
+    #: not just the first placeholder the addon happened to see.
+    extra_capabilities: list[str] = field(default_factory=list)
 
     @property
     def dest(self) -> Destination:
@@ -161,6 +167,7 @@ class BrokerRequest:
                 "operation": self.operation,
                 "flow_id": self.flow_id,
                 "aws_autosign": self.aws_autosign,
+                "extra_capabilities": list(self.extra_capabilities),
             }
         )
 
@@ -179,6 +186,7 @@ class BrokerRequest:
             operation=data.get("operation"),
             flow_id=data.get("flow_id", ""),
             aws_autosign=bool(data.get("aws_autosign", False)),
+            extra_capabilities=list(data.get("extra_capabilities", [])),
         )
 
 
@@ -295,7 +303,18 @@ class BrokerCore:
                 cap = self._resolve(req)
                 self._authorize(req, cap)
                 if cap.injection.kind == "body":
-                    response = self._perform_body(req, cap)
+                    primary = cap
+                    extra_caps: list[Capability] = []
+                    for token in req.extra_capabilities:
+                        # `cap` tracks whichever capability is currently being
+                        # checked, so a denial here names the one that failed,
+                        # not the primary - the same reason `_resolve` and
+                        # `_authorize` are kept separate below.
+                        cap = self._resolve_placeholder(req, token)
+                        self._authorize(req, cap)
+                        extra_caps.append(cap)
+                    cap = primary
+                    response = self._perform_body(req, primary, extra_caps)
                 else:
                     response = self._perform(req, cap)
             elif req.aws_autosign:
@@ -368,16 +387,22 @@ class BrokerCore:
         nothing - which is exactly the case where the operator most needs to
         know which one to renew.
         """
-        if not req.capability.startswith(CAPABILITY_PREFIX):
+        return self._resolve_placeholder(req, req.capability)
+
+    def _resolve_placeholder(self, req: BrokerRequest, token: str) -> Capability:
+        """Same lookup as :meth:`_resolve`, for any placeholder found in the
+        request - not just the primary one. A body carrying several
+        secrets (see `extra_capabilities`) resolves each one this way."""
+        if not token.startswith(CAPABILITY_PREFIX):
             raise PolicyDenied("malformed_capability", "not a capability placeholder")
 
-        cap = self.store.lookup(req.capability)
+        cap = self.store.lookup(token)
         if cap is None:
             # Unknown placeholder: either revoked-and-pruned, forged, or from
             # another session. All three are "no".
             self.audit.emit(
                 "broker.unknown_capability",
-                token=fingerprint(req.capability),
+                token=fingerprint(token),
                 host=req.host,
                 method=req.method,
             )
@@ -539,7 +564,9 @@ class BrokerCore:
             cap_id=cap.cap_id,
         )
 
-    def _perform_body(self, req: BrokerRequest, cap: Capability) -> BrokerResponse:
+    def _perform_body(
+        self, req: BrokerRequest, cap: Capability, extra_caps: list[Capability] | None = None
+    ) -> BrokerResponse:
         """Body-kind capability: the placeholder is meant to end up embedded
         in content the guest constructs (a CloudFormation template's Lambda
         env var, say), not presented back by the guest itself.
@@ -550,13 +577,28 @@ class BrokerCore:
         placeholder version. The same request can need both: a `cdk deploy`
         asset upload is dummy-signed by the guest's own AWS credential *and*
         may carry a body-kind capability's placeholder in its content.
+
+        ``extra_caps`` covers the multi-secret case - an OAuth password grant
+        POSTing client_id/client_secret/username/password as four separate
+        form fields, say - already resolved and authorized by `handle` (each
+        against its own host/method/path scope), one per entry of
+        ``req.extra_capabilities`` in the same order.
         """
+        extra_caps = extra_caps or []
         secret = self.resolver.fetch(cap.secret)
         redactor.register_secret(secret)
         body = req.body.replace(req.capability.encode(), secret.encode())
 
-        self.audit.emit(
-            "broker.request",
+        secrets_used = [secret]
+        extra_cap_ids = []
+        for token, extra_cap in zip(req.extra_capabilities, extra_caps):
+            extra_secret = self.resolver.fetch(extra_cap.secret)
+            redactor.register_secret(extra_secret)
+            body = body.replace(token.encode(), extra_secret.encode())
+            secrets_used.append(extra_secret)
+            extra_cap_ids.append(extra_cap.cap_id)
+
+        audit_fields = dict(
             cap_id=cap.cap_id,
             label=cap.label,
             method=req.method,
@@ -565,6 +607,9 @@ class BrokerCore:
             body_bytes=len(body),
             flow=req.flow_id,
         )
+        if extra_cap_ids:
+            audit_fields["extra_cap_ids"] = extra_cap_ids
+        self.audit.emit("broker.request", **audit_fields)
 
         if req.aws_autosign:
             if self.aws_autosign is None:
@@ -635,11 +680,13 @@ class BrokerCore:
                 f"upstream response exceeded {cap.max_response_bytes} bytes",
             )
 
-        resp_body = scrub_secret(upstream.body, secret)
+        resp_body = upstream.body
+        for used in secrets_used:
+            resp_body = scrub_secret(resp_body, used)
         resp_headers = [
             (k, v)
             for k, v in sanitize_response_headers(upstream.headers)
-            if secret not in v and CAPABILITY_PREFIX not in v
+            if all(used not in v for used in secrets_used) and CAPABILITY_PREFIX not in v
         ]
         resp_headers.append(("Content-Length", str(len(resp_body))))
         resp_headers.append(("X-Asbx-Decision", "allow"))
@@ -647,6 +694,8 @@ class BrokerCore:
             resp_headers.append(("X-Asbx-Redirects", str(upstream.redirects)))
 
         self.store.record_usage(cap, len(resp_body))
+        for extra_cap in extra_caps:
+            self.store.record_usage(extra_cap, 0)
         return BrokerResponse(
             status_code=upstream.status_code,
             headers=resp_headers,

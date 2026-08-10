@@ -24,6 +24,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import secrets
 import string
 import threading
@@ -45,6 +46,19 @@ from .netpolicy import Destination, any_host_matches
 #: is refused rather than approximated - "deny unsupported authenticated
 #: protocols by default".
 SUPPORTED_INJECTIONS = frozenset({"bearer", "header", "basic", "body"})
+
+#: A guest_env value becomes a shell `export NAME=value` line
+#: (`vm/cloudinit.py`) - anything not a valid identifier would either break
+#: that line outright or silently truncate at the first illegal character,
+#: with no error until the guest script fails to find the variable it expected.
+_GUEST_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def validate_guest_env_name(name: str, *, where: str) -> None:
+    if not _GUEST_ENV_RE.match(name):
+        raise CapabilityError(
+            f"{where} {name!r} is not a valid shell environment variable name"
+        )
 
 
 def new_placeholder() -> str:

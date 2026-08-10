@@ -155,6 +155,40 @@ def test_capability_in_the_body_is_routed_to_the_broker(addon, broker_stub):
     assert flow.response.status_code == 200
 
 
+def test_all_placeholders_in_a_body_are_forwarded_to_the_broker(addon, broker_stub):
+    """The Travis-style case: one x-www-form-urlencoded POST needing four
+    separate secrets substituted into four separate fields. Every
+    placeholder found in the body must reach the broker, not just the
+    first - the broker (not the addon) decides whether each one is
+    actually authorized for this request."""
+    token2 = "cap_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    token3 = "cap_v1_cccccccccccccccccccccccccccccc"
+    token4 = "cap_v1_dddddddddddddddddddddddddddddd"
+    flow = http_flow(
+        method=b"POST",
+        content=(
+            f"client_id={TOKEN}&client_secret={token2}&username={token3}&password={token4}"
+        ).encode(),
+    )
+    addon.request(flow)
+    assert len(broker_stub.requests) == 1
+    brokered = broker_stub.requests[0]
+    assert brokered.capability == TOKEN
+    assert brokered.extra_capabilities == [token2, token3, token4]
+
+
+def test_a_repeated_placeholder_in_the_body_is_only_listed_once(addon, broker_stub):
+    """The same secret embedded twice in one body needs one substitution,
+    not a second, redundant resolve/authorize round trip."""
+    flow = http_flow(
+        method=b"POST",
+        content=f'{{"a":"{TOKEN}","b":"{TOKEN}"}}'.encode(),
+    )
+    addon.request(flow)
+    assert broker_stub.requests[0].capability == TOKEN
+    assert broker_stub.requests[0].extra_capabilities == []
+
+
 def test_capability_in_a_cookie_is_refused(addon, broker_stub):
     flow = http_flow(headers=[("Host", "api.github.com"), ("Cookie", f"auth={TOKEN}")])
     addon.request(flow)

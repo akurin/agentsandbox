@@ -77,6 +77,68 @@ def cli_issue(manager: SessionManager):
     )
 
 
+# -- sync from profile --------------------------------------------------------
+
+
+def _write_profile(path, *entries):
+    path.write_text(json.dumps({"version": 1, "capabilities": list(entries)}))
+
+
+def test_sync_from_profile_only_mints_what_is_new(tmp_path, monkeypatch):
+    """Re-syncing after adding a second secret must not re-issue the first,
+    or every sync would pile up a fresh duplicate for every label already
+    live."""
+    monkeypatch.setenv("ASBX_PROFILE_DIR", str(tmp_path))
+    _write_profile(
+        tmp_path / "p.json",
+        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "A"},
+    )
+    manager = SessionManager.create(allow_hosts=["*"])
+
+    first = manager.sync_from_profile("p")
+    assert [spec.label for spec, _, _ in first] == ["a"]
+
+    _write_profile(
+        tmp_path / "p.json",
+        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "A"},
+        {"label": "b", "when": {"hosts": ["b.com"]}, "secret": "keychain:b", "guest_env": "B"},
+    )
+    second = manager.sync_from_profile("p")
+    assert [spec.label for spec, _, _ in second] == ["b"]
+
+    assert {cap.label for cap in manager.store.list()} == {"a", "b"}
+
+
+def test_sync_from_profile_is_a_noop_once_everything_is_live(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASBX_PROFILE_DIR", str(tmp_path))
+    _write_profile(
+        tmp_path / "p.json",
+        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a"},
+    )
+    manager = SessionManager.create(allow_hosts=["*"])
+
+    assert len(manager.sync_from_profile("p")) == 1
+    assert manager.sync_from_profile("p") == []
+
+
+def test_sync_from_profile_remints_a_revoked_label(tmp_path, monkeypatch):
+    """A revoked capability's label is free again - `sync` is not the tool
+    that would have decided to bring it back, but it should not treat a
+    revoked grant as still "live" either."""
+    monkeypatch.setenv("ASBX_PROFILE_DIR", str(tmp_path))
+    _write_profile(
+        tmp_path / "p.json",
+        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a"},
+    )
+    manager = SessionManager.create(allow_hosts=["*"])
+
+    [(_, _, cap)] = manager.sync_from_profile("p")
+    manager.store.revoke(cap.cap_id)
+
+    again = manager.sync_from_profile("p")
+    assert len(again) == 1
+
+
 # -- teardown ----------------------------------------------------------------
 
 

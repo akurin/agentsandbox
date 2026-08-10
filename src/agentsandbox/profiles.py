@@ -18,6 +18,33 @@ in a capability entry should require guessing:
 * ``secret`` - where the real credential comes from.
 * ``injection`` - how it gets attached to the outbound request.
 
+An entry declares ``secret`` (singular) in the ordinary case of one
+capability, one credential.  For a body-kind request that needs several
+secrets substituted at once - an OAuth password grant POSTing
+client_id/client_secret/username/password as four separate
+x-www-form-urlencoded fields, say - it declares ``secrets`` (plural) instead:
+a name -> ``{"secret": ..., "guest_env": ...}`` mapping.  Each entry fans out
+into its own independently-scoped, independently-audited capability sharing
+the parent's ``when``/``ttl``/``injection``; unlike the top-level
+``guest_env``, the one nested inside ``secrets`` is required - a secret named
+only there has no other way to reach the guest::
+
+    {
+      "label": "travis-auth",
+      "when": {"hosts": ["auth.travis-ci.example"], "methods": ["POST"], "paths": ["/oauth/token"]},
+      "injection": {"kind": "body"},
+      "secrets": {
+        "client_id": {
+          "secret": "keychain:travis-client-id",
+          "guest_env": "TRAVIS_CLIENT_ID"
+        },
+        "client_secret": {
+          "secret": "keychain:travis-client-secret",
+          "guest_env": "TRAVIS_CLIENT_SECRET"
+        }
+      }
+    }
+
 Example (``~/.config/asbx/profiles/oss-contributor.json``)::
 
     {
@@ -61,7 +88,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .capabilities import AwsAutosignSpec, CapabilitySpec, InjectionSpec, SecretRef
+from .capabilities import (
+    AwsAutosignSpec,
+    CapabilitySpec,
+    InjectionSpec,
+    SecretRef,
+    validate_guest_env_name,
+)
 from .config import DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
 from .errors import CapabilityError, PolicyDenied
 
@@ -154,7 +187,7 @@ def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str], AwsAutosig
     specs: list[CapabilitySpec] = []
     for i, entry in enumerate(entries):
         try:
-            specs.append(_entry_to_spec(entry, default_store))
+            specs.extend(_entry_to_specs(entry, default_store))
         except (KeyError, TypeError, ValueError, PolicyDenied) as exc:
             raise CapabilityError(f"profile {path}, entry {i}: {exc}") from exc
 
@@ -215,6 +248,25 @@ def _guest_env_collision(raw_env: dict, specs: list[CapabilitySpec]) -> str | No
     return None
 
 
+def _entry_to_specs(entry: dict[str, Any], default_store: str = "") -> list[CapabilitySpec]:
+    """One profile entry, one or many specs.
+
+    Most entries declare a single ``secret`` and become one spec, as always.
+    An entry can instead declare ``secrets`` - a name -> {secret, guest_env}
+    mapping - when one request needs several credentials substituted at once
+    (an OAuth password grant POSTing client_id/client_secret/username/password
+    as four separate x-www-form-urlencoded fields, say). Each key fans out
+    into its own independently-scoped, independently-audited spec sharing the
+    entry's ``when``/``ttl``/``injection``, rather than a new "bundle" concept
+    with its own trust boundary.
+    """
+    if "secret" in entry and "secrets" in entry:
+        raise CapabilityError("a capability must declare either 'secret' or 'secrets', not both")
+    if "secrets" in entry:
+        return _entry_to_specs_multi(entry, default_store)
+    return [_entry_to_spec(entry, default_store)]
+
+
 def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> CapabilitySpec:
     secret = _resolve_secret_ref(entry.get("secret"))
     if default_store and not secret.store:
@@ -233,6 +285,10 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
     if not hosts:
         raise CapabilityError("'when.hosts' must name at least one host")
 
+    guest_env = str(entry.get("guest_env", ""))
+    if guest_env:
+        validate_guest_env_name(guest_env, where="guest_env")
+
     return CapabilitySpec(
         hosts=hosts,
         label=label,
@@ -245,8 +301,73 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
         injection=injection,
         ttl_seconds=int(entry.get("ttl", DEFAULT_TTL_SECONDS)),
         max_response_bytes=int(entry.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)),
-        guest_env=str(entry.get("guest_env", "")),
+        guest_env=guest_env,
     )
+
+
+def _entry_to_specs_multi(entry: dict[str, Any], default_store: str = "") -> list[CapabilitySpec]:
+    label = str(entry.get("label", ""))
+    if not label:
+        raise CapabilityError("a capability must have a label")
+
+    injection = _resolve_injection(entry.get("injection", {}))
+    injection.validate()
+
+    when = entry.get("when")
+    if not isinstance(when, dict):
+        raise CapabilityError("a capability needs a 'when' block naming its hosts")
+    hosts = _as_list(when.get("hosts", []))
+    if not hosts:
+        raise CapabilityError("'when.hosts' must name at least one host")
+    resources = _as_list(when.get("resources", []))
+    methods = _as_list(when.get("methods", ["GET"]))
+    path_globs = _as_list(when.get("paths", ["/*"]))
+    deny_path_globs = _as_list(when.get("deny_paths", []))
+    operations = _as_list(when.get("operations", []))
+    ttl_seconds = int(entry.get("ttl", DEFAULT_TTL_SECONDS))
+    max_response_bytes = int(entry.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES))
+
+    raw_secrets = entry.get("secrets")
+    if not isinstance(raw_secrets, dict) or not raw_secrets:
+        raise CapabilityError("'secrets' must be a non-empty mapping")
+
+    specs: list[CapabilitySpec] = []
+    for key, item in raw_secrets.items():
+        if not isinstance(item, dict):
+            raise CapabilityError(
+                f"secrets[{key!r}] must be a mapping with 'secret' and 'guest_env'"
+            )
+        secret = _resolve_secret_ref(item.get("secret"))
+        if default_store and not secret.store:
+            secret.store = default_store
+
+        # Unlike the top-level `guest_env`, this one is not optional: a
+        # secret named only inside `secrets` has no other way to reach the
+        # guest (no "printed at issue time for manual copy" fallback makes
+        # sense for one of four fields the guest's own script must already
+        # reference by name).
+        guest_env = str(item.get("guest_env", ""))
+        if not guest_env:
+            raise CapabilityError(f"secrets[{key!r}] needs a 'guest_env'")
+        validate_guest_env_name(guest_env, where=f"secrets[{key!r}].guest_env")
+
+        specs.append(
+            CapabilitySpec(
+                hosts=list(hosts),
+                label=f"{label}: {key}",
+                resources=list(resources),
+                methods=list(methods),
+                path_globs=list(path_globs),
+                deny_path_globs=list(deny_path_globs),
+                operations=list(operations),
+                secret=secret,
+                injection=injection,
+                ttl_seconds=ttl_seconds,
+                max_response_bytes=max_response_bytes,
+                guest_env=guest_env,
+            )
+        )
+    return specs
 
 
 #: Which field a secret's explicit-object form names its identifier with,
@@ -309,6 +430,9 @@ def _resolve_injection(data: dict) -> InjectionSpec:
         username_guest_env = username_field.get("guest_env")
     elif username_field is not None:
         username = str(username_field)
+
+    if username_guest_env:
+        validate_guest_env_name(username_guest_env, where="username.guest_env")
 
     return InjectionSpec(
         kind=data.get("kind", "bearer"),
