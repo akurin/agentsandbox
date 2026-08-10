@@ -288,9 +288,16 @@ def render_user_data(
     runcmd.append(["/usr/local/bin/asbx-bootstrap"])
     # Hand writable mounts to the agent. The mount points are known here, so
     # the guest does not have to work them out for itself.
+    #
+    # `|| true`: cloud-init stops at the first failing runcmd entry (see the
+    # comment above), and this one is not always reliable - virtiofs can
+    # refuse it under host-side conditions that have nothing to do with the
+    # mount itself. A missed chown here is recoverable (the mount already
+    # works for read/write in practice); silently skipping every runcmd
+    # entry after it - notably the forwarded-port services below - is not.
     for tag, mount_point, _fs, options, *_ in fstab_entries:
         if tag != "asbxlog" and "ro," not in options:
-            runcmd.append(["chown", "agent:agent", mount_point])
+            runcmd.append(["sh", "-c", f"chown agent:agent {shlex.quote(mount_point)} || true"])
     for guest_port in sorted(vsock_ports):
         runcmd.append(["systemctl", "enable", "--now", f"asbx-forward@{guest_port}.service"])
 

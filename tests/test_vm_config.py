@@ -432,7 +432,13 @@ def test_writable_mounts_are_handed_to_the_agent(session, tmp_path):
             mounts=list(manager.session.mounts),
         ).split("\n", 1)[1]
     )
-    assert ["chown", "agent:agent", str(project)] in payload["runcmd"]
+    chown_entries = [c for c in payload["runcmd"] if c[:2] == ["sh", "-c"] and "chown" in c[-1]]
+    assert len(chown_entries) == 1
+    assert f"chown agent:agent {project}" in chown_entries[0][-1]
+    # `cloud-init` stops at the first failing runcmd entry - this one must
+    # never be able to take the entries after it (forwarded ports) down with
+    # it, so it has to tolerate virtiofs refusing the chown.
+    assert chown_entries[0][-1].rstrip().endswith("|| true")
 
 
 def test_read_only_mounts_are_not_chowned(session, driver, tmp_path):
@@ -447,7 +453,9 @@ def test_read_only_mounts_are_not_chowned(session, driver, tmp_path):
             mounts=[Mount(host=str(docs), guest="/mnt/docs", read_only=True)],
         ).split("\n", 1)[1]
     )
-    assert not any(c[:2] == ["chown", "agent:agent"] and "docs" in c[-1] for c in payload["runcmd"])
+    assert not any(
+        c[:2] == ["sh", "-c"] and "chown" in c[-1] and "docs" in c[-1] for c in payload["runcmd"]
+    )
 
 
 def test_mounts_are_read_write_by_default(tmp_path):
