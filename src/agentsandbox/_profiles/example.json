@@ -13,47 +13,55 @@
     "signing_secret": "aws_profile:work"
   },
 
+  "_comment_injection": "injection is always a list of rules. One entry, as in these three capabilities, is the ordinary case: one mechanism, unconditionally, and that rule's own 'when' is the capability's grant - there is no separate top-level 'when'. More than one rule dispatches by which one's 'when' a request actually matches, for a secret that needs different mechanisms at different destinations (see 'deploy tooling' below for a rule's other fields, and the README for a worked multi-rule example).",
+
   "capabilities": [
     {
       "label": "read repos",
       "guest_env": "GITHUB_TOKEN",
-      "when": {
-        "hosts": ["api.github.com"],
-        "methods": ["GET", "HEAD"],
-        "paths": ["/repos/*", "/user"]
-      },
-      "secret": "pass:github/read-only-token"
+      "secret": "pass:github/read-only-token",
+      "injection": [{
+        "when": {
+          "hosts": ["api.github.com"],
+          "methods": ["GET", "HEAD"],
+          "paths": ["/repos/*", "/user"]
+        }
+      }]
     },
 
     {
       "label": "completions",
       "guest_env": "OPENAI_API_KEY",
-      "when": {
-        "hosts": ["api.openai.com"],
-        "methods": ["POST"],
-        "paths": ["/v1/chat/completions", "/v1/embeddings"]
-      },
-      "secret": "keychain:asbx-openai:default"
+      "secret": "keychain:asbx-openai:default",
+      "injection": [{
+        "when": {
+          "hosts": ["api.openai.com"],
+          "methods": ["POST"],
+          "paths": ["/v1/chat/completions", "/v1/embeddings"]
+        }
+      }]
     },
 
     {
-      "_comment_deny": "deny_paths is checked before paths, so a broad allow can keep a few endpoints out of reach. Use it where an API mixes routine and destructive operations under one prefix.",
+      "_comment_deny": "deny_paths is checked before paths, so a broad allow can keep a few endpoints out of reach. Use it where an API mixes routine and destructive operations under one prefix. Capability-wide - not inside 'when' or any one injection rule - since it isn't about which mechanism attaches, it's about what the capability may touch at all.",
       "_comment_ttl": "ttl is in seconds, and 0 - the default - means the capability never expires, because an agent may run for days. Set it only for a grant meant to lapse on its own; extend one with `asbx cap renew`.",
       "label": "deploy tooling",
       "guest_env": "INTERNAL_TOKEN",
-      "when": {
-        "hosts": ["api.internal.example.com"],
-        "methods": ["GET", "POST", "DELETE"],
-        "paths": ["/v1/*"],
-        "deny_paths": ["/v1/admin/*", "/v1/*/purge"]
-      },
+      "deny_paths": ["/v1/admin/*", "/v1/*/purge"],
       "ttl": 1800,
       "secret": "pass:internal/deploy-token",
-      "injection": {
-        "kind": "header",
-        "header": "X-Api-Key",
-        "template": "{secret}"
-      }
+      "injection": [
+        {
+          "when": {
+            "hosts": ["api.internal.example.com"],
+            "methods": ["GET", "POST", "DELETE"],
+            "paths": ["/v1/*"]
+          },
+          "kind": "header",
+          "header": "X-Api-Key",
+          "template": "{secret}"
+        }
+      ]
     }
   ]
 }

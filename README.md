@@ -150,12 +150,14 @@ them by hand every time:
   "capabilities": [
     {
       "label": "github",
-      "when": {
-        "hosts": ["api.github.com"],
-        "methods": ["GET", "HEAD"],
-        "paths": ["/repos/acme/*"]
-      },
-      "secret": "keychain:asbx-github:me"
+      "secret": "keychain:asbx-github:me",
+      "injection": [{
+        "when": {
+          "hosts": ["api.github.com"],
+          "methods": ["GET", "HEAD"],
+          "paths": ["/repos/acme/*"]
+        }
+      }]
     }
   ]
 }

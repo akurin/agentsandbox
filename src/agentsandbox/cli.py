@@ -21,7 +21,7 @@ from pathlib import Path
 from .audit import AuditLog
 from .broker.core import BrokerRequest
 from .broker.server import UnixBrokerClient, read_token
-from .capabilities import CapabilitySpec, CapabilityStore, InjectionSpec, SecretRef
+from .capabilities import CapabilitySpec, CapabilityStore, InjectionRule, InjectionSpec, SecretRef
 from .config import DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
 from .errors import SandboxError
 from .keychain import KeychainProvider
@@ -648,12 +648,16 @@ def cmd_cap_issue(args: argparse.Namespace) -> int:
         path_globs=args.path or ["/*"],
         operations=args.operation or [],
         secret=args.secret,
-        injection=InjectionSpec(
-            kind=args.injection,
-            header=args.header,
-            template=args.template,
-            username=args.username,
-        ),
+        injection_rules=[
+            InjectionRule(
+                injection=InjectionSpec(
+                    kind=args.injection,
+                    header=args.header,
+                    template=args.template,
+                    username=args.username,
+                )
+            )
+        ],
         ttl_seconds=args.ttl,
         max_response_bytes=args.max_response_bytes,
     )
@@ -1020,6 +1024,14 @@ def cmd_profile_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _describe_injection(inject) -> str:
+    return {
+        "basic": f"basic auth as {inject.username!r}",
+        "bearer": "Authorization: Bearer <secret>",
+        "header": f"{inject.header}: {inject.template.replace('{secret}', '<secret>')}",
+    }.get(inject.kind, inject.kind)
+
+
 def cmd_profile_show(args: argparse.Namespace) -> int:
     """Print what a profile resolves to, resolved rather than as written.
 
@@ -1052,19 +1064,18 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
               f"{':' + secret.account if secret.account else ''}")
 
     for spec in specs:
-        inject = spec.injection
-        how = {
-            "basic": f"basic auth as {inject.username!r}",
-            "bearer": "Authorization: Bearer <secret>",
-            "header": f"{inject.header}: {inject.template.replace('{secret}', '<secret>')}",
-        }.get(inject.kind, inject.kind)
-
         print(f"\n  - label: {spec.label}")
         print(f"    placeholder:  ${spec.guest_env}" if spec.guest_env else
               "    placeholder:  (none - copy it from `asbx cap issue` by hand)")
         print(f"    secret:       {spec.secret.backend}:{spec.secret.service}"
               f"{':' + spec.secret.account if spec.secret.account else ''}")
-        print(f"    attached as:  {how}")
+        if len(spec.injection_rules) > 1:
+            print("    attached as:  (depends on destination)")
+            for rule in spec.injection_rules:
+                where = ", ".join(rule.hosts) or "any host in scope"
+                print(f"      {where}: {_describe_injection(rule.injection)}")
+        else:
+            print(f"    attached as:  {_describe_injection(spec.injection_rules[0].injection)}")
         print(f"    hosts:        {', '.join(spec.hosts)}")
         print(f"    methods:      {', '.join(spec.methods)}")
         print(f"    paths:        {', '.join(spec.path_globs)}")

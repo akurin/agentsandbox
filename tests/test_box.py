@@ -496,7 +496,7 @@ def test_cap_sync_pushes_only_the_new_guest_env_over_ssh(project, tmp_path, caps
         tmp_path,
         monkeypatch,
         capsys,
-        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "A"},
+        {"label": "a", "secret": "keychain:a", "guest_env": "A", "injection": [{"when": {"hosts": ["a.com"]}}]},
     )
     # "a" already live, as if this box had already started once with it.
     manager.sync_from_profile("p")
@@ -509,15 +509,15 @@ def test_cap_sync_pushes_only_the_new_guest_env_over_ssh(project, tmp_path, caps
                 "capabilities": [
                     {
                         "label": "a",
-                        "when": {"hosts": ["a.com"]},
                         "secret": "keychain:a",
                         "guest_env": "A",
+                        "injection": [{"when": {"hosts": ["a.com"]}}],
                     },
                     {
                         "label": "b",
-                        "when": {"hosts": ["b.com"]},
                         "secret": "keychain:b",
                         "guest_env": "B",
+                        "injection": [{"when": {"hosts": ["b.com"]}}],
                     },
                 ],
             }
@@ -551,7 +551,7 @@ def test_cap_sync_is_a_noop_when_nothing_is_new(project, tmp_path, capsys, monke
         tmp_path,
         monkeypatch,
         capsys,
-        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "A"},
+        {"label": "a", "secret": "keychain:a", "guest_env": "A", "injection": [{"when": {"hosts": ["a.com"]}}]},
     )
     manager.sync_from_profile("p")
     capsys.readouterr()

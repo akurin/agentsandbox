@@ -12,11 +12,18 @@ in a capability entry should require guessing:
   fall back on).
 * ``guest_env`` - which guest environment variable receives the minted
   placeholder.
-* ``when`` - the complete condition: where this can be used and what it can
-  do there (``hosts``, ``methods``, ``paths``, ``deny_paths``, ``resources``,
-  ``operations``).
+* ``injection`` - always a list of rules. One entry is the ordinary case -
+  one mechanism, unconditionally - and each rule's own ``when`` (``hosts``,
+  ``methods``, ``paths``) *is* the capability's grant for that mechanism;
+  there is no separate top-level ``when``. More than one rule means several
+  mechanisms, dispatched by which rule's ``when`` a request actually
+  matches - authorization is still the union of every rule's hosts and
+  methods, independently, so splitting across rules changes *where a
+  mechanism attaches*, never *what is authorized*.
+* ``resources``/``deny_paths``/``operations`` - capability-wide, not
+  per-mechanism, so they sit directly on the entry rather than inside any
+  one rule.
 * ``secret`` - where the real credential comes from.
-* ``injection`` - how it gets attached to the outbound request.
 
 An entry declares ``secret`` (singular) in the ordinary case of one
 capability, one credential.  For a body-kind request that needs several
@@ -25,14 +32,16 @@ client_id/client_secret/username/password as four separate
 x-www-form-urlencoded fields, say - it declares ``secrets`` (plural) instead:
 a name -> ``{"secret": ..., "guest_env": ...}`` mapping.  Each entry fans out
 into its own independently-scoped, independently-audited capability sharing
-the parent's ``when``/``ttl``/``injection``; unlike the top-level
-``guest_env``, the one nested inside ``secrets`` is required - a secret named
-only there has no other way to reach the guest::
+the parent's ``injection``; unlike the top-level ``guest_env``, the one
+nested inside ``secrets`` is required - a secret named only there has no
+other way to reach the guest::
 
     {
       "label": "travis-auth",
-      "when": {"hosts": ["auth.travis-ci.example"], "methods": ["POST"], "paths": ["/oauth/token"]},
-      "injection": {"kind": "body"},
+      "injection": [{
+        "when": {"hosts": ["auth.travis-ci.example"], "methods": ["POST"], "paths": ["/oauth/token"]},
+        "kind": "body"
+      }],
       "secrets": {
         "client_id": {
           "secret": "keychain:travis-client-id",
@@ -52,22 +61,20 @@ Example (``~/.config/asbx/profiles/oss-contributor.json``)::
       "capabilities": [
         {
           "label": "github",
-          "when": {
-            "hosts": ["api.github.com"],
-            "methods": ["GET", "HEAD"],
-            "paths": ["/repos/acme/*"]
-          },
-          "secret": "keychain:asbx-github:me"
+          "secret": "keychain:asbx-github:me",
+          "injection": [{
+            "when": {"hosts": ["api.github.com"], "methods": ["GET", "HEAD"], "paths": ["/repos/acme/*"]}
+          }]
         },
         {
           "label": "npm",
-          "when": {"hosts": ["registry.npmjs.org"]},
-          "secret": "keychain:asbx-npm:me"
+          "secret": "keychain:asbx-npm:me",
+          "injection": [{"when": {"hosts": ["registry.npmjs.org"]}}]
         },
         {
           "label": "openai",
-          "when": {"hosts": ["api.openai.com"], "methods": ["POST"]},
-          "secret": "keychain:asbx-openai:default"
+          "secret": "keychain:asbx-openai:default",
+          "injection": [{"when": {"hosts": ["api.openai.com"], "methods": ["POST"]}}]
         }
       ]
     }
@@ -91,6 +98,7 @@ from typing import Any
 from .capabilities import (
     AwsAutosignSpec,
     CapabilitySpec,
+    InjectionRule,
     InjectionSpec,
     SecretRef,
     validate_guest_env_name,
@@ -208,8 +216,9 @@ def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str], AwsAutosig
     # matching Basic-auth header without the value being written twice.
     plain_env = {str(k): str(v) for k, v in raw_env.items()}
     for spec in specs:
-        if spec.injection.username_guest_env:
-            plain_env[spec.injection.username_guest_env] = spec.injection.username or ""
+        for rule in spec.injection_rules:
+            if rule.injection.username_guest_env:
+                plain_env[rule.injection.username_guest_env] = rule.injection.username or ""
 
     aws_autosign = _resolve_aws_autosign(data.get("aws_autosign"), path)
 
@@ -236,10 +245,13 @@ def _guest_env_collision(raw_env: dict, specs: list[CapabilitySpec]) -> str | No
     """
     seen: dict[str, str] = {str(k): "the profile's env block" for k in raw_env}
     for spec in specs:
-        for name, source in (
-            (spec.guest_env, f"the guest_env for {spec.label!r}"),
-            (spec.injection.username_guest_env, f"the username.guest_env for {spec.label!r}"),
-        ):
+        names = [(spec.guest_env, f"the guest_env for {spec.label!r}")]
+        names += [
+            (rule.injection.username_guest_env, f"the username.guest_env for {spec.label!r}")
+            for rule in spec.injection_rules
+            if rule.injection.username_guest_env
+        ]
+        for name, source in names:
             if not name:
                 continue
             if name in seen:
@@ -271,19 +283,19 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
     secret = _resolve_secret_ref(entry.get("secret"))
     if default_store and not secret.store:
         secret.store = default_store
-    injection = _resolve_injection(entry.get("injection", {}))
-    injection.validate()
+
+    injection_rules = _resolve_injection_rules(entry.get("injection", [{}]))
 
     label = str(entry.get("label", ""))
     if not label:
         raise CapabilityError("a capability must have a label")
 
-    when = entry.get("when")
-    if not isinstance(when, dict):
-        raise CapabilityError("a capability needs a 'when' block naming its hosts")
-    hosts = _as_list(when.get("hosts", []))
-    if not hosts:
-        raise CapabilityError("'when.hosts' must name at least one host")
+    hosts, methods, path_globs = _scope_from_injection_rules(injection_rules)
+    # Capability-wide, not per-mechanism, so they live directly on the
+    # entry rather than inside any one injection rule's `when`.
+    resources = _as_list(entry.get("resources", []))
+    deny_path_globs = _as_list(entry.get("deny_paths", []))
+    operations = _as_list(entry.get("operations", []))
 
     guest_env = str(entry.get("guest_env", ""))
     if guest_env:
@@ -292,17 +304,84 @@ def _entry_to_spec(entry: dict[str, Any], default_store: str = "") -> Capability
     return CapabilitySpec(
         hosts=hosts,
         label=label,
-        resources=_as_list(when.get("resources", [])),
-        methods=_as_list(when.get("methods", ["GET"])),
-        path_globs=_as_list(when.get("paths", ["/*"])),
-        deny_path_globs=_as_list(when.get("deny_paths", [])),
-        operations=_as_list(when.get("operations", [])),
+        resources=resources,
+        methods=methods,
+        path_globs=path_globs,
+        deny_path_globs=deny_path_globs,
+        operations=operations,
         secret=secret,
-        injection=injection,
+        injection_rules=injection_rules,
         ttl_seconds=int(entry.get("ttl", DEFAULT_TTL_SECONDS)),
         max_response_bytes=int(entry.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)),
         guest_env=guest_env,
     )
+
+
+def _scope_from_injection_rules(
+    injection_rules: list[InjectionRule],
+) -> tuple[list[str], list[str], list[str]]:
+    """A capability's own ``hosts``/``methods``/``paths`` - the union of
+    what its injection rules declare. There is no separate top-level
+    ``when``; every capability's scope comes from here.
+
+    Authorization checks that union, not paired combinations - `hosts` and
+    `methods` stay two independent lists, exactly as `check_destination`/
+    `check_operation` already treat them, so a rule pairing host A with
+    method X and another pairing host B with method Y does *not* refuse
+    host A with method Y. Splitting hosts/methods across rules is about
+    which mechanism attaches where, never about tightening what is
+    authorized.
+
+    Each rule's own `when` is a real grant here, unlike the case where a
+    top-level `when` already exists and a rule only narrows *within* it
+    (there, an empty axis on a rule means "no further narrowing") - so
+    every rule must name its own hosts explicitly; there is nothing to
+    fall back on if it doesn't.
+    """
+    hosts: list[str] = []
+    methods: list[str] = []
+    path_globs: list[str] = []
+    for i, rule in enumerate(injection_rules):
+        if not rule.hosts:
+            raise CapabilityError(f"injection[{i}] needs its own 'when.hosts'")
+        hosts += [h for h in rule.hosts if h not in hosts]
+        methods += [m for m in rule.methods if m not in methods]
+        path_globs += [p for p in rule.path_globs if p not in path_globs]
+    return hosts, methods or ["GET"], path_globs or ["/*"]
+
+
+def _resolve_injection_rules(data: Any) -> list[InjectionRule]:
+    """``injection``: always a list of rules. One entry is the common case -
+    one mechanism, unconditionally, matching anything already inside the
+    capability's own scope. More than one means dispatch by which entry's
+    own (narrower) ``when`` a request actually matches.
+
+    Each rule's ``when`` only narrows within the capability's own
+    ``hosts``/``methods``/``paths`` - it is never itself a grant, so an
+    empty axis there means "no further narrowing", not "matches nothing".
+    The rest of a rule's fields are exactly an ``injection`` object's own
+    shape (``kind``/``header``/``template``/``username``).
+    """
+    if not isinstance(data, list) or not data:
+        raise CapabilityError("'injection' must be a non-empty list")
+    rules: list[InjectionRule] = []
+    for i, rule in enumerate(data):
+        if not isinstance(rule, dict):
+            raise CapabilityError(f"injection[{i}] must be a mapping")
+        when = rule.get("when", {})
+        if not isinstance(when, dict):
+            raise CapabilityError(f"injection[{i}].when must be a mapping")
+        spec = _resolve_injection(rule)
+        spec.validate()
+        rules.append(
+            InjectionRule(
+                hosts=_as_list(when.get("hosts", [])),
+                methods=_as_list(when.get("methods", [])),
+                path_globs=_as_list(when.get("paths", [])),
+                injection=spec,
+            )
+        )
+    return rules
 
 
 def _entry_to_specs_multi(entry: dict[str, Any], default_store: str = "") -> list[CapabilitySpec]:
@@ -310,20 +389,12 @@ def _entry_to_specs_multi(entry: dict[str, Any], default_store: str = "") -> lis
     if not label:
         raise CapabilityError("a capability must have a label")
 
-    injection = _resolve_injection(entry.get("injection", {}))
-    injection.validate()
+    injection_rules = _resolve_injection_rules(entry.get("injection", [{}]))
 
-    when = entry.get("when")
-    if not isinstance(when, dict):
-        raise CapabilityError("a capability needs a 'when' block naming its hosts")
-    hosts = _as_list(when.get("hosts", []))
-    if not hosts:
-        raise CapabilityError("'when.hosts' must name at least one host")
-    resources = _as_list(when.get("resources", []))
-    methods = _as_list(when.get("methods", ["GET"]))
-    path_globs = _as_list(when.get("paths", ["/*"]))
-    deny_path_globs = _as_list(when.get("deny_paths", []))
-    operations = _as_list(when.get("operations", []))
+    hosts, methods, path_globs = _scope_from_injection_rules(injection_rules)
+    resources = _as_list(entry.get("resources", []))
+    deny_path_globs = _as_list(entry.get("deny_paths", []))
+    operations = _as_list(entry.get("operations", []))
     ttl_seconds = int(entry.get("ttl", DEFAULT_TTL_SECONDS))
     max_response_bytes = int(entry.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES))
 
@@ -361,7 +432,7 @@ def _entry_to_specs_multi(entry: dict[str, Any], default_store: str = "") -> lis
                 deny_path_globs=list(deny_path_globs),
                 operations=list(operations),
                 secret=secret,
-                injection=injection,
+                injection_rules=list(injection_rules),
                 ttl_seconds=ttl_seconds,
                 max_response_bytes=max_response_bytes,
                 guest_env=guest_env,

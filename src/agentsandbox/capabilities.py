@@ -194,6 +194,54 @@ class InjectionSpec:
 
 
 @dataclass
+class InjectionRule:
+    """One entry in a capability's ``injection_rules``: attach *this* way,
+    when the request matches *this* narrower slice of the capability's own
+    scope.
+
+    Deliberately additive, not a replacement for the capability's own
+    ``hosts``/``methods``/``path_globs``: those still decide whether a
+    request is authorized at all. A rule only decides *which* injection
+    applies once a request already passed that check - an empty list on any
+    of the three axes here means "no further narrowing on this axis",
+    not "matches nothing".
+    """
+
+    hosts: list[str] = field(default_factory=list)
+    methods: list[str] = field(default_factory=list)
+    path_globs: list[str] = field(default_factory=list)
+    injection: InjectionSpec = field(default_factory=InjectionSpec)
+
+    def matches(self, dest: Destination, method: str, path: str) -> bool:
+        if self.hosts and not any_host_matches(dest.host, self.hosts):
+            return False
+        if self.methods and method.upper() not in {m.upper() for m in self.methods}:
+            return False
+        if self.path_globs:
+            path_only = path.split("?", 1)[0]
+            if not any(fnmatch.fnmatchcase(path_only, glob) for glob in self.path_globs):
+                return False
+        return True
+
+    def to_dict(self) -> dict:
+        return {
+            "hosts": list(self.hosts),
+            "methods": list(self.methods),
+            "path_globs": list(self.path_globs),
+            "injection": self.injection.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> InjectionRule:
+        return cls(
+            hosts=list(data.get("hosts", [])),
+            methods=list(data.get("methods", [])),
+            path_globs=list(data.get("path_globs", [])),
+            injection=InjectionSpec.from_dict(data.get("injection", {})),
+        )
+
+
+@dataclass
 class Capability:
     token_hash: str
     session_id: str
@@ -208,7 +256,13 @@ class Capability:
     deny_path_globs: list[str] = field(default_factory=list)
     operations: list[str] = field(default_factory=list)
     secret: SecretRef = field(default_factory=SecretRef)
-    injection: InjectionSpec = field(default_factory=InjectionSpec)
+    #: How this capability attaches its secret to a request. Always at
+    #: least one rule - the default is one unrestricted `InjectionRule`
+    #: (bearer, matching anything already inside this capability's own
+    #: hosts/methods/path_globs), which is what "no injection specified"
+    #: has always meant. More than one rule means dispatch by which one's
+    #: own (narrower) hosts/methods/paths the request actually matches.
+    injection_rules: list[InjectionRule] = field(default_factory=lambda: [InjectionRule()])
     expires_at: float = 0.0
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
     revoked: bool = False
@@ -258,6 +312,23 @@ class Capability:
         if self.operations and operation is not None and operation not in self.operations:
             raise PolicyDenied("operation_not_permitted", f"operation {operation} is not permitted")
 
+    def pick_injection(self, dest: Destination, method: str, path: str) -> InjectionSpec:
+        """Which injection applies to a request already inside this
+        capability's own scope.
+
+        Only ever narrows *within* the authorization already granted by
+        `hosts`/`methods`/`path_globs` - a rule cannot widen it, since
+        `check_destination`/`check_operation` run first, unconditionally,
+        against the capability's own scope, not against any one rule's.
+        """
+        for rule in self.injection_rules:
+            if rule.matches(dest, method, path):
+                return rule.injection
+        raise PolicyDenied(
+            "no_matching_injection_rule",
+            "this capability's scope matched, but none of its injection rules did",
+        )
+
     def validate(
         self,
         *,
@@ -267,27 +338,34 @@ class Capability:
         path: str,
         operation: str | None = None,
         now: float | None = None,
-    ) -> None:
-        """Full check. Raises :class:`PolicyDenied` on the first failure."""
+    ) -> InjectionSpec:
+        """Full check. Raises :class:`PolicyDenied` on the first failure.
+
+        Returns the injection that actually applies to *this* request - the
+        one rule in `injection_rules`, unless there is more than one.
+        """
         self.check_alive(now)
         self.check_session(session_id)
         self.check_destination(dest)
         self.check_operation(method, path, operation)
-        self.injection.validate()
+        active = self.pick_injection(dest, method, path)
+        active.validate()
+        return active
 
     # -- serialisation ------------------------------------------------------
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["secret"] = self.secret.to_dict()
-        data["injection"] = self.injection.to_dict()
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> Capability:
         data = dict(data)
         data["secret"] = SecretRef.from_dict(data.get("secret", {}))
-        data["injection"] = InjectionSpec.from_dict(data.get("injection", {}))
+        data["injection_rules"] = [
+            InjectionRule.from_dict(r) for r in data.get("injection_rules", [])
+        ] or [InjectionRule()]
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in data.items() if k in known})
 
@@ -342,7 +420,9 @@ class CapabilitySpec:
     deny_path_globs: list[str] = field(default_factory=list)
     operations: list[str] = field(default_factory=list)
     secret: SecretRef = field(default_factory=SecretRef)
-    injection: InjectionSpec = field(default_factory=InjectionSpec)
+    #: See `Capability.injection_rules` - same meaning, carried through to
+    #: the minted capability unchanged.
+    injection_rules: list[InjectionRule] = field(default_factory=lambda: [InjectionRule()])
     ttl_seconds: int = DEFAULT_TTL_SECONDS
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
     #: Guest env var the placeholder is delivered as, e.g. ``GITHUB_TOKEN``.
@@ -406,7 +486,8 @@ class CapabilityStore:
         The placeholder is returned exactly once; the store cannot reproduce
         it later.
         """
-        spec.injection.validate()
+        for rule in spec.injection_rules:
+            rule.injection.validate()
         token = new_placeholder()
         cap = Capability(
             token_hash=token_hash(token),
@@ -419,7 +500,7 @@ class CapabilityStore:
             deny_path_globs=list(spec.deny_path_globs),
             operations=list(spec.operations),
             secret=spec.secret,
-            injection=spec.injection,
+            injection_rules=list(spec.injection_rules),
             expires_at=(time.time() + spec.ttl_seconds) if spec.ttl_seconds else 0.0,
             max_response_bytes=spec.max_response_bytes,
         )

@@ -19,8 +19,8 @@ def test_json_profile_parses(profile_dir):
         "capabilities": [
             {
                 "label": "github",
-                "when": {"hosts": ["api.github.com"], "methods": ["GET"]},
                 "secret": "keychain:asbx-github:me",
+                "injection": [{"when": {"hosts": ["api.github.com"], "methods": ["GET"]}}],
             }
         ],
     }))
@@ -34,8 +34,12 @@ def test_secret_ref_variants(profile_dir):
     (profile_dir / "s.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "a", "when": {"hosts": ["x.com"]}, "secret": "keychain:svc:acct"},
-            {"label": "b", "when": {"hosts": ["y.com"]}, "secret": {"backend": "env", "name": "TOKEN"}},
+            {"label": "a", "secret": "keychain:svc:acct", "injection": [{"when": {"hosts": ["x.com"]}}]},
+            {
+                "label": "b",
+                "secret": {"backend": "env", "name": "TOKEN"},
+                "injection": [{"when": {"hosts": ["y.com"]}}],
+            },
         ],
     }))
     specs = load_profile(resolve_profile("s"))
@@ -52,8 +56,16 @@ def test_secret_ref_dict_form_uses_the_backends_own_field_name(profile_dir):
     (profile_dir / "s.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "a", "when": {"hosts": ["x.com"]}, "secret": {"backend": "pass", "entry": "neo/TOKEN"}},
-            {"label": "b", "when": {"hosts": ["y.com"]}, "secret": {"backend": "file", "path": "/run/secrets/x"}},
+            {
+                "label": "a",
+                "secret": {"backend": "pass", "entry": "neo/TOKEN"},
+                "injection": [{"when": {"hosts": ["x.com"]}}],
+            },
+            {
+                "label": "b",
+                "secret": {"backend": "file", "path": "/run/secrets/x"},
+                "injection": [{"when": {"hosts": ["y.com"]}}],
+            },
         ],
     }))
     specs = load_profile(resolve_profile("s"))
@@ -66,7 +78,11 @@ def test_secret_ref_dict_form_rejects_the_wrong_backends_field(profile_dir):
     (profile_dir / "bad.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "a", "when": {"hosts": ["x.com"]}, "secret": {"backend": "pass", "service": "neo/TOKEN"}},
+            {
+                "label": "a",
+                "secret": {"backend": "pass", "service": "neo/TOKEN"},
+                "injection": [{"when": {"hosts": ["x.com"]}}],
+            },
         ],
     }))
     with pytest.raises(CapabilityError, match="'pass' secret needs 'entry'"):
@@ -75,7 +91,7 @@ def test_secret_ref_dict_form_rejects_the_wrong_backends_field(profile_dir):
 def test_missing_label_is_an_error(profile_dir):
     (profile_dir / "bad.json").write_text(json.dumps({
         "version": 1,
-        "capabilities": [{"when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
+        "capabilities": [{"secret": "keychain:x", "injection": [{"when": {"hosts": ["x.com"]}}]}],
     }))
     with pytest.raises(CapabilityError, match="label"):
         load_profile(resolve_profile("bad"))
@@ -83,23 +99,67 @@ def test_missing_label_is_an_error(profile_dir):
 def test_missing_secret_is_an_error(profile_dir):
     (profile_dir / "bad.json").write_text(json.dumps({
         "version": 1,
-        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}}],
+        "capabilities": [{"label": "x", "injection": [{"when": {"hosts": ["x.com"]}}]}],
     }))
     with pytest.raises(CapabilityError, match="secret"):
         load_profile(resolve_profile("bad"))
 
-def test_missing_when_block_is_an_error(profile_dir):
+def test_no_injection_rule_hosts_at_all_is_an_error(profile_dir):
+    """Every rule names its own hosts - a capability with none at all
+    (the default single implicit rule has none) has no way to be scoped."""
     (profile_dir / "bad.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [{"label": "x", "secret": "keychain:x"}],
     }))
-    with pytest.raises(CapabilityError, match="'when' block"):
+    with pytest.raises(CapabilityError, match=r"injection\[0\] needs its own 'when.hosts'"):
         load_profile(resolve_profile("bad"))
+
+
+def test_when_can_be_omitted_when_every_injection_rule_names_its_own_hosts(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{
+            "label": "datadog-deploy",
+            "secret": "keychain:datadog",
+            "guest_env": "DATADOG_API_KEY",
+            "injection": [
+                {"when": {"hosts": ["api.github.com"], "methods": ["PUT"]}, "kind": "body"},
+                {"when": {"hosts": ["api.example.com"], "methods": ["POST"]}, "kind": "body"},
+            ],
+        }],
+    }))
+    spec = load_profile(resolve_profile("p"))[0]
+    assert spec.hosts == ["api.github.com", "api.example.com"]
+    assert spec.methods == ["PUT", "POST"]
+    # Authorization is still the union, not a paired match - deriving hosts
+    # from the rules does not make host-A-with-method-Y refused just
+    # because only host-A-with-method-X was ever written down.
+    assert spec.path_globs == ["/*"]
+
+
+def test_when_omitted_still_requires_every_rule_to_name_its_own_hosts(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{
+            "label": "x",
+            "secret": "keychain:x",
+            "injection": [
+                {"when": {"hosts": ["api.github.com"]}, "kind": "bearer"},
+                {"kind": "body"},
+            ],
+        }],
+    }))
+    with pytest.raises(CapabilityError, match=r"injection\[1\] needs its own 'when.hosts'"):
+        load_profile(resolve_profile("p"))
 
 def test_when_without_hosts_is_an_error(profile_dir):
     (profile_dir / "bad.json").write_text(json.dumps({
         "version": 1,
-        "capabilities": [{"label": "x", "when": {"methods": ["GET"]}, "secret": "keychain:x"}],
+        "capabilities": [{
+            "label": "x",
+            "secret": "keychain:x",
+            "injection": [{"when": {"methods": ["GET"]}}],
+        }],
     }))
     with pytest.raises(CapabilityError, match="when.hosts"):
         load_profile(resolve_profile("bad"))
@@ -127,7 +187,11 @@ def test_profiles_can_carry_non_secret_environment(profile_dir):
         "version": 1,
         "env": {"WIREMOCK_URL": "https://wiremock.example.com", "WIREMOCK_USER": "developer"},
         "capabilities": [
-            {"label": "wiremock", "when": {"hosts": ["wiremock.example.com"]}, "secret": "keychain:x:y"}
+            {
+                "label": "wiremock",
+                "secret": "keychain:x:y",
+                "injection": [{"when": {"hosts": ["wiremock.example.com"]}}],
+            }
         ],
     }))
     box = load_profile_env(resolve_profile("svc"))
@@ -204,8 +268,16 @@ def test_a_profile_can_point_at_its_own_pass_store(profile_dir):
         "version": 1,
         "pass_store": "~/.password-store-neo",
         "capabilities": [
-            {"label": "a", "when": {"hosts": ["a.example.com"]}, "secret": "pass:wiremock/developer"},
-            {"label": "b", "when": {"hosts": ["b.example.com"]}, "secret": "pass:github/token"},
+            {
+                "label": "a",
+                "secret": "pass:wiremock/developer",
+                "injection": [{"when": {"hosts": ["a.example.com"]}}],
+            },
+            {
+                "label": "b",
+                "secret": "pass:github/token",
+                "injection": [{"when": {"hosts": ["b.example.com"]}}],
+            },
         ],
     }))
     specs = load_profile(resolve_profile("neo"))
@@ -218,11 +290,15 @@ def test_a_capability_can_override_the_profile_store(profile_dir):
         "version": 1,
         "pass_store": "~/.password-store-neo",
         "capabilities": [
-            {"label": "a", "when": {"hosts": ["a.example.com"]}, "secret": "pass:wiremock/developer"},
+            {
+                "label": "a",
+                "secret": "pass:wiremock/developer",
+                "injection": [{"when": {"hosts": ["a.example.com"]}}],
+            },
             {
                 "label": "shared",
-                "when": {"hosts": ["b.example.com"]},
                 "secret": {"backend": "pass", "entry": "github/token", "store": "~/.password-store"},
+                "injection": [{"when": {"hosts": ["b.example.com"]}}],
             },
         ],
     }))
@@ -240,12 +316,12 @@ def test_username_guest_env_mirrors_the_username_into_plain_env(profile_dir):
         "version": 1,
         "capabilities": [{
             "label": "tnb",
-            "when": {"hosts": ["x.com"]},
             "secret": "pass:neo/TNB_SECRET",
-            "injection": {
+            "injection": [{
+                "when": {"hosts": ["x.com"]},
                 "kind": "basic",
                 "username": {"value": "bot@example.com", "guest_env": "TNB_USER"},
-            },
+            }],
         }],
     }))
     assert load_profile_env(resolve_profile("p")) == {"TNB_USER": "bot@example.com"}
@@ -258,14 +334,13 @@ def test_username_plain_string_still_works(profile_dir):
         "version": 1,
         "capabilities": [{
             "label": "tnb",
-            "when": {"hosts": ["x.com"]},
             "secret": "pass:neo/TNB_SECRET",
-            "injection": {"kind": "basic", "username": "bot@example.com"},
+            "injection": [{"when": {"hosts": ["x.com"]}, "kind": "basic", "username": "bot@example.com"}],
         }],
     }))
     spec = load_profile(resolve_profile("p"))[0]
-    assert spec.injection.username == "bot@example.com"
-    assert spec.injection.username_guest_env is None
+    assert spec.injection_rules[0].injection.username == "bot@example.com"
+    assert spec.injection_rules[0].injection.username_guest_env is None
 
 
 def test_aws_autosign_parses_the_signing_secret(profile_dir):
@@ -275,7 +350,7 @@ def test_aws_autosign_parses_the_signing_secret(profile_dir):
             "signing_secret": {"backend": "keychain", "service": "aws-ci", "account": "deploy"},
         },
         "capabilities": [
-            {"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"},
+            {"label": "x", "secret": "keychain:x", "injection": [{"when": {"hosts": ["x.com"]}}]},
         ],
     }))
     autosign = load_profile_aws_autosign(resolve_profile("p"))
@@ -293,7 +368,7 @@ def test_aws_autosign_signing_secret_can_be_an_aws_cli_profile(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "aws_autosign": {"signing_secret": {"backend": "aws_profile", "profile": "work"}},
-        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
+        "capabilities": [{"label": "x", "secret": "keychain:x", "injection": [{"when": {"hosts": ["x.com"]}}]}],
     }))
     autosign = load_profile_aws_autosign(resolve_profile("p"))
     assert autosign.signing_secret.backend == "aws_profile"
@@ -304,7 +379,7 @@ def test_aws_autosign_signing_secret_accepts_the_compact_aws_profile_form(profil
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "aws_autosign": {"signing_secret": "aws_profile:work"},
-        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
+        "capabilities": [{"label": "x", "secret": "keychain:x", "injection": [{"when": {"hosts": ["x.com"]}}]}],
     }))
     autosign = load_profile_aws_autosign(resolve_profile("p"))
     assert autosign.signing_secret.backend == "aws_profile"
@@ -314,7 +389,7 @@ def test_aws_autosign_signing_secret_accepts_the_compact_aws_profile_form(profil
 def test_a_profile_without_aws_autosign_has_none(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
-        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
+        "capabilities": [{"label": "x", "secret": "keychain:x", "injection": [{"when": {"hosts": ["x.com"]}}]}],
     }))
     assert load_profile_aws_autosign(resolve_profile("p")) is None
 
@@ -323,7 +398,7 @@ def test_aws_autosign_without_signing_secret_is_an_error(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "aws_autosign": {},
-        "capabilities": [{"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"}],
+        "capabilities": [{"label": "x", "secret": "keychain:x", "injection": [{"when": {"hosts": ["x.com"]}}]}],
     }))
     with pytest.raises(CapabilityError, match="aws_autosign"):
         load_profile_aws_autosign(resolve_profile("p"))
@@ -334,7 +409,7 @@ def test_username_guest_env_requires_basic_auth(profile_dir):
         "version": 1,
         "capabilities": [{
             "label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x",
-            "injection": {"kind": "bearer", "username": {"guest_env": "X_USER"}},
+            "injection": [{"kind": "bearer", "username": {"guest_env": "X_USER"}}],
         }],
     }))
     with pytest.raises(CapabilityError, match="username.guest_env only makes sense for basic auth"):
@@ -346,7 +421,7 @@ def test_username_guest_env_requires_a_value(profile_dir):
         "version": 1,
         "capabilities": [{
             "label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x",
-            "injection": {"kind": "basic", "username": {"guest_env": "X_USER"}},
+            "injection": [{"kind": "basic", "username": {"guest_env": "X_USER"}}],
         }],
     }))
     with pytest.raises(CapabilityError, match="username.guest_env requires username.value"):
@@ -360,8 +435,12 @@ def test_username_guest_env_colliding_with_the_env_block_is_an_error(profile_dir
         "version": 1,
         "env": {"X_USER": "manual"},
         "capabilities": [{
-            "label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x",
-            "injection": {"kind": "basic", "username": {"value": "real", "guest_env": "X_USER"}},
+            "label": "x", "secret": "keychain:x",
+            "injection": [{
+                "when": {"hosts": ["x.com"]},
+                "kind": "basic",
+                "username": {"value": "real", "guest_env": "X_USER"},
+            }],
         }],
     }))
     with pytest.raises(CapabilityError, match="X_USER"):
@@ -372,10 +451,17 @@ def test_username_guest_env_colliding_with_another_capabilitys_placeholder_is_an
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "SHARED"},
             {
-                "label": "b", "when": {"hosts": ["b.com"]}, "secret": "keychain:b",
-                "injection": {"kind": "basic", "username": {"value": "u", "guest_env": "SHARED"}},
+                "label": "a", "secret": "keychain:a", "guest_env": "SHARED",
+                "injection": [{"when": {"hosts": ["a.com"]}}],
+            },
+            {
+                "label": "b", "secret": "keychain:b",
+                "injection": [{
+                    "when": {"hosts": ["b.com"]},
+                    "kind": "basic",
+                    "username": {"value": "u", "guest_env": "SHARED"},
+                }],
             },
         ],
     }))
@@ -390,8 +476,14 @@ def test_two_capabilities_cannot_share_a_placeholder_guest_env(profile_dir):
     (profile_dir / "p.json").write_text(json.dumps({
         "version": 1,
         "capabilities": [
-            {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "SHARED"},
-            {"label": "b", "when": {"hosts": ["b.com"]}, "secret": "keychain:b", "guest_env": "SHARED"},
+            {
+                "label": "a", "secret": "keychain:a", "guest_env": "SHARED",
+                "injection": [{"when": {"hosts": ["a.com"]}}],
+            },
+            {
+                "label": "b", "secret": "keychain:b", "guest_env": "SHARED",
+                "injection": [{"when": {"hosts": ["b.com"]}}],
+            },
         ],
     }))
     with pytest.raises(CapabilityError, match="SHARED"):
@@ -401,8 +493,10 @@ def test_two_capabilities_cannot_share_a_placeholder_guest_env(profile_dir):
 def _travis_entry(**overrides):
     entry = {
         "label": "travis-auth",
-        "when": {"hosts": ["auth.travis-ci.example"], "methods": ["POST"], "paths": ["/oauth/token"]},
-        "injection": {"kind": "body"},
+        "injection": [{
+            "when": {"hosts": ["auth.travis-ci.example"], "methods": ["POST"], "paths": ["/oauth/token"]},
+            "kind": "body",
+        }],
         "secrets": {
             "client_id": {
                 "secret": {"backend": "pass", "entry": "neo/TRAVIS_CLIENT_ID"},
@@ -435,14 +529,14 @@ def test_a_secrets_map_fans_out_into_one_spec_per_entry(profile_dir):
     assert client_id.hosts == ["auth.travis-ci.example"]
     assert client_id.methods == ["POST"]
     assert client_id.path_globs == ["/oauth/token"]
-    assert client_id.injection.kind == "body"
+    assert client_id.injection_rules[0].injection.kind == "body"
 
     client_secret = by_env["TRAVIS_CLIENT_SECRET"]
     assert client_secret.label == "travis-auth: client_secret"
     assert client_secret.secret.service == "neo/TRAVIS_CLIENT_SECRET"
     # Same `when`/injection shared across the fan-out, not just the same values.
     assert client_secret.hosts == client_id.hosts
-    assert client_secret.injection.kind == client_id.injection.kind
+    assert client_secret.injection_rules[0].injection.kind == client_id.injection_rules[0].injection.kind
 
 
 def test_a_secrets_map_entry_requires_guest_env(profile_dir):
@@ -467,9 +561,9 @@ def test_top_level_guest_env_must_also_be_a_valid_identifier(profile_dir):
         "capabilities": [
             {
                 "label": "a",
-                "when": {"hosts": ["a.com"]},
                 "secret": "keychain:a",
                 "guest_env": "9invalid",
+                "injection": [{"when": {"hosts": ["a.com"]}}],
             }
         ],
     }))
@@ -485,6 +579,76 @@ def test_a_capability_cannot_declare_both_secret_and_secrets(profile_dir):
         load_profile(resolve_profile("p"))
 
 
+def _two_mechanism_entry():
+    return {
+        "label": "datadog-deploy",
+        "secret": "keychain:datadog",
+        "guest_env": "DATADOG_API_KEY",
+        "injection": [
+            {"when": {"hosts": ["api.github.com"]}, "kind": "basic", "username": "svc-a"},
+            {"when": {"hosts": ["api.example.com"]}, "kind": "body"},
+        ],
+    }
+
+
+def test_an_injection_array_parses_into_one_spec_with_a_rule_per_destination(profile_dir):
+    (profile_dir / "p.json").write_text(
+        json.dumps({"version": 1, "capabilities": [_two_mechanism_entry()]})
+    )
+    specs = load_profile(resolve_profile("p"))
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.guest_env == "DATADOG_API_KEY"
+    assert len(spec.injection_rules) == 2
+    assert spec.injection_rules[0].hosts == ["api.github.com"]
+    assert spec.injection_rules[0].injection.kind == "basic"
+    assert spec.injection_rules[0].injection.username == "svc-a"
+    assert spec.injection_rules[1].hosts == ["api.example.com"]
+    assert spec.injection_rules[1].injection.kind == "body"
+
+
+def test_a_bare_injection_object_is_rejected(profile_dir):
+    """`injection` is always a list now - a bare object (the pre-array-form
+    shape) is a clear authoring error, not silently accepted."""
+    entry = _two_mechanism_entry()
+    entry["injection"] = {"kind": "bearer"}
+    (profile_dir / "p.json").write_text(json.dumps({"version": 1, "capabilities": [entry]}))
+    with pytest.raises(CapabilityError, match="'injection' must be a non-empty list"):
+        load_profile(resolve_profile("p"))
+
+
+def test_a_single_entry_injection_array_is_the_ordinary_one_mechanism_case(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "capabilities": [{
+            "label": "x",
+            "secret": "keychain:x",
+            "injection": [{"when": {"hosts": ["x.com"]}, "kind": "bearer"}],
+        }],
+    }))
+    spec = load_profile(resolve_profile("p"))[0]
+    assert len(spec.injection_rules) == 1
+    assert spec.injection_rules[0].injection.kind == "bearer"
+    assert spec.injection_rules[0].hosts == ["x.com"]
+    assert spec.hosts == ["x.com"]
+
+
+def test_an_injection_array_must_not_be_empty(profile_dir):
+    entry = _two_mechanism_entry()
+    entry["injection"] = []
+    (profile_dir / "p.json").write_text(json.dumps({"version": 1, "capabilities": [entry]}))
+    with pytest.raises(CapabilityError, match="'injection' must be a non-empty list"):
+        load_profile(resolve_profile("p"))
+
+
+def test_an_invalid_kind_inside_an_injection_array_entry_is_still_caught(profile_dir):
+    entry = _two_mechanism_entry()
+    entry["injection"][0]["kind"] = "aws_sigv4"
+    (profile_dir / "p.json").write_text(json.dumps({"version": 1, "capabilities": [entry]}))
+    with pytest.raises(CapabilityError, match="not supported"):
+        load_profile(resolve_profile("p"))
+
+
 def test_fanned_out_guest_envs_still_collide_with_other_capabilities(profile_dir):
     """The existing collision check applies to the fan-out too - it runs
     against the final, expanded spec list, not the raw profile entries."""
@@ -495,9 +659,9 @@ def test_fanned_out_guest_envs_still_collide_with_other_capabilities(profile_dir
             entry,
             {
                 "label": "other",
-                "when": {"hosts": ["other.example.net"]},
                 "secret": "keychain:x",
                 "guest_env": "TRAVIS_CLIENT_ID",
+                "injection": [{"when": {"hosts": ["other.example.net"]}}],
             },
         ],
     }))
@@ -513,7 +677,7 @@ def test_the_wiremock_example_derives_its_username_guest_env(profile_dir):
     path = Path(profiles.__file__).parent / "_profiles" / "wiremock.json"
     env = load_profile_env(path)
     spec = load_profile(path)[0]
-    assert env["WIREMOCK_USER"] == spec.injection.username == "developer"
+    assert env["WIREMOCK_USER"] == spec.injection_rules[0].injection.username == "developer"
 
 
 @pytest.mark.parametrize(
@@ -526,7 +690,9 @@ def test_every_shipped_profile_loads(name):
     assert specs
     for spec in specs:
         assert spec.hosts and spec.label
-        spec.injection.validate()
+        assert spec.injection_rules
+        for rule in spec.injection_rules:
+            rule.injection.validate()
 
 
 def test_a_profile_capability_does_not_expire_by_default():
@@ -576,14 +742,14 @@ def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
         "capabilities": [{
             "label": "svc",
             "guest_env": "SVC_TOKEN",
-            "when": {
-                "hosts": ["api.example.com"],
-                "methods": ["GET", "POST"],
-                "paths": ["/v1/*"],
-                "deny_paths": ["/v1/admin/*"],
-            },
+            "deny_paths": ["/v1/admin/*"],
             "secret": "pass:svc/token",
-            "injection": {"kind": "header", "header": "X-Key", "template": "{secret}"},
+            "injection": [{
+                "when": {"hosts": ["api.example.com"], "methods": ["GET", "POST"], "paths": ["/v1/*"]},
+                "kind": "header",
+                "header": "X-Key",
+                "template": "{secret}",
+            }],
         }],
     }))
     assert cli.main(["profile", "show", "p"]) == 0
@@ -597,6 +763,23 @@ def test_profile_show_reveals_what_changes_behaviour(profile_dir, capsys):
     assert "API_BASE=https://api.example.com" in out
 
 
+def test_profile_show_lists_each_injection_rule_by_its_own_destination(profile_dir, capsys):
+    """The unused placeholder `injection` default must never be what gets
+    shown - a reader of `profile show` needs the real, per-destination
+    behaviour, not a misleading "Bearer" line nothing actually does."""
+    from agentsandbox import cli
+
+    (profile_dir / "p.json").write_text(
+        json.dumps({"version": 1, "capabilities": [_two_mechanism_entry()]})
+    )
+    assert cli.main(["profile", "show", "p"]) == 0
+    out = capsys.readouterr().out
+
+    assert "attached as:  (depends on destination)" in out
+    assert "api.github.com: basic auth as 'svc-a'" in out
+    assert "api.example.com: body" in out
+
+
 def test_profile_show_reveals_aws_autosign(profile_dir, capsys):
     from agentsandbox import cli
 
@@ -604,7 +787,7 @@ def test_profile_show_reveals_aws_autosign(profile_dir, capsys):
         "version": 1,
         "aws_autosign": {"signing_secret": "file:/run/secrets/aws.json"},
         "capabilities": [
-            {"label": "x", "when": {"hosts": ["x.com"]}, "secret": "keychain:x"},
+            {"label": "x", "secret": "keychain:x", "injection": [{"when": {"hosts": ["x.com"]}}]},
         ],
     }))
     assert cli.main(["profile", "show", "p"]) == 0

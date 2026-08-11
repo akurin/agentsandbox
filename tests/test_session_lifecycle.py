@@ -91,7 +91,7 @@ def test_sync_from_profile_only_mints_what_is_new(tmp_path, monkeypatch):
     monkeypatch.setenv("ASBX_PROFILE_DIR", str(tmp_path))
     _write_profile(
         tmp_path / "p.json",
-        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "A"},
+        {"label": "a", "secret": "keychain:a", "guest_env": "A", "injection": [{"when": {"hosts": ["a.com"]}}]},
     )
     manager = SessionManager.create(allow_hosts=["*"])
 
@@ -100,8 +100,8 @@ def test_sync_from_profile_only_mints_what_is_new(tmp_path, monkeypatch):
 
     _write_profile(
         tmp_path / "p.json",
-        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a", "guest_env": "A"},
-        {"label": "b", "when": {"hosts": ["b.com"]}, "secret": "keychain:b", "guest_env": "B"},
+        {"label": "a", "secret": "keychain:a", "guest_env": "A", "injection": [{"when": {"hosts": ["a.com"]}}]},
+        {"label": "b", "secret": "keychain:b", "guest_env": "B", "injection": [{"when": {"hosts": ["b.com"]}}]},
     )
     second = manager.sync_from_profile("p")
     assert [spec.label for spec, _, _ in second] == ["b"]
@@ -113,7 +113,7 @@ def test_sync_from_profile_is_a_noop_once_everything_is_live(tmp_path, monkeypat
     monkeypatch.setenv("ASBX_PROFILE_DIR", str(tmp_path))
     _write_profile(
         tmp_path / "p.json",
-        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a"},
+        {"label": "a", "secret": "keychain:a", "injection": [{"when": {"hosts": ["a.com"]}}]},
     )
     manager = SessionManager.create(allow_hosts=["*"])
 
@@ -128,7 +128,7 @@ def test_sync_from_profile_remints_a_revoked_label(tmp_path, monkeypatch):
     monkeypatch.setenv("ASBX_PROFILE_DIR", str(tmp_path))
     _write_profile(
         tmp_path / "p.json",
-        {"label": "a", "when": {"hosts": ["a.com"]}, "secret": "keychain:a"},
+        {"label": "a", "secret": "keychain:a", "injection": [{"when": {"hosts": ["a.com"]}}]},
     )
     manager = SessionManager.create(allow_hosts=["*"])
 
@@ -504,13 +504,13 @@ def test_starting_with_a_profile_issues_all_capabilities(tmp_path, monkeypatch):
         "capabilities": [
             {
                 "label": "github",
-                "when": {"hosts": ["api.github.com"], "methods": ["GET"]},
                 "secret": "keychain:asbx-github:bot",
+                "injection": [{"when": {"hosts": ["api.github.com"], "methods": ["GET"]}}],
             },
             {
                 "label": "npm",
-                "when": {"hosts": ["registry.npmjs.org"], "methods": ["GET"]},
                 "secret": "keychain:asbx-npm:bot",
+                "injection": [{"when": {"hosts": ["registry.npmjs.org"], "methods": ["GET"]}}],
             },
         ],
     }))

@@ -11,6 +11,7 @@ from agentsandbox.capabilities import (
     AwsAutosignSpec,
     CapabilitySpec,
     CapabilityStore,
+    InjectionRule,
     InjectionSpec,
     SecretRef,
     find_placeholders,
@@ -134,7 +135,7 @@ def test_unsupported_injection_is_refused_at_issue_time(store):
                 label="aws",
                 hosts=["api.github.com"],
                 secret=SecretRef(service="x"),
-                injection=InjectionSpec(kind="aws_sigv4"),
+                injection_rules=[InjectionRule(injection=InjectionSpec(kind="aws_sigv4"))],
             )
         )
     assert exc.value.reason == "unsupported_injection"
@@ -147,6 +148,89 @@ def test_header_injection_requires_a_secret_placeholder():
 
 def test_body_injection_is_supported_with_no_extra_fields():
     InjectionSpec(kind="body").validate()
+
+
+def _two_rule_capability(store) -> tuple:
+    """One capability, two hosts, two mechanisms - basic auth against
+    host-a, body substitution against host-b, both reachable through the
+    same single placeholder."""
+    return store.issue(
+        CapabilitySpec(
+            label="two-mechanisms",
+            hosts=["host-a.example.com", "host-b.example.com"],
+            methods=["POST", "PUT"],
+            secret=SecretRef(service="x"),
+            injection_rules=[
+                InjectionRule(
+                    hosts=["host-a.example.com"],
+                    injection=InjectionSpec(kind="basic", username="svc-a"),
+                ),
+                InjectionRule(
+                    hosts=["host-b.example.com"],
+                    injection=InjectionSpec(kind="body"),
+                ),
+            ],
+        )
+    )
+
+
+HOST_A = Destination("https", "host-a.example.com", 443)
+HOST_B = Destination("https", "host-b.example.com", 443)
+
+
+def test_pick_injection_dispatches_by_which_rule_matches(store):
+    _, cap = _two_rule_capability(store)
+    assert cap.pick_injection(HOST_A, "POST", "/x").kind == "basic"
+    assert cap.pick_injection(HOST_B, "PUT", "/x").kind == "body"
+
+
+def test_validate_returns_the_injection_that_actually_applies(store):
+    _, cap = _two_rule_capability(store)
+    active = cap.validate(session_id=cap.session_id, dest=HOST_A, method="POST", path="/x")
+    assert active.kind == "basic"
+    active = cap.validate(session_id=cap.session_id, dest=HOST_B, method="PUT", path="/x")
+    assert active.kind == "body"
+
+
+def test_a_request_inside_scope_but_outside_every_rule_is_denied(store):
+    """Authorization passing (the request is inside the capability's own
+    hosts/methods) does not mean some rule has to match - a hole between
+    the outer scope and the rules is a bug, and must fail closed, not fall
+    back to any one mechanism silently."""
+    _, cap = store.issue(
+        CapabilitySpec(
+            label="narrow-rules",
+            hosts=["host-a.example.com", "host-b.example.com"],
+            methods=["POST"],
+            secret=SecretRef(service="x"),
+            injection_rules=[
+                InjectionRule(hosts=["host-a.example.com"], injection=InjectionSpec(kind="body")),
+            ],
+        )
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        cap.pick_injection(HOST_B, "POST", "/x")
+    assert exc.value.reason == "no_matching_injection_rule"
+
+
+def test_no_injection_specified_means_one_unrestricted_bearer_rule(store, github_capability):
+    """Every capability that never opts into multiple rules gets exactly
+    the one implicit rule that has always been the default: bearer,
+    matching anything already inside the capability's own scope."""
+    _, cap = github_capability
+    assert len(cap.injection_rules) == 1
+    assert cap.injection_rules[0].hosts == []
+    assert cap.pick_injection(GITHUB, "GET", "/x").kind == "bearer"
+
+
+def test_injection_rules_round_trip_through_to_dict(store):
+    _, cap = _two_rule_capability(store)
+    from agentsandbox.capabilities import Capability
+
+    restored = Capability.from_dict(cap.to_dict())
+    assert len(restored.injection_rules) == 2
+    assert restored.pick_injection(HOST_A, "POST", "/x").kind == "basic"
+    assert restored.pick_injection(HOST_B, "PUT", "/x").kind == "body"
 
 
 def test_dummy_aws_credentials_look_like_a_real_access_key():

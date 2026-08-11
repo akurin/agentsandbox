@@ -31,6 +31,7 @@ from ..capabilities import (
     AwsAutosignSpec,
     Capability,
     CapabilityStore,
+    InjectionSpec,
     find_placeholders,
 )
 from ..config import CAPABILITY_PREFIX, DEFAULT_MAX_RESPONSE_BYTES
@@ -301,22 +302,25 @@ class BrokerCore:
         try:
             if req.capability:
                 cap = self._resolve(req)
-                self._authorize(req, cap)
-                if cap.injection.kind == "body":
+                active = self._authorize(req, cap)
+                if active.kind == "body":
                     primary = cap
                     extra_caps: list[Capability] = []
                     for token in req.extra_capabilities:
                         # `cap` tracks whichever capability is currently being
                         # checked, so a denial here names the one that failed,
                         # not the primary - the same reason `_resolve` and
-                        # `_authorize` are kept separate below.
+                        # `_authorize` are kept separate below. Its own active
+                        # injection is re-derived the same way primary's was;
+                        # `_reject_leaked_placeholders` inside `_authorize`
+                        # already refuses it here if that isn't "body" too.
                         cap = self._resolve_placeholder(req, token)
                         self._authorize(req, cap)
                         extra_caps.append(cap)
                     cap = primary
                     response = self._perform_body(req, primary, extra_caps)
                 else:
-                    response = self._perform(req, cap)
+                    response = self._perform(req, cap, active)
             elif req.aws_autosign:
                 if self.aws_autosign is None:
                     raise PolicyDenied(
@@ -409,21 +413,22 @@ class BrokerCore:
             raise PolicyDenied("unknown_capability", "this capability is not valid")
         return cap
 
-    def _authorize(self, req: BrokerRequest, cap: Capability) -> None:
+    def _authorize(self, req: BrokerRequest, cap: Capability) -> InjectionSpec:
         # Session-wide egress policy applies before the capability's own scope:
         # a capability cannot widen where the session may talk.
         self.policy.check(req.dest)
-        cap.validate(
+        active = cap.validate(
             session_id=req.session_id,
             dest=req.dest,
             method=req.method,
             path=req.path,
             operation=req.operation,
         )
-        self._reject_leaked_placeholders(req, cap)
-        self._reject_username_mismatch(req, cap)
+        self._reject_leaked_placeholders(req, active)
+        self._reject_username_mismatch(req, active)
+        return active
 
-    def _reject_username_mismatch(self, req: BrokerRequest, cap: Capability) -> None:
+    def _reject_username_mismatch(self, req: BrokerRequest, active: InjectionSpec) -> None:
         """Check the basic-auth credentials the guest actually presented.
 
         The account is fixed when the capability is issued - the guest never
@@ -435,9 +440,9 @@ class BrokerCore:
         whatever built the request. So a mismatch is an error, while an empty
         username is allowed, since plenty of token-style APIs omit it.
         """
-        if cap.injection.kind != "basic":
+        if active.kind != "basic":
             return
-        expected = (cap.injection.username or "").strip()
+        expected = (active.username or "").strip()
         if not expected:
             return
 
@@ -471,16 +476,16 @@ class BrokerCore:
                     "with nothing appended",
                 )
 
-    def _reject_leaked_placeholders(self, req: BrokerRequest, cap: Capability) -> None:
+    def _reject_leaked_placeholders(self, req: BrokerRequest, active: InjectionSpec) -> None:
         """A capability belongs in a header, with one deliberate exception.
 
         In a URL it ends up in server logs, referrers and browser history -
         always refused, no matter the capability's kind. In a body it may be
         persisted by the upstream service, which is normally exactly what
         must not happen - refused rather than quietly rewritten, so the agent
-        gets a clear error - *unless* the capability was explicitly issued
-        with injection.kind "body", where persisting it upstream is the
-        entire point (a secret meant to end up embedded in content the guest
+        gets a clear error - *unless* the injection that actually applies to
+        this request is "body", where persisting it upstream is the entire
+        point (a secret meant to end up embedded in content the guest
         constructs, not presented back by the guest itself).
         """
         if find_placeholders(req.target):
@@ -488,7 +493,7 @@ class BrokerCore:
                 "capability_in_url",
                 "put the capability in a request header, not in the URL",
             )
-        if cap.injection.kind == "body":
+        if active.kind == "body":
             return
         if len(req.body) <= _BODY_SCAN_LIMIT and find_placeholders(
             req.body.decode("utf-8", "ignore")
@@ -498,10 +503,10 @@ class BrokerCore:
                 "put the capability in a request header, not in the body",
             )
 
-    def _perform(self, req: BrokerRequest, cap: Capability) -> BrokerResponse:
+    def _perform(self, req: BrokerRequest, cap: Capability, active: InjectionSpec) -> BrokerResponse:
         secret = self.resolver.fetch(cap.secret)
         redactor.register_secret(secret)
-        credential_headers = build_credential_headers(cap, secret)
+        credential_headers = build_credential_headers(active, secret)
 
         headers = [
             (name, value)
@@ -893,9 +898,8 @@ def _is_past(timestamp: str) -> bool:
     return datetime.now(UTC) >= deadline
 
 
-def build_credential_headers(cap: Capability, secret: str) -> list[tuple[str, str]]:
-    """Render the capability's injection spec into concrete headers."""
-    spec = cap.injection
+def build_credential_headers(spec: InjectionSpec, secret: str) -> list[tuple[str, str]]:
+    """Render an injection spec into concrete headers."""
     spec.validate()
     if spec.kind == "bearer":
         return [("Authorization", f"Bearer {secret}")]

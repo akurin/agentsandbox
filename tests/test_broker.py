@@ -27,6 +27,7 @@ from agentsandbox.broker.upstream import UpstreamResponse
 from agentsandbox.capabilities import (
     AwsAutosignSpec,
     CapabilitySpec,
+    InjectionRule,
     InjectionSpec,
     SecretRef,
     short_id,
@@ -309,7 +310,7 @@ def test_basic_and_header_injection_shapes(session, store, executor, resolver):
             label="x",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="basic", username="acme"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="basic", username="acme"))],
         )
     )
     core.handle(make_request(token))
@@ -322,11 +323,79 @@ def test_basic_and_header_injection_shapes(session, store, executor, resolver):
             label="x",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="header", header="X-Api-Key", template="{secret}"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="header", header="X-Api-Key", template="{secret}"))],
         )
     )
     core.handle(make_request(token2))
     assert executor.last["credential_headers"] == [("X-Api-Key", SECRET)]
+
+
+def test_one_capability_dispatches_a_different_mechanism_per_destination(
+    session, store, executor, resolver
+):
+    """The actual case injection_rules exists for: one secret, one
+    placeholder, one guest_env - basic auth against one host, raw body
+    substitution against another, picked by which destination the request
+    actually targets."""
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="datadog-deploy",
+            hosts=["api.github.com", "api.example.com"],
+            methods=["POST", "PUT"],
+            secret=SecretRef(service="github-token"),
+            injection_rules=[
+                InjectionRule(
+                    hosts=["api.github.com"],
+                    injection=InjectionSpec(kind="basic", username="svc-a"),
+                ),
+                InjectionRule(
+                    hosts=["api.example.com"],
+                    injection=InjectionSpec(kind="body"),
+                ),
+            ],
+        )
+    )
+
+    response_a = core.handle(
+        make_request(token, host="api.github.com", method="POST", target="/deploy")
+    )
+    assert response_a.decision == "allow"
+    name, value = executor.last["credential_headers"][0]
+    assert name == "Authorization"
+    assert base64.b64decode(value.split()[1]).decode() == f"svc-a:{SECRET}"
+
+    body = f'{{"key":"{token}"}}'.encode()
+    response_b = core.handle(
+        make_request(
+            token,
+            host="api.example.com",
+            method="PUT",
+            target="/template.json",
+            body=body,
+        )
+    )
+    assert response_b.decision == "allow"
+    assert token.encode() not in executor.last["body"]
+    assert SECRET.encode() in executor.last["body"]
+
+
+def test_a_destination_inside_scope_but_matching_no_rule_is_denied(session, store, executor, resolver):
+    core = BrokerCore(session.session_id, store, session.policy, resolver, executor=executor)
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="narrow-rules",
+            hosts=["api.github.com", "api.example.com"],
+            secret=SecretRef(service="github-token"),
+            injection_rules=[
+                InjectionRule(hosts=["api.github.com"], injection=InjectionSpec(kind="bearer")),
+            ],
+        )
+    )
+    response = core.handle(make_request(token, host="api.example.com"))
+    assert response.decision == "deny"
+    assert response.reason == "no_matching_injection_rule"
+    assert executor.calls == []
 
 
 def test_body_injection_substitutes_into_the_request_body(session, store, executor, resolver):
@@ -339,7 +408,7 @@ def test_body_injection_substitutes_into_the_request_body(session, store, execut
             hosts=["api.github.com"],
             methods=["PUT"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     body = json.dumps({"Environment": {"Variables": {"API_KEY": token}}}).encode()
@@ -379,7 +448,7 @@ def test_body_injection_substitutes_every_placeholder_in_one_body(session, store
             hosts=["api.github.com"],
             methods=["POST"],
             secret=SecretRef(service="client-id"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     client_secret_token, _ = store.issue(
@@ -388,7 +457,7 @@ def test_body_injection_substitutes_every_placeholder_in_one_body(session, store
             hosts=["api.github.com"],
             methods=["POST"],
             secret=SecretRef(service="client-secret"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     username_token, _ = store.issue(
@@ -397,7 +466,7 @@ def test_body_injection_substitutes_every_placeholder_in_one_body(session, store
             hosts=["api.github.com"],
             methods=["POST"],
             secret=SecretRef(service="the-username"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     password_token, _ = store.issue(
@@ -406,7 +475,7 @@ def test_body_injection_substitutes_every_placeholder_in_one_body(session, store
             hosts=["api.github.com"],
             methods=["POST"],
             secret=SecretRef(service="the-password"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     body = (
@@ -446,7 +515,7 @@ def test_an_unauthorized_extra_placeholder_denies_the_whole_body_request(
             hosts=["api.github.com"],
             methods=["POST"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     # Scoped to a different host, so authorizing it in the same request fails.
@@ -456,7 +525,7 @@ def test_an_unauthorized_extra_placeholder_denies_the_whole_body_request(
             hosts=["other.example.net"],
             methods=["POST"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     body = f"client_id={good_token}&client_secret={mismatched_token}".encode()
@@ -491,7 +560,7 @@ def test_body_injection_refuses_a_foreign_aws_signature(session, store, executor
             hosts=["api.github.com"],
             methods=["PUT"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     body = json.dumps({"Environment": {"Variables": {"API_KEY": token}}}).encode()
@@ -523,7 +592,7 @@ def test_body_injection_still_refuses_the_placeholder_in_a_url(session, store, e
             hosts=["api.github.com"],
             methods=["PUT"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     response = core.handle(
@@ -723,7 +792,7 @@ def test_body_injection_composes_with_aws_autosign(session, store, executor):
             hosts=["api.github.com"],
             methods=["PUT"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     body = json.dumps({"Environment": {"Variables": {"API_KEY": token}}}).encode()
@@ -754,7 +823,7 @@ def test_body_injection_composed_with_autosign_also_scrubs_minted_credentials(se
             hosts=["api.github.com"],
             methods=["PUT"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="body"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
         )
     )
     body = json.dumps({"Environment": {"Variables": {"API_KEY": token}}}).encode()
@@ -1407,7 +1476,7 @@ def _basic_capability(store, username="developer"):
             label="wiremock",
             hosts=["api.github.com"],
             secret=SecretRef(service="github-token"),
-            injection=InjectionSpec(kind="basic", username=username),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="basic", username=username))],
         )
     )
 
