@@ -12,6 +12,7 @@ import getpass
 import json
 import os
 import posixpath
+import re
 import shlex
 import signal
 import sys
@@ -74,6 +75,30 @@ def _print(data) -> None:
         print(json.dumps(data, indent=2, default=str))
     else:
         print(data)
+
+
+_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([KMGT]?)B?$", re.IGNORECASE)
+_SIZE_MULTIPLIERS = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+
+
+def _parse_size(value: str) -> int:
+    """``40G`` / ``20480M`` / a bare byte count - binary units (G = 2^30),
+    matching how `qemu-img resize` (and `ASBX_IMAGE_SIZE` in
+    ``build-image.sh``) already interpret the same letters."""
+    match = _SIZE_RE.match(value.strip())
+    if not match:
+        raise argparse.ArgumentTypeError(f"not a size: {value!r} (expected e.g. 40G, 20480M)")
+    number, unit = match.groups()
+    return int(float(number) * _SIZE_MULTIPLIERS[unit.upper()])
+
+
+def _format_size(num_bytes: int) -> str:
+    value = float(num_bytes)
+    for unit in ("B", "K", "M", "G", "T"):
+        if value < 1024 or unit == "T":
+            return f"{value:.0f}{unit}" if unit == "B" else f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{value:.1f}T"  # pragma: no cover - unreachable, T always returns above
 
 
 def _normalize_guest_path(value: str) -> str:
@@ -1246,16 +1271,43 @@ def cmd_box_create(args: argparse.Namespace) -> int:
 
 
 def cmd_box_set(args: argparse.Namespace) -> int:
-    """Change a box's hardware. The disk is untouched.
+    """Change a box's hardware.
 
     cpus and memory are arguments to vfkit at boot, not state on the disk, so
     resizing costs nothing but a restart - which is worth saying out loud,
     because "will I lose my work?" is the obvious worry and the answer is no.
+
+    ``--disk-size`` is the one exception: it grows the raw file itself, not
+    just config, so unlike everything else here it requires the box to
+    already be stopped first.
     """
     from .box import Box
 
     box = Box.load(args.name)
     changes = []
+    disk_grown = False
+    if args.disk_size is not None:
+        if _running_session_for(box.name):
+            print(f"!! {box.name} is running; stop it first: asbx box stop {box.name}", file=sys.stderr)
+            return EXIT_USAGE
+        if not box.has_disk:
+            print(f"!! {box.name} has no disk yet; start it once before resizing", file=sys.stderr)
+            return EXIT_USAGE
+        new_bytes = args.disk_size
+        current_bytes = box.disk_path.stat().st_size
+        if new_bytes < current_bytes:
+            print(
+                f"!! refusing to shrink: {box.name}'s disk is already "
+                f"{_format_size(current_bytes)}, {_format_size(new_bytes)} requested",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        if new_bytes == current_bytes:
+            print(f"  disk    already {_format_size(current_bytes)}, nothing to resize")
+        else:
+            os.truncate(box.disk_path, new_bytes)
+            changes.append(f"disk    {_format_size(current_bytes)} -> {_format_size(new_bytes)}")
+            disk_grown = True
     if args.memory is not None:
         if args.memory < 512:
             print(f"!! {args.memory} MiB is too little to boot; 512 is the floor", file=sys.stderr)
@@ -1296,15 +1348,26 @@ def cmd_box_set(args: argparse.Namespace) -> int:
             changes.append(f"mount   + {mount.host}:{mount.guest}:{mode}")
         box.mounts = mounts
 
-    if not changes:
-        print("nothing to change: pass --memory, --cpus, --image, --mount-add or --mount-rm", file=sys.stderr)
+    if not changes and args.disk_size is None:
+        print(
+            "nothing to change: pass --memory, --cpus, --image, --disk-size, "
+            "--mount-add or --mount-rm",
+            file=sys.stderr,
+        )
         return EXIT_USAGE
 
     box.save()
     print(f"{box.name} updated")
     for line in changes:
         print(f"  {line}")
-    print(f"  disk    {box.disk_path} (untouched)")
+    if not disk_grown:
+        print(f"  disk    {box.disk_path} (untouched)")
+
+    if disk_grown:
+        print(
+            f"\n  the guest's own partition and filesystem grow to match automatically "
+            f"on the next `asbx box start {box.name}`"
+        )
 
     if args.image is not None and box.has_disk:
         # Changing the image does not re-clone: the box already has a
@@ -1961,11 +2024,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stop_env.set_defaults(func=cmd_box_stop, wait=True)
 
-    set_cmd = box_sub.add_parser("set", help="change a box's cpus, memory, image or mounts")
+    set_cmd = box_sub.add_parser("set", help="change a box's cpus, memory, image, disk size or mounts")
     set_cmd.add_argument("name")
     set_cmd.add_argument("--memory", type=int, metavar="MIB", help="guest RAM in MiB")
     set_cmd.add_argument("--cpus", type=int)
     set_cmd.add_argument("--image", help="base image; takes effect on the next `asbx box reset`")
+    set_cmd.add_argument(
+        "--disk-size",
+        type=_parse_size,
+        metavar="SIZE",
+        help="grow the disk file, e.g. 40G (box must be stopped; never shrinks; "
+        "the guest's own partition and filesystem grow to match automatically "
+        "on the next start)",
+    )
     set_cmd.add_argument(
         "--mount-add",
         action="append",

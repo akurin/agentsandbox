@@ -628,6 +628,85 @@ def test_the_rest_of_the_configuration_survives_a_resize():
     assert reloaded.mounts == [Mount(host="/some/project", guest="/some/project")]
 
 
+def test_parse_size_reads_binary_units():
+    from agentsandbox.cli import _parse_size
+
+    assert _parse_size("40G") == 40 * 1024**3
+    assert _parse_size("20480M") == 20480 * 1024**2
+    assert _parse_size("512") == 512
+
+
+def test_parse_size_rejects_garbage():
+    import argparse
+
+    from agentsandbox.cli import _parse_size
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_size("banana")
+
+
+def test_box_set_disk_size_grows_the_raw_file(capsys):
+    box = Box(name="grow-me")
+    box.save()
+    box.disk_path.parent.mkdir(parents=True, exist_ok=True)
+    box.disk_path.write_bytes(b"x" * 1024)
+
+    assert cli.main(["box", "set", "grow-me", "--disk-size", "1M"]) == 0
+    assert Box.load("grow-me").disk_path.stat().st_size == 1024 * 1024
+
+
+def test_box_set_disk_size_refuses_to_shrink(capsys):
+    box = Box(name="shrink-me")
+    box.save()
+    box.disk_path.parent.mkdir(parents=True, exist_ok=True)
+    box.disk_path.write_bytes(b"x" * (2 * 1024 * 1024))
+
+    assert cli.main(["box", "set", "shrink-me", "--disk-size", "1M"]) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "refusing to shrink" in err
+    assert Box.load("shrink-me").disk_path.stat().st_size == 2 * 1024 * 1024
+
+
+def test_box_set_disk_size_is_a_noop_at_the_same_size(capsys):
+    box = Box(name="same-size")
+    box.save()
+    box.disk_path.parent.mkdir(parents=True, exist_ok=True)
+    box.disk_path.write_bytes(b"x" * (1024 * 1024))
+
+    assert cli.main(["box", "set", "same-size", "--disk-size", "1M"]) == 0
+    assert "nothing to resize" in capsys.readouterr().out
+
+
+def test_box_set_disk_size_requires_a_disk(capsys):
+    box = Box(name="no-disk-yet")
+    box.save()
+
+    assert cli.main(["box", "set", "no-disk-yet", "--disk-size", "40G"]) == cli.EXIT_USAGE
+    assert "has no disk yet" in capsys.readouterr().err
+
+
+def test_box_set_disk_size_refuses_while_running(capsys):
+    import os
+
+    from agentsandbox.manager import SessionManager
+    from agentsandbox.session import STATE_RUNNING
+
+    box = Box(name="live-box")
+    box.save()
+    box.disk_path.parent.mkdir(parents=True, exist_ok=True)
+    box.disk_path.write_bytes(b"x" * 1024)
+
+    manager = SessionManager.create(allow_hosts=["*"], box_name="live-box")
+    manager.session.state = STATE_RUNNING
+    manager.session.supervisor_pid = os.getpid()
+    manager.session.save()
+
+    assert cli.main(["box", "set", "live-box", "--disk-size", "1G"]) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "stop it first" in err
+    assert Box.load("live-box").disk_path.stat().st_size == 1024
+
+
 def test_box_set_mount_add_and_rm_are_incremental(project, tmp_path, capsys):
     """`box set` has no replace-mode --mount: forgetting to retype an existing
     mount would silently drop it. --mount-add/--mount-rm can only ever touch

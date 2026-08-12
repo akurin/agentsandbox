@@ -176,6 +176,65 @@ write_files:
       ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any --timeout=5
       SuccessExitStatus=0 1 2
 
+  # Grows the root partition/filesystem to match a box set --disk-size
+  # resize, on every boot, before cloud-init runs. It must run this early:
+  # a disk that is genuinely full makes cloud-init itself fail with ENOSPC
+  # while writing its own bookkeeping, long before it would ever reach a
+  # runcmd-delivered fix - so growing from inside cloud-init cannot rescue
+  # the disk that most needs it. Baked into the image and ordered ahead of
+  # cloud-init-local.service instead, this runs regardless of cloud-init's
+  # own fate. Never fatal: a guest that keeps its current (smaller) size
+  # boots exactly as well as one that grows - this only ever adds space,
+  # never removes the boot it might otherwise have blocked.
+  - path: /usr/local/bin/asbx-growroot
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -u
+
+      ROOT_SRC=\$(findmnt -n -o SOURCE / 2>/dev/null) || exit 0
+      case "\$ROOT_SRC" in
+          /dev/vda[0-9]*) ;;
+          *) exit 0 ;;  # LVM or similar - not supported; the disk just keeps its current size
+      esac
+
+      command -v growpart >/dev/null 2>&1 || exit 0
+
+      PARTNUM=\${ROOT_SRC#/dev/vda}
+      # growpart exits non-zero when the partition already fills the disk -
+      # the ordinary case on every boot after the first grow, not a failure.
+      # NOCHANGE in its own output is what tells the two apart.
+      GROWPART_OUT=\$(growpart /dev/vda "\$PARTNUM" 2>&1) && GROWPART_RC=0 || GROWPART_RC=\$?
+      if [ "\$GROWPART_RC" -ne 0 ] && ! printf '%s' "\$GROWPART_OUT" | grep -q NOCHANGE; then
+          echo "asbx-growroot: growpart could not grow \$ROOT_SRC: \$GROWPART_OUT" >&2
+          exit 0
+      fi
+
+      FSTYPE=\$(findmnt -n -o FSTYPE / 2>/dev/null || true)
+      case "\$FSTYPE" in
+          ext2|ext3|ext4) resize2fs "\$ROOT_SRC" >/dev/null 2>&1 || true ;;
+          xfs) xfs_growfs / >/dev/null 2>&1 || true ;;
+          *) echo "asbx-growroot: root filesystem type '\$FSTYPE' is not supported for growing" >&2 ;;
+      esac
+
+  - path: /etc/systemd/system/asbx-growroot.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=asbx: grow root filesystem to match the disk before cloud-init
+      DefaultDependencies=no
+      After=systemd-remount-fs.service
+      Before=cloud-init-local.service sysinit.target shutdown.target
+      Conflicts=shutdown.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/bin/asbx-growroot
+
+      [Install]
+      WantedBy=sysinit.target
+
 runcmd:
   # Report straight to the virtio console. The getty banner proves hvc0 exists
   # and reaches the host log, and writing to the device works no matter what
@@ -233,6 +292,7 @@ $NETWORK_BACKEND_RUNCMD
   - [ sh, -c, "rm -f /etc/netplan/*.yaml /etc/netplan/*.yml" ]
   - [ sh, -c, "rm -f /etc/systemd/network/05-asbx-prepare-dhcp.network" ]
   - [ sh, -c, "systemctl daemon-reload" ]
+  - [ sh, -c, "systemctl enable asbx-growroot.service" ]
   - [ sh, -c, "echo \"ASBX-WAITONLINE \$(systemctl show systemd-networkd-wait-online.service -p ExecStart --value | grep -c 'timeout=5')\" > /dev/hvc0" ]
   # Report success where the host can see it.
   - [ sh, -c, "modprobe virtiofs 2>/dev/null || true" ]

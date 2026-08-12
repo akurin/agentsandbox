@@ -51,6 +51,14 @@ trap 'rc=$?; log "FAILED at line $LINENO (exit $rc)"; exit $rc' ERR
 # templated or forked per distro.
 . /etc/asbx/family.env
 
+# Growing the root filesystem to match a resized disk file happens earlier
+# than this, in the asbx-growroot.service baked into the image and ordered
+# before cloud-init-local.service - see vm/prepare-image.sh. It cannot live
+# here: a disk that is genuinely full makes cloud-init itself fail with
+# ENOSPC while writing its own bookkeeping, long before it ever reaches the
+# runcmd stage that runs this script - so a fix delivered through cloud-init
+# can never rescue the disk that most needs it.
+
 # -- trust the session CA ------------------------------------------------------
 # The certificate only: the CA private key stays on the Mac, so nothing in here
 # can mint certificates for anything.

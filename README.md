@@ -187,7 +187,7 @@ something *belonging to* a box (a capability, a secret) takes `--box` instead.
 | `box stop NAME [--purge] [--no-wait]` | shut it down |
 | `box ssh [NAME] [SSH_ARGS...] [-- COMMAND...]` | ssh in — real ssh, real sshd, over vsock (see below); any number at once |
 | `box ls` / `box inspect NAME` / `box status [NAME]` | list boxes / a box's config / its live session |
-| `box set NAME [--cpus N] [--memory MIB] [--image NAME] [--mount-add HOST:GUEST[:ro\|rw]] [--mount-rm GUEST]` | change hardware or mounts — takes effect on the next start |
+| `box set NAME [--cpus N] [--memory MIB] [--image NAME] [--disk-size SIZE] [--mount-add HOST:GUEST[:ro\|rw]] [--mount-rm GUEST]` | change hardware or mounts — takes effect on the next start; `--disk-size` (e.g. `40G`) needs the box stopped, and only grows, never shrinks (the guest's own partition and filesystem grow to match automatically on the next start) |
 | `box reset NAME` | discard the disk, keep the config |
 | `box rm NAME [--keep-disk]` | delete a box, and its disk unless told to keep it |
 | `box web [NAME] --on\|--off [--port N]` | swap in mitmweb, the full-detail flow inspector, without restarting the box |
