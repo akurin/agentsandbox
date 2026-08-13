@@ -108,6 +108,51 @@ else
     exit 1
 fi
 
+# -- let rootless Podman containers reach the tunnel and trust its CA too ------
+# Podman is not part of the golden image - it gets apt/dnf-installed later,
+# inside a session's own persistent disk - so there is no image-build step
+# that could write these instead. Static config files are harmless to write
+# whether or not Podman is installed yet: it only reads them once something
+# actually runs a container.
+#
+# Rootless Podman's default network mode (pasta) makes the container's own
+# connections ordinary host-netns socket calls - once it has *some*
+# self-consistent address to configure the container with, its real
+# outbound traffic already takes the same route out wg0 as any other guest
+# process, no forwarding or NAT required. The catch: pasta normally derives
+# that address by copying the host interface with a default route, and wg0
+# is a point-to-point tunnel with no gateway IP for it to copy - pasta finds
+# nothing and gives the container no route at all. A synthetic, self-
+# contained address/gateway unrelated to wg0's real numbers sidesteps that
+# entirely: it only has to look plausible to the container's own kernel,
+# since pasta's actual outbound connections don't depend on it.
+install -d -m 0755 /etc/containers/containers.conf.d
+cat >/etc/containers/containers.conf.d/99-asbx-pasta.conf <<'EOF'
+[network]
+pasta_options = ["-a", "10.0.2.100", "-n", "24", "-g", "10.0.2.1", "--dns", "10.0.0.53"]
+EOF
+
+# containers-mounts.conf(5): a source path listed here is copied into every
+# container and every `podman build` RUN step automatically, no --volume or
+# --env needed. This is deliberately *not* $CA_BUNDLE_PATH, the guest's own
+# merged trust bundle - mounting that exact path collides with any container
+# that installs or reinstalls its own ca-certificates package mid-build: it
+# tries to atomically replace the file a bind mount is sitting on top of and
+# fails with "Device or resource busy". Mounting the raw cert into the
+# *source* directory each distro family's own trust tooling scans for extra
+# certs avoids that, coexisting with a container managing its own generated
+# bundle normally. Both destinations are listed unconditionally, not just
+# the one matching this guest's own family - a container can be any distro
+# regardless of what the outer guest happens to be, and an unused entry is
+# harmless. Consuming it still takes one explicit step inside the container
+# (`update-ca-certificates` / `update-ca-trust extract`) - there is no way to
+# make a container's own trust store regenerate itself without running
+# something inside it.
+cat >/etc/containers/mounts.conf <<EOF
+$CA_SRC:/usr/local/share/ca-certificates/asbx-session-ca.crt
+$CA_SRC:/etc/pki/ca-trust/source/anchors/asbx-session-ca.crt
+EOF
+
 # -- kernel and network --------------------------------------------------------
 sysctl --system >/dev/null 2>&1 || true
 

@@ -410,6 +410,35 @@ one at a time, each test naming the property it stands for.
                      audit.jsonl, run/ sockets — mode 0700, gone on `stop --purge`
 ```
 
+## Testing
+
+```bash
+make test              # fast suite — no VM boot, no network, safe to run anytime
+make test-integration  # boots real guests and exercises them end to end
+```
+
+The integration suite (`tests_integration/`) needs at least one image built
+and prepared (see [Install](#install)) — an image that isn't built is
+skipped, not failed, so `make test-integration` works with just the one from
+install. For full coverage across every image family the suite checks
+(`debian-13`, `ubuntu-26.04`, `fedora-44` — each has its own packaging
+quirks worth catching independently, not just one per `GuestFamily`):
+
+```bash
+./vm/build-image.sh                    && ASBX_IMAGE_NAME=debian-13   ./vm/prepare-image.sh
+ASBX_DISTRO=ubuntu ./vm/build-image.sh && ASBX_IMAGE_NAME=ubuntu-26.04 ./vm/prepare-image.sh
+ASBX_DISTRO=fedora ./vm/build-image.sh && ASBX_IMAGE_NAME=fedora-44   ./vm/prepare-image.sh
+make test-integration
+```
+
+`ASBX_TEST_IMAGE=fedora-44 make test-integration` restricts a run to exactly
+one image, regardless of how many are built.
+
+Each test costs real time — tens of seconds per guest boot, more for
+anything that installs packages inside one (`tests_integration/test_podman.py`
+installs Podman fresh on every run, since it isn't part of the golden image)
+— this isn't the suite to run on every save.
+
 ## Current limitations
 
 - Mounts and port forwards are fixed at boot; changing either needs
