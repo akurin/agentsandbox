@@ -246,6 +246,7 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     # Everything the box holds becomes this run's session, except the
     # things that must be new every time: keys, CA, capabilities.
     args.allow = box.allow_hosts
+    args.allow_raw_tcp_ips = box.allow_raw_tcp_ips
     args.mount = list(box.mounts)
     args.profile = box.profile or None
     args.cpus = box.cpus
@@ -405,6 +406,7 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
 
     manager = SessionManager.create(
         allow_hosts=args.allow,
+        allow_raw_tcp_ips=getattr(args, "allow_raw_tcp_ips", None),
         mounts=args.mount or [],
         box_name=box.name if box else "",
     )
@@ -418,6 +420,8 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         print("  any public host is reachable (restrict with --allow HOST)")
     else:
         print(f"  allowed hosts: {', '.join(session.policy.allow_hosts)}")
+    if session.policy.allow_raw_tcp_ips:
+        print(f"  raw TCP allowed to: {', '.join(session.policy.allow_raw_tcp_ips)} (uninspected)")
     for mount in session.mounts:
         mode = "read-only" if mount.read_only else "read-write"
         print(f"  mount      {mount.host} -> guest:{mount.guest} ({mode})")
@@ -1249,6 +1253,7 @@ def cmd_box_create(args: argparse.Namespace) -> int:
         name=name,
         profile=args.profile or "",
         allow_hosts=list(args.allow or ["*"]),
+        allow_raw_tcp_ips=list(args.allow_raw_tcp_ips or []),
         mounts=mounts,
         cpus=args.cpus,
         memory_mib=args.memory,
@@ -1348,10 +1353,34 @@ def cmd_box_set(args: argparse.Namespace) -> int:
             changes.append(f"mount   + {mount.host}:{mount.guest}:{mode}")
         box.mounts = mounts
 
-    if not changes and args.disk_size is None:
+    if args.allow_raw_tcp_ip_rm or args.allow_raw_tcp_ip_add:
+        # Same incremental shape as --mount-add/--mount-rm, for the same
+        # reason: a replace flag risks silently dropping an address the
+        # caller forgot to retype, which for an uninspected escape hatch
+        # like this one is a worse silent failure than for a mount.
+        # Removals apply first, so --allow-raw-tcp-ip-rm X
+        # --allow-raw-tcp-ip-add X reads as "no-op" rather than "duplicate".
+        ips = list(box.allow_raw_tcp_ips)
+        for ip in args.allow_raw_tcp_ip_rm or []:
+            if ip not in ips:
+                print(f"!! {ip} is not currently allowed for raw TCP", file=sys.stderr)
+                return EXIT_USAGE
+            ips.remove(ip)
+            changes.append(f"raw tcp - {ip}")
+        for ip in args.allow_raw_tcp_ip_add or []:
+            if ip not in ips:
+                ips.append(ip)
+                changes.append(f"raw tcp + {ip}")
+            else:
+                print(f"  raw tcp already allows {ip}, nothing to add")
+        box.allow_raw_tcp_ips = ips
+
+    if not changes and args.disk_size is None and not (
+        args.allow_raw_tcp_ip_rm or args.allow_raw_tcp_ip_add
+    ):
         print(
             "nothing to change: pass --memory, --cpus, --image, --disk-size, "
-            "--mount-add or --mount-rm",
+            "--mount-add, --mount-rm, --allow-raw-tcp-ip-add or --allow-raw-tcp-ip-rm",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -1947,6 +1976,15 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--profile", help="capability profile to issue on every start")
     create.add_argument("--allow", action="append", default=[], metavar="HOST",
                         help="restrict egress to these hosts (default: all public)")
+    create.add_argument(
+        "--allow-raw-tcp-ip",
+        action="append",
+        default=[],
+        dest="allow_raw_tcp_ips",
+        metavar="IP",
+        help="allow uninspected raw TCP to this address (repeatable; none by default - "
+        "everything else this proxy handles is HTTP-inspected, this is not)",
+    )
     create.add_argument("--cpus", type=int, default=2)
     create.add_argument("--memory", type=int, default=2048, help="guest RAM in MiB")
     create.add_argument(
@@ -2024,7 +2062,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stop_env.set_defaults(func=cmd_box_stop, wait=True)
 
-    set_cmd = box_sub.add_parser("set", help="change a box's cpus, memory, image, disk size or mounts")
+    set_cmd = box_sub.add_parser(
+        "set", help="change a box's cpus, memory, image, disk size, mounts, or raw TCP allowlist"
+    )
     set_cmd.add_argument("name")
     set_cmd.add_argument("--memory", type=int, metavar="MIB", help="guest RAM in MiB")
     set_cmd.add_argument("--cpus", type=int)
@@ -2052,6 +2092,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=_normalize_guest_path,
         metavar="GUEST",
         help="remove the mount at this guest path (repeatable; takes effect on the next start)",
+    )
+    set_cmd.add_argument(
+        "--allow-raw-tcp-ip-add",
+        action="append",
+        dest="allow_raw_tcp_ip_add",
+        metavar="IP",
+        help="allow uninspected raw TCP to this address (repeatable; takes effect on the next start)",
+    )
+    set_cmd.add_argument(
+        "--allow-raw-tcp-ip-rm",
+        action="append",
+        dest="allow_raw_tcp_ip_rm",
+        metavar="IP",
+        help="remove a previously-allowed raw TCP address (repeatable; takes effect on the next start)",
     )
     set_cmd.set_defaults(func=cmd_box_set)
 

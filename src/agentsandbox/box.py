@@ -59,6 +59,10 @@ class Box:
     profile: str = ""
     #: Egress policy. ``["*"]`` is any public host; the hard blocks are separate.
     allow_hosts: list[str] = field(default_factory=lambda: ["*"])
+    #: Raw TCP is off unless a box pins a specific address - see
+    #: `DestinationPolicy.allow_raw_tcp_ips`'s own docstring for why this is
+    #: address-pinned rather than a host pattern like `allow_hosts`.
+    allow_raw_tcp_ips: list[str] = field(default_factory=list)
     #: Host directories exposed to the guest. No mount is privileged over
     #: another - see `agentsandbox.session.Mount`.
     mounts: list[Mount] = field(default_factory=list)
@@ -153,6 +157,7 @@ class Box:
             "name": self.name,
             "profile": self.profile,
             "allow_hosts": self.allow_hosts,
+            "allow_raw_tcp_ips": self.allow_raw_tcp_ips,
             "mounts": [f"{m.host}:{m.guest}:{'ro' if m.read_only else 'rw'}" for m in self.mounts],
             "cpus": self.cpus,
             "memory_mib": self.memory_mib,

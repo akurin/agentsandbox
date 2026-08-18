@@ -49,6 +49,21 @@ CAPABILITY_HEADERS = ("authorization", "x-api-key", "api-key", "x-auth-token", "
 
 _BODY_SCAN_LIMIT = 1 * 1024 * 1024
 
+#: Body-hit denial reasons that never risked a real secret: both fire
+#: before any credential is fetched - `host_not_permitted` inside
+#: `Capability.validate`'s `check_destination`, `unknown_capability` in the
+#: lookup that runs before that - so a request denied for either reason
+#: carries nothing more sensitive than the placeholder text it already had.
+#: Forwarding it unbrokered instead of blocking it outright is what keeps a
+#: placeholder merely showing up somewhere unexpected - echoed back into
+#: the guest's own conversation with its model provider, which is expected
+#: to legitimately contain one - from breaking traffic that was never
+#: actually a leak. Every other denial reason a body-kind lookup can
+#: produce (expired, wrong session, wrong method/path, ...) implies the
+#: capability *did* resolve for this destination and is worth surfacing
+#: plainly, not silently downgrading.
+_INERT_BODY_DENIALS = frozenset({"host_not_permitted", "unknown_capability"})
+
 #: Options that, if set, create traffic paths this addon never sees. An empty
 #: regex in any of them matches every host, so "cleared" and "matches
 #: everything" look identical in a config file - hence the explicit check.
@@ -148,7 +163,8 @@ class SandboxAddon:
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
         """Stream a plain pass-through response instead of buffering the
-        whole body before relaying a single byte.
+        whole body before relaying a single byte - unless it is small
+        enough for `response` below to scan first.
 
         `stream_large_bodies` (the proxy-wide option) is deliberately never
         set: it applies to *request* bodies too, and a CDK deploy's asset
@@ -161,19 +177,68 @@ class SandboxAddon:
         outcome than a slow download. Setting `.stream` here instead, only
         for the one flow shape that is safe (see `_forward_or_kill` below,
         the only place that sets `asbx_plain_forward`), affects only the
-        response side, only for a flow this addon never inspects the body
-        of anyway - so nothing is lost by never buffering it in the first
-        place. Found live: a plain download's time-to-first-byte matched its
-        *entire* transfer time - mitmproxy was fetching the whole body from
-        the real upstream before relaying any of it through the tunnel.
+        response side - so nothing is lost by never buffering it in the
+        first place. Found live: a plain download's time-to-first-byte
+        matched its *entire* transfer time - mitmproxy was fetching the
+        whole body from the real upstream before relaying any of it
+        through the tunnel.
+
+        The exception: a response declaring a `Content-Length` within
+        `_BODY_SCAN_LIMIT` is left unstreamed (buffered, as mitmproxy does
+        by default) so `response` below can scan it for a leaked secret
+        before it reaches the guest - the same size this addon already
+        scans *request* bodies up to, and for the same reason a large
+        download is not the shape a credential-echoing API response ever
+        takes. A response with no declared length, or one too large, keeps
+        streaming exactly as before: unscanned, same as it always was.
         """
-        if flow.metadata.get("asbx_plain_forward") and flow.response is not None:
+        if not flow.metadata.get("asbx_plain_forward") or flow.response is None:
+            return
+        content_length = flow.response.headers.get("content-length")
+        try:
+            scannable = content_length is not None and int(content_length) <= _BODY_SCAN_LIMIT
+        except ValueError:
+            scannable = False
+        if not scannable:
             flow.response.stream = True
 
-    # There is deliberately no `response` hook on the pass-through path.
-    #
-    # It used to scrub set-cookie, alt-svc and www-authenticate from every
-    # unbrokered response, and none of that was holding anything up:
+    def response(self, flow: http.HTTPFlow) -> None:
+        """Scrub a real, registered secret out of an ordinary forwarded
+        response before it reaches the guest.
+
+        Scoped to the plain-forward path only: a brokered response is
+        already scrubbed against exactly the secret its own request used,
+        in `broker/core.py`'s `scrub_secret` - this is for the case that
+        mechanism cannot cover, an *unbrokered* request to an allowlisted
+        host whose response happens to echo back a credential this
+        session's broker resolved for some *other* request (a debug or
+        token-introspection endpoint, say). Every literal this session has
+        ever unlocked is registered with `redactor` the moment it is
+        fetched (see `broker/core.py`'s `_perform`/`_perform_body`), so the
+        check here is against all of them, not just one.
+
+        Only reaches a response `responseheaders` chose to buffer rather
+        than stream (see there) - the only ones this hook can see the full
+        body of at all.
+        """
+        if not flow.metadata.get("asbx_plain_forward") or flow.response is None:
+            return
+        if flow.response.stream:
+            return
+        body = flow.response.content
+        if not body:
+            return
+        scrubbed = redactor.scrub_body(body)
+        if scrubbed == body:
+            return
+        flow.response.content = scrubbed
+        flow.response.headers["content-length"] = str(len(scrubbed))
+        self.audit.emit("net.response_secret_scrubbed", host=flow.request.pretty_host)
+
+    # The `response` hook above is narrower than it looks, and deliberately
+    # does not do more: it used to also scrub set-cookie, alt-svc and
+    # www-authenticate from every unbrokered response, and none of that was
+    # holding anything up:
     #
     # * alt-svc advertises an HTTP/3 endpoint, and `udp_start` below already
     #   kills raw UDP - allow_raw_udp defaults to False - so the attempt dies
@@ -187,7 +252,9 @@ class SandboxAddon:
     #
     # What contains this path is the destination policy, the capability
     # bindings, and the fact that raw TCP and UDP are refused. None of that is
-    # a header.
+    # a header - which is why the hook that came back stays scoped to the one
+    # thing a header-level fix cannot reach: a real secret literal embedded in
+    # a response body, not a header.
     #
     # Brokered responses are a different case and are still sanitised, in
     # `broker.upstream`: there the broker authenticated with a real credential,
@@ -197,16 +264,30 @@ class SandboxAddon:
     # -- non-HTTP -----------------------------------------------------------
 
     def tcp_start(self, flow: tcp.TCPFlow) -> None:
-        """Raw TCP we cannot inspect: killed unless the session opts in."""
+        """Raw TCP we cannot inspect: killed unless its destination address
+        is explicitly pinned in the session's own `allow_raw_tcp_ips`.
+
+        By address, not by the host-pattern matching `allow_hosts` uses for
+        HTTP: a raw TCP connection carries nothing equivalent to a Host
+        header or a TLS ClientHello's SNI, so there is no hostname here to
+        match a pattern against - only the address the guest's own
+        resolution (over the tunnel's resolver) already landed on. This is
+        additive, not a replacement for the address-space checks every
+        connection gets in `server_connect` below - private, loopback,
+        link-local and metadata space stay blocked regardless of whether
+        their address happens to appear in this list.
+        """
         if _is_tunnel_dns(flow.server_conn.address):
             # DNS over TCP: resolvers fall back to it whenever a UDP answer is
             # truncated, so killing it here shows up as intermittent - and in
             # systemd-resolved's case, total - resolution failure.
             return
-        if not self.policy.allow_raw_tcp:
+        address = flow.server_conn.address
+        ip = str(address[0]) if address else ""
+        if ip not in self.policy.allow_raw_tcp_ips:
             self.audit.emit(
                 "net.raw_tcp_blocked",
-                dst=_address(flow.server_conn.address),
+                dst=_address(address),
                 reason="raw_tcp_denied",
             )
             flow.kill()
@@ -441,6 +522,13 @@ class SandboxAddon:
         except BrokerError as exc:
             self.audit.emit("broker.unavailable", host=dest.host, error=str(exc))
             self._deny(flow, "broker_unavailable", "the secrets broker is not available", dest=dest)
+            return
+        if response.decision == "deny" and response.reason in _INERT_BODY_DENIALS:
+            # See `_INERT_BODY_DENIALS`: nothing was ever going to be
+            # substituted for either reason, so there is no secret to
+            # protect by blocking - only a placeholder that showed up
+            # somewhere other than the request it was minted for.
+            self._forward_or_kill(flow, dest)
             return
         flow.response = _to_mitm_response(response)
 

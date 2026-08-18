@@ -66,6 +66,35 @@ def test_registered_secrets_are_scrubbed_anywhere_they_appear():
     assert "[redacted]" in r.text("token=ghp_realsecret0123456789")
 
 
+def test_scrub_body_removes_a_registered_secret_from_bytes():
+    r = Redactor()
+    r.register_secret("realsecretvalue123")
+    out = r.scrub_body(b'{"echo": "Bearer realsecretvalue123"}')
+    assert b"realsecretvalue123" not in out
+    assert b"[redacted]" in out
+
+
+def test_scrub_body_never_truncates():
+    """Unlike `text()`, built for a log line - a response body has to reach
+    the guest intact, not clipped."""
+    r = Redactor()
+    r.register_secret("realsecretvalue123")
+    body = b"x" * 5000 + b"realsecretvalue123" + b"y" * 5000
+    out = r.scrub_body(body)
+    assert len(out) == len(body) - len(b"realsecretvalue123") + len(b"[redacted]")
+    assert b"[+" not in out
+
+
+def test_scrub_body_ignores_unregistered_credential_shapes():
+    """Unlike `text()`, this does not apply the broad shape patterns - a
+    JWT- or `cap_v1_`-shaped string in someone else's response is not one of
+    this session's own secrets, and scrubbing it would mangle a response
+    that was never actually a leak."""
+    r = Redactor()
+    body = b"token: cap_v1_abcdefghijklmnopqrstuvwx, ghp_abcdefghijklmnopqrstuvwxyz0123"
+    assert r.scrub_body(body) == body
+
+
 def test_credential_shapes_are_scrubbed_even_if_never_registered():
     r = Redactor()
     for value in (

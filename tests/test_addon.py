@@ -189,6 +189,47 @@ def test_a_repeated_placeholder_in_the_body_is_only_listed_once(addon, broker_st
     assert broker_stub.requests[0].extra_capabilities == []
 
 
+def test_a_body_placeholder_denied_for_the_wrong_host_is_forwarded_unbrokered(addon, broker_stub):
+    """A capability's own placeholder showing up in a body headed somewhere
+    its scope doesn't cover was never going to be substituted either way -
+    `check_destination` runs before any secret is fetched - so blocking the
+    whole request protects nothing. Falling back to an ordinary forward
+    (still subject to the session's own allowlist) is what keeps a
+    placeholder merely echoed into an unrelated request - exactly what
+    conversation history relayed back to a model provider legitimately
+    does - from breaking traffic that was never a leak."""
+    broker_stub.response = BrokerResponse(403, [], b"", "deny", "host_not_permitted", "")
+    flow = http_flow(method=b"POST", content=f'{{"key":"{TOKEN}"}}'.encode())
+    addon.request(flow)
+    assert flow.response is None  # left for mitmproxy to fetch for real, same as an ordinary forward
+    assert flow.metadata.get("asbx_plain_forward") is True
+
+
+def test_a_body_placeholder_that_does_not_resolve_is_forwarded_unbrokered(addon, broker_stub):
+    """Same reasoning, the other denial reason that never risked a secret:
+    an unknown/malformed placeholder can never be substituted for anything,
+    so there is nothing to protect by blocking it."""
+    broker_stub.response = BrokerResponse(403, [], b"", "deny", "unknown_capability", "")
+    flow = http_flow(method=b"POST", content=f'{{"key":"{TOKEN}"}}'.encode())
+    addon.request(flow)
+    assert flow.response is None
+    assert flow.metadata.get("asbx_plain_forward") is True
+
+
+def test_a_body_placeholder_denied_as_expired_is_still_blocked(addon, broker_stub):
+    """Contrast case: a denial reason that implies the capability *did*
+    resolve and *did* match this destination - just too late - still gets a
+    plain, surfaced denial, not a silent downgrade. Silently forwarding an
+    expired-but-otherwise-correct capability's placeholder would hide a
+    genuinely actionable signal (renew it) behind a confusing upstream
+    401/403 instead."""
+    broker_stub.response = BrokerResponse(403, [], b'{"error":"x"}', "deny", "capability_expired", "")
+    flow = http_flow(method=b"POST", content=f'{{"key":"{TOKEN}"}}'.encode())
+    addon.request(flow)
+    assert flow.response.status_code == 403
+    assert flow.metadata.get("asbx_plain_forward") is not True
+
+
 def test_capability_in_a_cookie_is_refused(addon, broker_stub):
     flow = http_flow(headers=[("Host", "api.github.com"), ("Cookie", f"auth={TOKEN}")])
     addon.request(flow)
@@ -350,12 +391,24 @@ def test_raw_udp_is_killed_by_default(addon):
     assert flow.killable is False or flow.error is not None
 
 
-def test_raw_tcp_can_be_allowed_explicitly(session, broker_stub):
-    session.policy.allow_raw_tcp = True
+def test_raw_tcp_is_allowed_to_a_pinned_address(session, broker_stub):
+    """Pinned by the address the connection actually dials, not a boolean
+    switch - `tflow.ttcpflow()`'s own default server address."""
+    session.policy.allow_raw_tcp_ips = ["address"]
     addon = SandboxAddon(session, broker_stub, audit=NullAuditLog(session.session_id))
     flow = tflow.ttcpflow()
     addon.tcp_start(flow)
     assert flow.error is None
+
+
+def test_raw_tcp_to_an_unlisted_address_is_still_killed(session, broker_stub):
+    """Pinning one address does not open raw TCP generally - only that one
+    address, exactly the gap the old all-or-nothing boolean had."""
+    session.policy.allow_raw_tcp_ips = ["some-other-host"]
+    addon = SandboxAddon(session, broker_stub, audit=NullAuditLog(session.session_id))
+    flow = tflow.ttcpflow()
+    addon.tcp_start(flow)
+    assert flow.killable is False or flow.error is not None
 
 
 # -- connection-level enforcement -------------------------------------------
@@ -527,18 +580,23 @@ def test_the_guest_cannot_choose_the_account(addon, broker_stub):
     assert not any("someone-else" in v for _, v in brokered.headers if "auth" in _.lower())
 
 
-def test_the_addon_does_not_touch_pass_through_responses(addon):
-    """Nothing is stripped from an unbrokered response.
+def test_the_addon_does_not_touch_pass_through_response_headers(addon):
+    """Nothing is stripped from an unbrokered response's headers, and a body
+    with no registered secret in it passes through unchanged too.
 
     What contains this path is the destination policy, the capability
     bindings, and raw TCP/UDP being refused - none of which is a header. The
     scrub that used to be here removed set-cookie, alt-svc and
     www-authenticate: the first two are covered elsewhere (udp_start kills the
     HTTP/3 attempt alt-svc advertises), and the last broke credentials the
-    broker knows nothing about.
+    broker knows nothing about. `response` exists now, but only to scrub a
+    registered secret out of a *body* - see
+    test_a_plain_forward_response_with_a_leaked_secret_is_scrubbed below.
     """
     flow = http_flow()
+    addon.request(flow)  # marks the flow asbx_plain_forward, as in production
     flow.response = tutils.tresp()
+    flow.response.content = b"an ordinary response body"
     original = {
         "WWW-Authenticate": 'Bearer realm="https://auth.docker.io/token"',
         "Set-Cookie": "session=abc",
@@ -548,26 +606,97 @@ def test_the_addon_does_not_touch_pass_through_responses(addon):
     for name, value in original.items():
         flow.response.headers[name] = value
 
-    assert not hasattr(addon, "response")
+    addon.response(flow)
     for name, value in original.items():
         assert flow.response.headers[name] == value
+    assert flow.response.content == b"an ordinary response body"
 
 
-def test_a_plain_forward_streams_its_response(addon):
+def test_a_large_plain_forward_response_streams(addon):
     """The fix for a real bug: mitmproxy's default is to buffer a response's
     entire body before relaying any of it, so a plain download's
     time-to-first-byte was matching its *entire* transfer time. `request`
     marks a plain-forwarded flow so `responseheaders` can turn streaming on
-    for it - safe here since the addon never inspects a pass-through body
-    anyway (see test_the_addon_does_not_touch_pass_through_responses above).
+    for it - safe for a response too large to scan for a leaked secret
+    anyway, since `response` below never sees a streamed body's content.
     """
     flow = http_flow()
     addon.request(flow)  # the plain-forward path: marks the flow
     assert flow.response is None  # left for mitmproxy to fetch for real
 
     flow.response = tutils.tresp()
+    flow.response.headers["content-length"] = str(2 * 1024 * 1024)  # over _BODY_SCAN_LIMIT
     addon.responseheaders(flow)
     assert flow.response.stream is True
+
+
+def test_a_plain_forward_response_with_no_declared_length_streams(addon):
+    """No `Content-Length` means the size is unknown - streamed exactly as
+    before, not scanned. Only a response declaring a size this addon knows
+    is small enough gets buffered instead."""
+    flow = http_flow()
+    addon.request(flow)
+    flow.response = tutils.tresp()
+    del flow.response.headers["content-length"]
+    addon.responseheaders(flow)
+    assert flow.response.stream is True
+
+
+def test_a_small_plain_forward_response_is_buffered_not_streamed(addon):
+    """A response small enough to scan is left unstreamed (mitmproxy's own
+    default) so `response` can inspect its full body for a leaked secret -
+    the other half of the fix `test_a_large_plain_forward_response_streams`
+    covers."""
+    flow = http_flow()
+    addon.request(flow)
+    flow.response = tutils.tresp()
+    flow.response.headers["content-length"] = "26"
+    addon.responseheaders(flow)
+    assert not flow.response.stream
+
+
+def test_a_plain_forward_response_with_a_leaked_secret_is_scrubbed(addon):
+    """The other half of the fix: an unbrokered response echoing back a real
+    secret this session's broker resolved for some *other* request must
+    never reach the guest - `scrub_secret` in broker/core.py only covers the
+    brokered path, where the secret used and the response come from the same
+    call. This is the gap that leaves open otherwise: a debug or
+    token-introspection endpoint reflecting a credential resolved earlier in
+    the session, reached through an ordinary allowlisted request that never
+    carried a capability placeholder at all.
+    """
+    from agentsandbox.audit import redactor
+
+    redactor.register_secret("sekrit-value-123456")
+
+    flow = http_flow()
+    addon.request(flow)
+    flow.response = tutils.tresp()
+    flow.response.content = b'{"echo": "Bearer sekrit-value-123456"}'
+    flow.response.headers["content-length"] = str(len(flow.response.content))
+
+    addon.response(flow)
+    assert b"sekrit-value-123456" not in flow.response.content
+    assert b"[redacted]" in flow.response.content
+    assert flow.response.headers["content-length"] == str(len(flow.response.content))
+
+
+def test_a_plain_forward_response_with_no_secret_is_untouched(addon):
+    """The common case: nothing registered, nothing to find, body and
+    Content-Length both left exactly as they arrived."""
+    from agentsandbox.audit import redactor
+
+    redactor.register_secret("sekrit-value-123456")
+
+    flow = http_flow()
+    addon.request(flow)
+    flow.response = tutils.tresp()
+    flow.response.content = b'{"ok": true}'
+    original_length = flow.response.headers["content-length"]
+
+    addon.response(flow)
+    assert flow.response.content == b'{"ok": true}'
+    assert flow.response.headers["content-length"] == original_length
 
 
 def test_a_brokered_response_is_never_streamed(addon, broker_stub):

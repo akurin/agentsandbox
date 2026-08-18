@@ -112,6 +112,7 @@ class SessionManager:
         cls,
         *,
         allow_hosts: list[str] | None = None,
+        allow_raw_tcp_ips: list[str] | None = None,
         mounts: list[Mount] | None = None,
         wg_listen_host: str = "127.0.0.1",
         wg_listen_port: int | None = None,
@@ -132,7 +133,10 @@ class SessionManager:
         session = Session(
             session_id=new_session_id(),
             box_name=box_name,
-            policy=DestinationPolicy(allow_hosts=list(allow_hosts or ["*"])),
+            policy=DestinationPolicy(
+                allow_hosts=list(allow_hosts or ["*"]),
+                allow_raw_tcp_ips=list(allow_raw_tcp_ips or []),
+            ),
             mounts=list(mounts or []),
             wg_listen_host=wg_listen_host,
             wg_listen_port=wg_listen_port or _free_udp_port(wg_listen_host),
@@ -163,6 +167,7 @@ class SessionManager:
             "session.created",
             box_name=box_name,
             allow_hosts=session.policy.allow_hosts,
+            allow_raw_tcp_ips=session.policy.allow_raw_tcp_ips,
             mounts=[m.guest for m in session.mounts],
             wg_port=session.wg_listen_port,
         )

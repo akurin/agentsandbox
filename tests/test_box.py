@@ -33,6 +33,7 @@ def test_a_box_round_trips(project):
         name="neo",
         profile="myprofile",
         allow_hosts=["api.github.com"],
+        allow_raw_tcp_ips=["203.0.113.10"],
         mounts=[
             Mount(host=str(project), guest="/home/agent/neo"),
             Mount(host=str(project), guest="/mnt/extra", read_only=True),
@@ -45,9 +46,18 @@ def test_a_box_round_trips(project):
     assert loaded.mounts[0].host == str(project)
     assert loaded.profile == "myprofile"
     assert loaded.allow_hosts == ["api.github.com"]
+    assert loaded.allow_raw_tcp_ips == ["203.0.113.10"]
     assert loaded.cpus == 4
     assert loaded.mounts[1].guest == "/mnt/extra"
     assert loaded.mounts[1].read_only is True
+
+
+def test_allow_raw_tcp_ips_is_empty_by_default(project):
+    """Off unless a box explicitly pins an address - same "deny by default"
+    posture as everything else this sandbox exposes."""
+    box = Box(name="neo", mounts=[Mount(host=str(project), guest="/home/agent/neo")])
+    box.save()
+    assert Box.load("neo").allow_raw_tcp_ips == []
 
 
 def test_box_names_are_constrained():
@@ -725,6 +735,42 @@ def test_box_set_mount_add_and_rm_are_incremental(project, tmp_path, capsys):
     assert cli.main(["box", "set", "neo", "--mount-rm", "/home/agent/neo"]) == 0
     box = Box.load("neo")
     assert [m.guest for m in box.mounts] == ["/mnt/extra"]
+
+
+def test_box_set_allow_raw_tcp_ip_add_and_rm_are_incremental(project, capsys):
+    """Same shape as --mount-add/--mount-rm, for the same reason - a replace
+    flag risks silently dropping an address the caller forgot to retype."""
+    cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo"])
+    capsys.readouterr()
+
+    assert cli.main(["box", "set", "neo", "--allow-raw-tcp-ip-add", "203.0.113.10"]) == 0
+    assert Box.load("neo").allow_raw_tcp_ips == ["203.0.113.10"]
+
+    assert cli.main(["box", "set", "neo", "--allow-raw-tcp-ip-add", "203.0.113.11"]) == 0
+    assert Box.load("neo").allow_raw_tcp_ips == ["203.0.113.10", "203.0.113.11"]
+
+    assert cli.main(["box", "set", "neo", "--allow-raw-tcp-ip-rm", "203.0.113.10"]) == 0
+    assert Box.load("neo").allow_raw_tcp_ips == ["203.0.113.11"]
+
+
+def test_box_set_allow_raw_tcp_ip_rm_unknown_ip_is_an_error(project, capsys):
+    cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo"])
+    capsys.readouterr()
+
+    assert cli.main(["box", "set", "neo", "--allow-raw-tcp-ip-rm", "203.0.113.10"]) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "203.0.113.10" in err
+
+
+def test_box_set_allow_raw_tcp_ip_add_is_idempotent(project, capsys):
+    """Adding the same address twice does not duplicate it, or report a
+    change the second time."""
+    cli.main(["box", "create", "neo", "--mount", f"{project}:/home/agent/neo"])
+    cli.main(["box", "set", "neo", "--allow-raw-tcp-ip-add", "203.0.113.10"])
+    capsys.readouterr()
+
+    assert cli.main(["box", "set", "neo", "--allow-raw-tcp-ip-add", "203.0.113.10"]) == 0
+    assert Box.load("neo").allow_raw_tcp_ips == ["203.0.113.10"]
 
 
 def test_box_set_mount_rm_ignores_a_trailing_slash(project, capsys):

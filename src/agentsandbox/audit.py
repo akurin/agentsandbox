@@ -100,6 +100,25 @@ class Redactor:
             value = value[:_MAX_VALUE_LEN] + f"...[+{len(value) - _MAX_VALUE_LEN}B]"
         return value
 
+    def scrub_body(self, data: bytes) -> bytes:
+        """Remove any registered secret literal from response body bytes.
+
+        Unlike :meth:`text`, this never truncates - a response body has to
+        reach the guest intact, not clipped at a log line's length - and
+        never applies the broader credential-*shape* patterns: a
+        JWT-shaped string in someone else's API response is not one of
+        this session's own secrets, and mangling it would break a response
+        that was never actually a leak. Only literals this session's own
+        broker has actually resolved are this method's job.
+        """
+        with self._lock:
+            literals = sorted(self._literals, key=len, reverse=True)
+        for literal in literals:
+            literal_bytes = literal.encode("utf-8", "ignore")
+            if literal_bytes and literal_bytes in data:
+                data = data.replace(literal_bytes, REDACTED.encode())
+        return data
+
     def headers(self, headers: Iterable[tuple[str, str]]) -> list[list[str]]:
         out: list[list[str]] = []
         for name, value in headers:

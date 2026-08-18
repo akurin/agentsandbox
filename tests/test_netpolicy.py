@@ -76,6 +76,16 @@ def test_allowlist_matching_is_not_a_substring_match():
     assert not host_matches("notexample.com", "*.example.com")
 
 
+def test_allow_raw_tcp_ips_round_trips_and_defaults_empty():
+    """Off by default, same posture as raw TCP/UDP generally - and, unlike
+    `allow_hosts`, an address list rather than a host-pattern list, since a
+    raw TCP connection carries no hostname to match a pattern against."""
+    assert DestinationPolicy().allow_raw_tcp_ips == []
+    policy = DestinationPolicy.from_dict({"allow_raw_tcp_ips": ["203.0.113.10"]})
+    assert policy.allow_raw_tcp_ips == ["203.0.113.10"]
+    assert policy.to_dict()["allow_raw_tcp_ips"] == ["203.0.113.10"]
+
+
 def test_default_policy_allows_public_hosts_but_still_blocks_dangerous():
     """Default is allow-all public, but private/metadata/loopback are hard blocks."""
     policy = DestinationPolicy()

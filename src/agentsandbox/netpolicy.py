@@ -228,7 +228,19 @@ class DestinationPolicy:
     allow_ports: list[int] = field(default_factory=lambda: list(_ALWAYS_ALLOWED_PORTS))
     #: Non-HTTP TCP/UDP is off unless explicitly enabled: we cannot inspect it,
     #: and the spec says unsupported protocols are denied by default.
-    allow_raw_tcp: bool = False
+    #:
+    #: Raw TCP is pinned by *address*, not by a host pattern like
+    #: ``allow_hosts``: unlike an HTTP request or a TLS ClientHello, a raw
+    #: TCP connection carries nothing equivalent to a Host header or SNI - by
+    #: the time one reaches the proxy, the guest has already resolved a name
+    #: to an address itself, over the tunnel's own resolver, and there is no
+    #: hostname left to match a pattern against, only the address it landed
+    #: on. Empty means what it always has: nothing permitted. A connection
+    #: still has to clear every address-level check every other connection
+    #: does (private/loopback/metadata/link-local space is blocked
+    #: regardless of this list) - this only ever narrows further, never
+    #: substitutes for that.
+    allow_raw_tcp_ips: list[str] = field(default_factory=list)
     allow_raw_udp: bool = False
     #: Plain HTTP is allowed by default. Credentials are still never attached
     #: over it — the broker independently requires HTTPS for any
@@ -241,7 +253,7 @@ class DestinationPolicy:
             allow_hosts=list(data.get("allow_hosts", [])),
             deny_hosts=list(data.get("deny_hosts", [])),
             allow_ports=list(data.get("allow_ports", _ALWAYS_ALLOWED_PORTS)),
-            allow_raw_tcp=bool(data.get("allow_raw_tcp", False)),
+            allow_raw_tcp_ips=list(data.get("allow_raw_tcp_ips", [])),
             allow_raw_udp=bool(data.get("allow_raw_udp", False)),
             allow_plaintext_http=bool(data.get("allow_plaintext_http", False)),
         )
@@ -251,7 +263,7 @@ class DestinationPolicy:
             "allow_hosts": self.allow_hosts,
             "deny_hosts": self.deny_hosts,
             "allow_ports": self.allow_ports,
-            "allow_raw_tcp": self.allow_raw_tcp,
+            "allow_raw_tcp_ips": self.allow_raw_tcp_ips,
             "allow_raw_udp": self.allow_raw_udp,
             "allow_plaintext_http": self.allow_plaintext_http,
         }
