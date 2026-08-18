@@ -363,3 +363,31 @@ def test_the_proxy_is_never_told_to_ignore_anything(session):
     argv = build_argv(session)
     for option in ("ignore_hosts", "allow_hosts", "tcp_hosts", "udp_hosts"):
         assert not any(a.startswith(f"{option}=") for a in argv), option
+
+
+def test_rawtcp_is_only_enabled_when_a_session_pins_a_raw_tcp_address():
+    """A session with no pinned raw-TCP addresses gets `rawtcp=false`, same
+    as always - nothing to grant, so mitmproxy's heuristic passthrough stays
+    off. One that pins an address flips it to `rawtcp=true`; `tcp_start`
+    below still kills any TCP layer this creates whose address is not in
+    `allow_raw_tcp_ips`, so the actual enforcement point does not move -
+    this only controls whether mitmproxy ever offers such a layer at all.
+
+    `tcp_hosts` was tried first as the more surgical option (scope the raw
+    layer to exactly the pinned address, leave `rawtcp` alone) but does not
+    work in WireGuard mode: a connection matching `tcp_hosts` is accepted at
+    the transport level and then never reaches this addon's hooks, confirmed
+    live via unconditional debug logging in `tcp_start`/`server_connect`."""
+    from agentsandbox.netpolicy import DestinationPolicy
+    from agentsandbox.session import Session
+
+    plain = Session(session_id="test-session-no-raw-tcp", policy=DestinationPolicy(allow_hosts=["*"]))
+    plain.save()
+    assert "rawtcp=false" in " ".join(build_argv(plain))
+
+    policy = DestinationPolicy(allow_hosts=["*"], allow_raw_tcp_ips=["203.0.113.10"])
+    pinned = Session(session_id="test-session-raw-tcp", policy=policy)
+    pinned.save()
+    argv = build_argv(pinned)
+    assert "rawtcp=true" in " ".join(argv)
+    assert not any(a.startswith("tcp_hosts=") for a in argv)

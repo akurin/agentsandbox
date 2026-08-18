@@ -419,6 +419,76 @@ def test_starting_an_already_running_box_is_refused(project, capsys, monkeypatch
     assert "asbx box ssh neo" in err
 
 
+def test_restart_stops_a_running_box_then_starts_it(project, capsys, monkeypatch):
+    """The point of `restart`: what `asbx box stop neo && asbx box start neo`
+    already did correctly (stop already waits for the old supervisor to
+    fully exit - see cmd_box_stop's own comment - so the chained form was
+    never actually racy), as one command instead of two. `cmd_box_start`
+    itself is stubbed out here - actually booting a VM is what
+    tests_integration/ is for, not this suite; what matters here is that
+    restart calls stop before start, not that start succeeds."""
+    import os
+
+    from agentsandbox.manager import SessionManager
+    from agentsandbox.session import STATE_RUNNING
+
+    cli.main(["box", "create", "neo", "--mount", f"{project}:{project}"])
+    capsys.readouterr()
+
+    manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
+    manager.session.state = STATE_RUNNING
+    manager.session.supervisor_pid = os.getpid()  # the "already dead, just clean up" case
+    manager.session.save()
+
+    started = []
+    monkeypatch.setattr(cli, "cmd_box_start", lambda args: started.append(args.name) or 0)
+
+    assert cli.main(["box", "restart", "neo"]) == 0
+    out = capsys.readouterr().out
+    assert "stopped neo" in out
+    assert started == ["neo"]
+
+
+def test_restart_starts_a_stopped_box_without_trying_to_stop_it(project, capsys, monkeypatch):
+    """Restarting something that was never running should not fail before
+    it gets to the useful part - it should just start."""
+    cli.main(["box", "create", "neo", "--mount", f"{project}:{project}"])
+    capsys.readouterr()
+
+    stopped = []
+    started = []
+    monkeypatch.setattr(cli, "cmd_box_stop", lambda args: stopped.append(args.name) or 0)
+    monkeypatch.setattr(cli, "cmd_box_start", lambda args: started.append(args.name) or 0)
+
+    assert cli.main(["box", "restart", "neo"]) == 0
+    assert stopped == []
+    assert started == ["neo"]
+
+
+def test_restart_does_not_start_if_stopping_fails(project, capsys, monkeypatch):
+    """A stop that genuinely fails (the supervisor did not exit in time,
+    say) must not be followed by a start racing that same shutdown."""
+    import os
+
+    from agentsandbox.manager import SessionManager
+    from agentsandbox.session import STATE_RUNNING
+
+    cli.main(["box", "create", "neo", "--mount", f"{project}:{project}"])
+    capsys.readouterr()
+
+    manager = SessionManager.create(allow_hosts=["*"], box_name="neo")
+    manager.session.state = STATE_RUNNING
+    manager.session.supervisor_pid = os.getpid()
+    manager.session.save()
+
+    started = []
+    monkeypatch.setattr(cli, "cmd_box_stop", lambda args: 1)
+    monkeypatch.setattr(cli, "cmd_box_start", lambda args: started.append(args.name) or 0)
+
+    assert cli.main(["box", "restart", "neo"]) == 1
+    assert started == []
+
+
 @pytest.mark.parametrize(
     "extra,expected_tail",
     [

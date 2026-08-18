@@ -530,6 +530,22 @@ def test_empty_host_filters_are_reported_as_bypasses():
     ) == []
 
 
+def test_running_refuses_to_start_if_tcp_hosts_is_ever_set(session, broker_stub):
+    """End to end: `running()` shuts the proxy down if `tcp_hosts` is
+    non-empty for any reason, same as the other three options - raw TCP is
+    granted through `rawtcp` instead (see launcher.py), never `tcp_hosts`."""
+    from unittest.mock import patch
+
+    addon = SandboxAddon(session, broker_stub, audit=NullAuditLog(session.session_id))
+    with patch("agentsandbox.proxy.addon.ctx") as mock_ctx:
+        mock_ctx.options.ignore_hosts = []
+        mock_ctx.options.allow_hosts = []
+        mock_ctx.options.tcp_hosts = ["evil.test"]
+        mock_ctx.options.udp_hosts = []
+        addon.running()
+        mock_ctx.master.shutdown.assert_called_once()
+
+
 # -- basic auth --------------------------------------------------------------
 
 

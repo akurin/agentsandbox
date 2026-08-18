@@ -182,12 +182,13 @@ something *belonging to* a box (a capability, a secret) takes `--box` instead.
 
 | | |
 |---|---|
-| `box create NAME [--mount HOST:GUEST[:ro\|rw]]... [--allow HOST]... [--profile NAME] [--cpus N] [--memory MIB] [--image NAME]` | define a box; does not boot it |
+| `box create NAME [--mount HOST:GUEST[:ro\|rw]]... [--allow HOST]... [--allow-raw-tcp-ip IP]... [--profile NAME] [--cpus N] [--memory MIB] [--image NAME]` | define a box; does not boot it |
 | `box start NAME [--forward [HOST:]GUEST]... [--fresh] [--attach] [--netcheck halt\|warn]` | boot it |
 | `box stop NAME [--purge] [--no-wait]` | shut it down |
+| `box restart NAME [--forward [HOST:]GUEST]... [--fresh] [--attach] [--netcheck halt\|warn] [--purge]` | stop it (if running) and start it again, in one command |
 | `box ssh [NAME] [SSH_ARGS...] [-- COMMAND...]` | ssh in — real ssh, real sshd, over vsock (see below); any number at once |
 | `box ls` / `box inspect NAME` / `box status [NAME]` | list boxes / a box's config / its live session |
-| `box set NAME [--cpus N] [--memory MIB] [--image NAME] [--disk-size SIZE] [--mount-add HOST:GUEST[:ro\|rw]] [--mount-rm GUEST]` | change hardware or mounts — takes effect on the next start; `--disk-size` (e.g. `40G`) needs the box stopped, and only grows, never shrinks (the guest's own partition and filesystem grow to match automatically on the next start) |
+| `box set NAME [--cpus N] [--memory MIB] [--image NAME] [--disk-size SIZE] [--mount-add HOST:GUEST[:ro\|rw]] [--mount-rm GUEST] [--allow-raw-tcp-ip-add IP] [--allow-raw-tcp-ip-rm IP]` | change hardware, mounts or the raw-TCP allowlist — takes effect on the next start; `--disk-size` (e.g. `40G`) needs the box stopped, and only grows, never shrinks (the guest's own partition and filesystem grow to match automatically on the next start) |
 | `box reset NAME` | discard the disk, keep the config |
 | `box rm NAME [--keep-disk]` | delete a box, and its disk unless told to keep it |
 | `box web [NAME] --on\|--off [--port N]` | swap in mitmweb, the full-detail flow inspector, without restarting the box |
@@ -442,8 +443,9 @@ installs Podman fresh on every run, since it isn't part of the golden image)
 ## Current limitations
 
 - Mounts and port forwards are fixed at boot; changing either needs
-  `box stop && box start`. Apple's Virtualization framework has no device
-  hot-plug, so this isn't a missing feature so much as a hard platform floor.
+  `box restart` (or `box stop && box start`). Apple's Virtualization
+  framework has no device hot-plug, so this isn't a missing feature so much
+  as a hard platform floor.
 - HTTP/1.1, HTTP/2 and HTTP/3-over-QUIC are intercepted through mitmproxy's
   WireGuard mode; anything else reaching the proxy layer (raw TCP, raw UDP,
   unsupported or pinned TLS) is either passed through under policy or killed

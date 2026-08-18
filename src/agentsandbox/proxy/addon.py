@@ -67,6 +67,10 @@ _INERT_BODY_DENIALS = frozenset({"host_not_permitted", "unknown_capability"})
 #: Options that, if set, create traffic paths this addon never sees. An empty
 #: regex in any of them matches every host, so "cleared" and "matches
 #: everything" look identical in a config file - hence the explicit check.
+#: `tcp_hosts` stays in this list even though a session with pinned raw-TCP
+#: addresses uses raw TCP: the actual mechanism for that is `rawtcp` (see
+#: launcher.py), not `tcp_hosts` - it does not work in WireGuard mode - so
+#: `tcp_hosts` itself must still always be empty here.
 UNINSPECTED_OPTIONS = ("ignore_hosts", "allow_hosts", "tcp_hosts", "udp_hosts")
 
 

@@ -375,7 +375,7 @@ def _report_started(box) -> None:
 
     for port, info in session.forwards.items():
         print(f"  forward    guest:{port} -> {info['url']}")
-    print(f"\n  asbx box ssh {box.name}        ssh in (as many as you like)")
+    print(f"\n  asbx box ssh {box.name}        ssh in")
     print(f"  asbx box stop {box.name}       shut it down")
 
 
@@ -1708,6 +1708,25 @@ def cmd_box_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_box_restart(args: argparse.Namespace) -> int:
+    """Stop a box's current run, if any, and start a fresh one.
+
+    `asbx box stop X && asbx box start X` was already correct and race-safe
+    on its own - `cmd_box_stop` already waits for the old supervisor to
+    fully exit before returning, precisely so a chained start never races a
+    shutdown still in progress (see the comment there). This exists only to
+    make that one command instead of two - and, unlike the chained form, to
+    still start even when nothing was running to stop, rather than the
+    whole thing failing before it gets there.
+    """
+    if _running_session_for(args.name):
+        stop_args = argparse.Namespace(name=args.name, purge=args.purge, wait=True)
+        rc = cmd_box_stop(stop_args)
+        if rc != 0:
+            return rc
+    return cmd_box_start(args)
+
+
 def cmd_box_reset(args: argparse.Namespace) -> int:
     """Throw the guest filesystem away; the next start rebuilds from golden."""
     from .box import Box
@@ -2061,6 +2080,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="return as soon as the stop is requested, without waiting for it",
     )
     stop_env.set_defaults(func=cmd_box_stop, wait=True)
+
+    # Mirrors `start`'s own flags exactly (not factored out into a shared
+    # helper - this codebase doesn't do that for `create`/`set`'s own
+    # overlap either, and one subparser's worth of duplication is cheaper
+    # than a new abstraction only two callers would ever use).
+    restart = box_sub.add_parser("restart", help="stop and start a box in one command")
+    restart.add_argument("name")
+    restart.add_argument("--fresh", action="store_true", help="discard the disk and rebuild it")
+    restart.add_argument("--forward", action="append", type=_parse_forward, default=[],
+                         metavar="[HOST:]GUEST", help="forward a guest port to localhost")
+    restart.add_argument("--dev-target", action="append", default=[], metavar="GUESTPORT:HOSTPORT",
+                         help=argparse.SUPPRESS)
+    restart.add_argument("-a", "--attach", action="store_true",
+                         help="keep it in the foreground with the guest console attached")
+    restart.add_argument("--netcheck", choices=["halt", "warn"], default="halt")
+    restart.add_argument("--purge", action="store_true",
+                         help="also erase the outgoing run's audit trail")
+    restart.set_defaults(func=cmd_box_restart, vm=True, console=False)
 
     set_cmd = box_sub.add_parser(
         "set", help="change a box's cpus, memory, image, disk size, mounts, or raw TCP allowlist"

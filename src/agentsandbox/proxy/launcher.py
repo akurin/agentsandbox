@@ -70,14 +70,30 @@ def build_argv(session: Session, addon_path: Path = ADDON_PATH, *, web: bool = F
         "--set",
         "store_streamed_bodies=false",
         # -- no blind passthrough -------------------------------------------
-        # ignore_hosts/allow_hosts/tcp_hosts/udp_hosts are deliberately NOT set
-        # here. They default to empty, which is what we want, and `--set x=`
-        # does not clear a sequence option - it sets it to [''], an empty regex
-        # that matches *every* host. That would ignore every connection (a
-        # blind tunnel with no interception) and route all UDP and TCP through
-        # raw layers. The addon refuses to run if any of them is non-empty.
+        # ignore_hosts/allow_hosts/tcp_hosts/udp_hosts are deliberately NOT
+        # set here. They default to empty, which is what we want, and
+        # `--set x=` does not clear a sequence option - it sets it to [''],
+        # an empty regex that matches *every* host. That would ignore every
+        # connection (a blind tunnel with no interception) or route all TCP/
+        # UDP through a raw layer. The addon refuses to run if any of them is
+        # non-empty.
+        #
+        # rawtcp stays false unless this session actually pinned a raw-TCP
+        # address (allow_raw_tcp_ips), in which case it flips to true below.
+        # `tcp_hosts` looks like the more surgical option - match only the
+        # pinned address, leave everything else on the heuristic HTTP/TLS
+        # path - but empirically it does not: in WireGuard mode specifically,
+        # a `tcp_hosts`-matched connection is accepted at the transport level
+        # (the guest sees a completed handshake) and then never reaches this
+        # addon's hooks at all - confirmed live, with unconditional debug
+        # logging in both `tcp_start` and `server_connect`, neither of which
+        # ever fired. `rawtcp=true` does not have this problem, and does not
+        # need to be scoped by destination to stay safe: `tcp_start` below
+        # kills any TCP layer whose address is not in `allow_raw_tcp_ips`
+        # regardless of *why* mitmproxy created that layer, so the real
+        # enforcement point is the same either way.
         "--set",
-        "rawtcp=false",
+        f"rawtcp={'true' if session.policy.allow_raw_tcp_ips else 'false'}",
         # -- protocols we do support ----------------------------------------
         "--set",
         "http2=true",
