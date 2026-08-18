@@ -532,7 +532,24 @@ class SandboxAddon:
             # substituted for either reason, so there is no secret to
             # protect by blocking - only a placeholder that showed up
             # somewhere other than the request it was minted for.
-            self._forward_or_kill(flow, dest)
+            #
+            # But an inert placeholder is not the only thing this request
+            # can carry: a `cdk deploy` CloudFormation template routinely
+            # embeds a body-kind capability meant for some *other* resource
+            # in the same template (a Lambda env var, say) that has nothing
+            # to do with the S3 PUT actually publishing the template - the
+            # placeholder denial above is correctly inert, but the PUT
+            # itself is still dummy-signed by the guest's own AWS
+            # credential and needs a real SigV4 signature regardless of
+            # whether anything gets substituted into its body. Plain
+            # `_forward_or_kill` would send it out exactly as the guest
+            # built it, fake credential and all - AWS then refuses it with
+            # "the AWS Access Key Id you provided does not exist in our
+            # records", which is real but unhelpfully indirect.
+            if broker_request.aws_autosign:
+                self._broker_aws_autosign(flow, dest)
+            else:
+                self._forward_or_kill(flow, dest)
             return
         flow.response = _to_mitm_response(response)
 

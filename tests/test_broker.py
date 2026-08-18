@@ -779,6 +779,132 @@ def test_aws_autosign_stale_signing_headers_from_the_guest_are_dropped(session, 
     assert "x-amz-trailer" not in headers
 
 
+def _aws_chunk(data: bytes, signature: str = "deadbeef") -> bytes:
+    return f"{len(data):x};chunk-signature={signature}\r\n".encode() + data + b"\r\n"
+
+
+def _aws_chunked_body(content: bytes, chunk_size: int = 8) -> bytes:
+    """Wire-encode `content` the way AWS's streaming SigV4 signing does:
+    fixed-size chunks (deliberately smaller than most real payloads, so
+    tests can put a placeholder or a recognisable substring across a chunk
+    boundary), each with a throwaway chunk-signature, ending in a zero-size
+    terminator chunk. The signatures are never checked - `_decode_aws_chunked_payload`
+    discards the framing, not verifies it - so any placeholder value works."""
+    out = b"".join(_aws_chunk(content[i : i + chunk_size]) for i in range(0, len(content), chunk_size))
+    return out + _aws_chunk(b"", signature="finalsig")
+
+
+def test_is_aws_chunked_streaming_payload_reads_the_guests_own_declaration():
+    from agentsandbox.broker.core import _is_aws_chunked_streaming_payload
+
+    streaming = _autosign_request(
+        headers=[("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")]
+    )
+    plain = _autosign_request(headers=[("X-Amz-Content-Sha256", "e3b0c4429" + "0" * 55)])
+    absent = _autosign_request(headers=[])
+    assert _is_aws_chunked_streaming_payload(streaming)
+    assert not _is_aws_chunked_streaming_payload(plain)
+    assert not _is_aws_chunked_streaming_payload(absent)
+
+
+def test_decode_aws_chunked_payload_recovers_the_real_content():
+    from agentsandbox.broker.core import _decode_aws_chunked_payload
+
+    content = b'{"Resources": {"Fn": {"Env": "some-value-longer-than-one-chunk"}}}'
+    assert _decode_aws_chunked_payload(_aws_chunked_body(content)) == content
+    assert _decode_aws_chunked_payload(_aws_chunked_body(b"")) == b""
+
+
+def test_decode_aws_chunked_payload_fails_closed_on_malformed_framing():
+    from agentsandbox.broker.core import _decode_aws_chunked_payload
+    from agentsandbox.errors import PolicyDenied
+
+    with pytest.raises(PolicyDenied) as exc:
+        _decode_aws_chunked_payload(b"not-a-chunk-size\r\ndata\r\n")
+    assert exc.value.reason == "aws_chunked_payload_malformed"
+
+    with pytest.raises(PolicyDenied) as exc:
+        _decode_aws_chunked_payload(b"a\r\ntooshort")  # declares 10 bytes, has 8
+    assert exc.value.reason == "aws_chunked_payload_malformed"
+
+    with pytest.raises(PolicyDenied) as exc:
+        _decode_aws_chunked_payload(b"3\r\nabcXX")  # data not followed by CRLF
+    assert exc.value.reason == "aws_chunked_payload_malformed"
+
+
+def test_aws_autosign_decodes_a_streaming_signed_body_before_signing(session, store, executor):
+    """The exact bug this exists for: a `cdk deploy` template upload small
+    enough that the SDK chose streaming SigV4 signing rather than a plain
+    buffered one. Without decoding first, the broker would hash and forward
+    the raw aws-chunk wire framing as if it were the object's content."""
+    core = _autosign_core(session, store, executor)
+    content = b'{"Resources": {"CDKMetadata": {"Type": "AWS::CDK::Metadata"}}}'
+    response = core.handle(
+        _autosign_request(
+            method="PUT",
+            service="s3",
+            body=_aws_chunked_body(content),
+            headers=[
+                ("Content-Type", "application/json"),
+                (
+                    "Authorization",
+                    f"AWS4-HMAC-SHA256 Credential={DUMMY_ACCESS_KEY_ID}/20260101/us-east-1/s3/aws4_request, "
+                    "SignedHeaders=host;x-amz-date, Signature=deadbeef",
+                ),
+                ("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"),
+                ("X-Amz-Decoded-Content-Length", str(len(content))),
+            ],
+        )
+    )
+
+    assert response.decision == "allow"
+    assert executor.last["body"] == content
+    headers = {k.lower(): v for k, v in executor.last["headers"] + executor.last["credential_headers"]}
+    assert "x-amz-decoded-content-length" not in headers
+    assert not headers["x-amz-content-sha256"].startswith("STREAMING-")
+
+
+def test_body_injection_substitutes_into_a_streaming_signed_body_even_across_a_chunk_boundary(
+    session, store, executor
+):
+    """A body-kind placeholder does not know or care where the SDK happened
+    to draw its chunk boundaries - substitution has to run on the decoded
+    content, not the still-framed wire bytes, or a placeholder split across
+    two chunks would never be found at all."""
+    core = _autosign_core(session, store, executor, extra_secrets={"github-token": SECRET})
+    token, _ = store.issue(
+        CapabilitySpec(
+            label="deploy-secret",
+            hosts=["api.github.com"],
+            methods=["PUT"],
+            secret=SecretRef(service="github-token"),
+            injection_rules=[InjectionRule(injection=InjectionSpec(kind="body"))],
+        )
+    )
+    content = json.dumps({"Environment": {"Variables": {"API_KEY": token}}}).encode()
+    # A small chunk size guarantees the token itself straddles a boundary.
+    response = core.handle(
+        _autosign_request(
+            capability=token,
+            method="PUT",
+            service="s3",
+            body=_aws_chunked_body(content, chunk_size=5),
+            headers=[
+                (
+                    "Authorization",
+                    f"AWS4-HMAC-SHA256 Credential={DUMMY_ACCESS_KEY_ID}/20260101/us-east-1/s3/aws4_request, "
+                    "SignedHeaders=host;x-amz-date, Signature=deadbeef",
+                ),
+                ("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"),
+            ],
+        )
+    )
+
+    assert response.decision == "allow"
+    assert token.encode() not in executor.last["body"]
+    assert SECRET.encode() in executor.last["body"]
+
+
 def test_body_injection_composes_with_aws_autosign(session, store, executor):
     """The exact shape this kind exists for: a `cdk deploy`-style asset
     upload, dummy-signed by the guest's own AWS credential, whose body also

@@ -75,6 +75,12 @@ STRIP_REQUEST_HEADERS = frozenset(
 #: it up isn't harmless leftover metadata - S3 rejects it outright
 #: ("specified, but no corresponding x-amz-checksum-* or x-amz-trailer
 #: headers were found").
+#:
+#: `x-amz-decoded-content-length` is the same lie for a streaming SigV4
+#: request: it announces the true length of an aws-chunk-encoded body that,
+#: by the time this header would be forwarded, has already been decoded and
+#: re-signed as a plain one (see `_decode_aws_chunked_payload`) - carrying
+#: it forward would describe a streaming encoding that is no longer there.
 SIGV4_STALE_HEADERS = frozenset(
     {
         "x-amz-date",
@@ -82,6 +88,7 @@ SIGV4_STALE_HEADERS = frozenset(
         "x-amz-content-sha256",
         "x-amz-sdk-checksum-algorithm",
         "x-amz-trailer",
+        "x-amz-decoded-content-length",
     }
 )
 
@@ -118,6 +125,74 @@ def _split_signed_headers(
     return headers, credential_headers
 
 _BODY_SCAN_LIMIT = 1 * 1024 * 1024
+
+
+def _is_aws_chunked_streaming_payload(req: BrokerRequest) -> bool:
+    """Did the guest's own (dummy-signed) request use AWS's chunked/
+    streaming SigV4 payload encoding?
+
+    The AWS SDK picks this whenever it cannot commit to a body length up
+    front (a template assembled from a stream, say), rather than the
+    ordinary "hash the whole buffered body" scheme every other request
+    here assumes. ``x-amz-content-sha256`` is the SDK's own declaration of
+    which scheme it used - exactly what a real AWS service keys off of too,
+    so trusting it here is not a guess.
+    """
+    value = next((v for k, v in req.headers if k.lower() == "x-amz-content-sha256"), "")
+    return value.upper().startswith("STREAMING-")
+
+
+def _decode_aws_chunked_payload(body: bytes) -> bytes:
+    """Strip AWS's chunked-signing wire framing and return the real payload.
+
+    Each chunk is ``<hex-size>[;chunk-signature=<sig>]\\r\\n<data>\\r\\n``,
+    ending with a zero-size chunk and, for the ``...-TRAILER`` variants,
+    checksum trailer headers after it. All of that framing is discarded
+    rather than verified: both callers (`_perform_aws_autosign` and
+    `_perform_body`) re-sign wholesale with a real credential regardless,
+    so there is no reason to reproduce the guest's own streaming encoding
+    on the way back out - only to recover the real bytes it was wrapping.
+
+    Fails closed: a body that does not actually match this framing (a
+    stray or wrong `x-amz-content-sha256` claim) raises rather than
+    silently forwarding a truncated or reordered payload.
+    """
+    out = bytearray()
+    i = 0
+    n = len(body)
+    while i < n:
+        eol = body.find(b"\r\n", i)
+        if eol == -1:
+            raise PolicyDenied(
+                "aws_chunked_payload_malformed",
+                "could not find the end of an aws-chunked chunk-size line",
+            )
+        size_hex = body[i:eol].split(b";", 1)[0].strip()
+        try:
+            size = int(size_hex, 16)
+        except ValueError as exc:
+            raise PolicyDenied(
+                "aws_chunked_payload_malformed",
+                f"invalid aws-chunked chunk size {size_hex!r}",
+            ) from exc
+        i = eol + 2
+        if size == 0:
+            break
+        chunk = body[i : i + size]
+        if len(chunk) != size:
+            raise PolicyDenied(
+                "aws_chunked_payload_malformed",
+                "aws-chunked chunk data ran past the end of the body",
+            )
+        out += chunk
+        i += size
+        if body[i : i + 2] != b"\r\n":
+            raise PolicyDenied(
+                "aws_chunked_payload_malformed",
+                "aws-chunked chunk data was not followed by CRLF",
+            )
+        i += 2
+    return bytes(out)
 
 
 @dataclass
@@ -300,6 +375,18 @@ class BrokerCore:
         started = time.monotonic()
         cap: Capability | None = None
         try:
+            if req.aws_autosign and _is_aws_chunked_streaming_payload(req):
+                # Both aws_autosign paths below (`_perform_aws_autosign` and
+                # `_perform_body`'s) treat `req.body` as the real, final
+                # content - a body-kind placeholder is searched for and
+                # substituted directly in it, and the whole thing gets
+                # hashed and signed as one buffer. Neither is true yet if
+                # the guest's SDK used streaming SigV4: `req.body` is still
+                # the aws-chunk-framed wire encoding at this point, which is
+                # not valid to substitute into (a placeholder can straddle
+                # a chunk boundary) or sign as-is (its hash covers framing
+                # bytes, not content). Decoded once here, before either.
+                req.body = _decode_aws_chunked_payload(req.body)
             if req.capability:
                 cap = self._resolve(req)
                 active = self._authorize(req, cap)

@@ -309,6 +309,40 @@ def test_a_body_placeholder_on_a_dummy_signed_request_is_flagged_for_autosign(
     assert brokered.aws_autosign is True
 
 
+def test_an_inert_body_denial_on_a_dummy_signed_request_still_gets_signed(
+    autosign_session, broker_stub
+):
+    """The exact real-world shape this was missing: a CDK-generated
+    CloudFormation template embeds a body-kind capability's placeholder
+    meant for some *other* resource in the same template (a Lambda env var,
+    say), unrelated to the S3 host publishing the template itself - the
+    placeholder denial is correctly inert (see
+    `test_a_body_placeholder_denied_for_the_wrong_host_is_forwarded_unbrokered`),
+    but the PUT is *also* dummy-signed by the guest's own AWS credential and
+    still needs a real signature regardless of whether anything ever gets
+    substituted into its body. Falling back to a plain unbrokered forward
+    would send the guest's fake credential straight to AWS as-is, which
+    fails with a real but unhelpfully indirect error ("the AWS Access Key
+    Id you provided does not exist in our records") instead of ever
+    attempting the aws_autosign re-sign this request actually needs."""
+    broker_stub.response = BrokerResponse(403, [], b"", "deny", "host_not_permitted", "")
+    addon = SandboxAddon(autosign_session, broker_stub, audit=NullAuditLog(autosign_session.session_id))
+    flow = http_flow(
+        method=b"PUT",
+        headers=[("Host", "api.github.com"), ("Authorization", _autosign_header(DUMMY_ACCESS_KEY_ID))],
+        content=f'{{"key":"{TOKEN}"}}'.encode(),
+    )
+    addon.request(flow)
+
+    # Not the plain-forward path - `_broker_aws_autosign` was tried instead.
+    assert flow.metadata.get("asbx_plain_forward") is not True
+    assert len(broker_stub.requests) == 2
+    first, second = broker_stub.requests
+    assert first.capability == TOKEN
+    assert second.capability == ""
+    assert second.aws_autosign is True
+
+
 def test_a_different_access_key_is_not_treated_as_this_sessions_autosign_marker(
     autosign_session, broker_stub
 ):
