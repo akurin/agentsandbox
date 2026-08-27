@@ -213,6 +213,14 @@ class BrokerRequest:
     #: wholesale with the session's own signing secret, regardless of
     #: destination.
     aws_autosign: bool = False
+    #: Only meaningful alongside `aws_autosign`. A WebSocket upgrade (SSM
+    #: Session Manager's data channel, ...) needs mitmproxy itself to own the
+    #: connection so it can complete the 101 handshake and relay the duplex
+    #: stream afterwards - something the broker's own bounded HTTP round trip
+    #: cannot do. Set on those requests so the broker only recomputes the
+    #: SigV4 signature and hands the corrected headers back, instead of
+    #: performing the request itself.
+    aws_autosign_sign_only: bool = False
     #: Other placeholders found in the same body, beyond `capability` (the
     #: first one found). Only ever non-empty for a body-kind request - an
     #: OAuth password grant POSTing client_id/client_secret/username/password
@@ -243,6 +251,7 @@ class BrokerRequest:
                 "operation": self.operation,
                 "flow_id": self.flow_id,
                 "aws_autosign": self.aws_autosign,
+                "aws_autosign_sign_only": self.aws_autosign_sign_only,
                 "extra_capabilities": list(self.extra_capabilities),
             }
         )
@@ -262,6 +271,7 @@ class BrokerRequest:
             operation=data.get("operation"),
             flow_id=data.get("flow_id", ""),
             aws_autosign=bool(data.get("aws_autosign", False)),
+            aws_autosign_sign_only=bool(data.get("aws_autosign_sign_only", False)),
             extra_capabilities=list(data.get("extra_capabilities", [])),
         )
 
@@ -414,7 +424,10 @@ class BrokerCore:
                         "aws_autosign_disabled",
                         "this session has no AWS auto-sign credential configured",
                     )
-                response = self._perform_aws_autosign(req)
+                if req.aws_autosign_sign_only:
+                    response = self._sign_aws_autosign(req)
+                else:
+                    response = self._perform_aws_autosign(req)
             else:
                 # Not reachable through the addon - it only calls in with a
                 # capability, or with aws_autosign=True, never neither. Kept
@@ -899,6 +912,44 @@ class BrokerCore:
         signer_cls = S3SigV4Auth if service == "s3" else SigV4Auth
         signer_cls(credentials, service, region).add_auth(aws_request)
         return _split_signed_headers(list(aws_request.headers.items()))
+
+    def _sign_aws_autosign(self, req: BrokerRequest) -> BrokerResponse:
+        """Re-sign a dummy-signed AWS request's headers without performing it.
+
+        The `aws_autosign_sign_only` counterpart to `_perform_aws_autosign`:
+        same credential resolution and signature, but the request is never
+        sent from here. The addon splices the returned headers into the
+        guest's own flow and lets mitmproxy forward it, which is the only way
+        a WebSocket upgrade (the case this exists for) actually gets its 101
+        handshake completed and its duplex stream relayed afterwards.
+
+        `decision="sign"` is what tells the addon this is not an answer to
+        hand back to the guest - `_to_mitm_response` would happily turn a
+        `status_code=0` into nonsense if it were treated as one.
+        """
+        assert self.aws_autosign is not None  # checked by the caller
+        self.policy.check(req.dest)
+
+        credentials, region, service = self._resolve_aws_signing_credentials(req)
+        signed_headers, credential_headers = self._sign_aws_request(
+            req, req.body, region, service, credentials
+        )
+
+        self.audit.emit(
+            "broker.aws_autosign_sign_only",
+            method=req.method,
+            host=req.host,
+            path=req.path,
+            service=service,
+            region=region,
+            flow=req.flow_id,
+        )
+
+        return BrokerResponse(
+            status_code=0,
+            headers=signed_headers + credential_headers,
+            decision="sign",
+        )
 
     def _perform_aws_autosign(self, req: BrokerRequest) -> BrokerResponse:
         """No capability, no placeholder: the guest signed with its session's

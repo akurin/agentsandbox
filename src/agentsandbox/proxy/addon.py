@@ -131,7 +131,10 @@ class SandboxAddon:
 
         if placeholder is None:
             if self._looks_like_dummy_aws_request(req):
-                self._broker_aws_autosign(flow, dest)
+                if _is_websocket_upgrade(req):
+                    self._broker_aws_autosign_websocket(flow, dest)
+                else:
+                    self._broker_aws_autosign(flow, dest)
                 return
             self._forward_or_kill(flow, dest)
             return
@@ -582,6 +585,53 @@ class SandboxAddon:
             return
         flow.response = _to_mitm_response(response)
 
+    def _broker_aws_autosign_websocket(self, flow: http.HTTPFlow, dest: Destination) -> None:
+        """Re-sign a dummy-signed WebSocket upgrade in place, then let
+        mitmproxy do the actual handshake and relay the duplex connection.
+
+        `_broker_aws_autosign` cannot be reused here: it hands the request
+        to the broker, which performs it itself with one bounded HTTP round
+        trip and returns a synthetic response - fine for an ordinary signed
+        call, but that path can neither complete a 101 Switching Protocols
+        handshake nor keep the socket open afterwards for the duplex stream
+        a WebSocket needs. AWS SSM Session Manager's data-channel connection
+        is exactly that shape (a SigV4-signed `GET .../v1/data-channel/...`
+        with `Connection: Upgrade`), so it needs mitmproxy's own connection
+        handling - already WebSocket-aware, see launcher.py's
+        `websocket=true` - with only the Authorization header corrected
+        first.
+        """
+        req = flow.request
+        broker_request = BrokerRequest(
+            session_id=self.session.session_id,
+            capability="",
+            method=req.method,
+            scheme=dest.scheme,
+            host=dest.host,
+            port=dest.port,
+            target=req.path,
+            headers=[(k, v) for k, v in req.headers.items(multi=True)],
+            body=req.raw_content or b"",
+            flow_id=flow.id,
+            aws_autosign=True,
+            aws_autosign_sign_only=True,
+        )
+        try:
+            response = self.broker.call(broker_request)
+        except BrokerError as exc:
+            self.audit.emit("broker.unavailable", host=dest.host, error=str(exc))
+            self._deny(flow, "broker_unavailable", "the secrets broker is not available", dest=dest)
+            return
+        if response.decision != "sign":
+            # Denied - a policy failure or an unusable/expired signing
+            # credential - so there is nothing to splice in; hand the
+            # guest the broker's own denial response instead.
+            flow.response = _to_mitm_response(response)
+            return
+        for name, value in response.headers:
+            req.headers[name] = value
+        self._forward_or_kill(flow, dest)
+
     def _deny(
         self,
         flow: http.HTTPFlow,
@@ -627,6 +677,21 @@ def _to_mitm_response(response: BrokerResponse) -> http.Response:
         made.headers.add(key, value)
     made.headers["content-length"] = str(len(response.body))
     return made
+
+
+def _is_websocket_upgrade(req: http.Request) -> bool:
+    """Is this the initial GET of a WebSocket handshake?
+
+    Both headers, not just one: `Upgrade` alone (no `Connection: Upgrade`)
+    is not a handshake RFC 6455 recognises, and checking only `Connection`
+    would catch unrelated `Connection: keep-alive, Upgrade` traffic that
+    never names `websocket` as the protocol.
+    """
+    connection = req.headers.get("connection", "")
+    tokens = {tok.strip().lower() for tok in connection.split(",")}
+    if "upgrade" not in tokens:
+        return False
+    return req.headers.get("upgrade", "").lower() == "websocket"
 
 
 def _placeholder_in_basic_auth(header_value: str) -> str | None:

@@ -735,6 +735,34 @@ def test_aws_autosign_still_enforces_the_session_destination_policy(session, sto
     assert executor.calls == []
 
 
+def test_aws_autosign_sign_only_never_touches_the_executor(session, store, executor):
+    """The whole point of `aws_autosign_sign_only`: a WebSocket upgrade (SSM
+    Session Manager's data channel) needs mitmproxy itself to own the
+    connection, not the broker's bounded, non-duplex `UpstreamExecutor` -
+    so this path must only compute a signature and hand headers back,
+    never perform the request."""
+    core = _autosign_core(session, store, executor)
+    response = core.handle(_autosign_request(aws_autosign_sign_only=True))
+
+    assert response.decision == "sign"
+    assert executor.calls == []
+    headers = dict(response.headers)
+    assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+    assert "us-east-1/sts/aws4_request" in headers["Authorization"]
+    assert "X-Amz-Date" in headers
+    assert headers["Host"] == "api.github.com"
+
+
+def test_aws_autosign_sign_only_still_enforces_the_session_destination_policy(
+    session, store, executor
+):
+    core = _autosign_core(session, store, executor)
+    response = core.handle(_autosign_request(host="evil.test", aws_autosign_sign_only=True))
+
+    assert response.reason == "host_not_allowlisted"
+    assert executor.calls == []
+
+
 def test_aws_autosign_signed_headers_are_split_for_redirect_safety(session, store, executor):
     """Authorization/X-Amz-Date/X-Amz-Security-Token must travel as
     `credential_headers` - dropped off-origin on a redirect via the same

@@ -356,6 +356,108 @@ def test_a_different_access_key_is_not_treated_as_this_sessions_autosign_marker(
     assert broker_stub.requests == []
 
 
+def test_a_dummy_signed_websocket_upgrade_is_routed_for_a_sign_only_autosign(
+    autosign_session, broker_stub
+):
+    """The exact shape SSM Session Manager's data-channel connection takes:
+    a dummy-signed GET carrying `Connection: Upgrade` / `Upgrade: websocket`.
+    `_broker_aws_autosign`'s ordinary path can't serve this - the broker
+    performs a bounded, non-duplex HTTP round trip and hands back a
+    synthetic response, which can neither complete AWS's 101 handshake nor
+    keep a socket open for the duplex stream afterwards - so this has to
+    route to the sign-only variant instead, which only asks the broker to
+    recompute the signature and leaves the actual connection to mitmproxy."""
+    broker_stub.response = BrokerResponse(
+        0,
+        [
+            ("Authorization", "AWS4-HMAC-SHA256 Credential=REAL/20260101/eu-central-1/ssmmessages/aws4_request, SignedHeaders=host;x-amz-date, Signature=cafef00d"),
+            ("X-Amz-Date", "20260825T120000Z"),
+        ],
+        b"",
+        "sign",
+        "",
+        "",
+    )
+    addon = SandboxAddon(autosign_session, broker_stub, audit=NullAuditLog(autosign_session.session_id))
+    flow = http_flow(
+        method=b"GET",
+        headers=[
+            ("Host", "api.github.com"),
+            ("Authorization", _autosign_header(DUMMY_ACCESS_KEY_ID)),
+            ("Connection", "Upgrade"),
+            ("Upgrade", "websocket"),
+            ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ("Sec-WebSocket-Version", "13"),
+        ],
+    )
+    addon.request(flow)
+
+    assert len(broker_stub.requests) == 1
+    brokered = broker_stub.requests[0]
+    assert brokered.aws_autosign is True
+    assert brokered.aws_autosign_sign_only is True
+
+    # Not a synthetic answer - the guest's own request, with headers
+    # corrected in place, is left for mitmproxy to actually forward and
+    # upgrade.
+    assert flow.response is None
+    assert flow.metadata.get("asbx_plain_forward") is True
+    assert flow.request.headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=REAL/")
+    assert flow.request.headers["X-Amz-Date"] == "20260825T120000Z"
+    # The handshake headers the broker never touched still ride along
+    # unchanged - mitmproxy needs them to complete the upgrade.
+    assert flow.request.headers["Connection"] == "Upgrade"
+    assert flow.request.headers["Upgrade"] == "websocket"
+    assert flow.request.headers["Sec-WebSocket-Key"] == "dGhlIHNhbXBsZSBub25jZQ=="
+
+
+def test_a_sign_only_denial_is_returned_to_the_guest_unforwarded(autosign_session, broker_stub):
+    """A sign-only request can still be denied (policy, or an expired/
+    unusable signing credential) - that answer goes back to the guest like
+    any other broker denial, and the request is never left for mitmproxy to
+    forward with its dummy credential intact."""
+    broker_stub.response = BrokerResponse(
+        403, [("X-Asbx-Reason", "host_not_allowlisted")], b"nope", "deny", "host_not_allowlisted", ""
+    )
+    addon = SandboxAddon(autosign_session, broker_stub, audit=NullAuditLog(autosign_session.session_id))
+    flow = http_flow(
+        method=b"GET",
+        headers=[
+            ("Host", "api.github.com"),
+            ("Authorization", _autosign_header(DUMMY_ACCESS_KEY_ID)),
+            ("Connection", "Upgrade"),
+            ("Upgrade", "websocket"),
+        ],
+    )
+    addon.request(flow)
+
+    assert flow.response.status_code == 403
+    assert flow.metadata.get("asbx_plain_forward") is not True
+
+
+def test_an_upgrade_header_naming_a_different_protocol_uses_the_ordinary_autosign_path(
+    autosign_session, broker_stub
+):
+    """`Connection: Upgrade` alone isn't a WebSocket handshake - h2c upgrades
+    look the same at this layer. Only `Upgrade: websocket` should divert to
+    the sign-only path; anything else stays on the ordinary re-sign-and-
+    perform path, same as every non-websocket autosigned request."""
+    addon = SandboxAddon(autosign_session, broker_stub, audit=NullAuditLog(autosign_session.session_id))
+    flow = http_flow(
+        method=b"GET",
+        headers=[
+            ("Host", "api.github.com"),
+            ("Authorization", _autosign_header(DUMMY_ACCESS_KEY_ID)),
+            ("Connection", "Upgrade"),
+            ("Upgrade", "h2c"),
+        ],
+    )
+    addon.request(flow)
+
+    assert len(broker_stub.requests) == 1
+    assert broker_stub.requests[0].aws_autosign_sign_only is False
+
+
 def test_a_broker_that_is_down_fails_closed(session):
     addon = SandboxAddon(
         session,

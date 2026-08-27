@@ -228,6 +228,12 @@ def test_the_broker_protocol_can_only_ask_for_an_operation():
         # whatever region/service the guest's own (invalid) signature
         # names - there is nothing here for a compromised guest to widen.
         "aws_autosign",
+        # Still just a routing bit, not a widened ask: it only changes
+        # whether the broker performs the re-signed request itself or hands
+        # the signed headers back for the addon to splice into a WebSocket
+        # upgrade mitmproxy forwards - either way, the guest gets exactly
+        # the destination its own (invalid) signature already named.
+        "aws_autosign_sign_only",
         # Other placeholders in the same body-kind request - still each just
         # a pointer resolved and authorized independently, never a shortcut
         # to "give me the credential" for anything not already a capability.
