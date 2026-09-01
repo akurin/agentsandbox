@@ -1,0 +1,16 @@
+[Unit]
+Description=Periodically verify the guest is still fail-closed, and repair it if not
+# See netcheck.sh's --heal comment: wg0 can stay up and keep handshaking for
+# the life of a session while the ip rules routing traffic into it disappear
+# out from under it (observed after an unrelated systemd-networkd restart),
+# and nothing short of a recheck like this one notices.
+
+[Timer]
+# The boot-time asbx-netcheck.service already covers t=0; this is only for
+# drift that shows up later in a long-lived box.
+OnActiveSec=60
+OnUnitActiveSec=60
+AccuracySec=10
+
+[Install]
+WantedBy=timers.target

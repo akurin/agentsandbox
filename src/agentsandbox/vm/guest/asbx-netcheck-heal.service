@@ -1,0 +1,10 @@
+[Unit]
+Description=agentsandbox tunnel routing self-heal check
+# Only meaningful once the boot-time check (asbx-netcheck.service) has
+# already established the guest is fail-closed; this unit's job is catching
+# drift after that point, not doing the initial verification itself.
+After=asbx-netcheck.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/asbx-netcheck --heal

@@ -172,6 +172,14 @@ def render_user_data(
         _write_file(
             "/etc/systemd/system/asbx-netcheck.service", _guest_file("asbx-netcheck.service")
         ),
+        _write_file(
+            "/etc/systemd/system/asbx-netcheck-heal.service",
+            _guest_file("asbx-netcheck-heal.service"),
+        ),
+        _write_file(
+            "/etc/systemd/system/asbx-netcheck-heal.timer",
+            _guest_file("asbx-netcheck-heal.timer"),
+        ),
         # Facts bootstrap.sh needs but must not hardcode - see
         # render_family_env's docstring for why this exists as a separate
         # sourced file rather than templating bootstrap.sh itself.

@@ -26,6 +26,7 @@ note() {
 
 check() {
     local ok=0
+    FINDINGS=""
 
     # 1. Traffic to the internet must leave via the tunnel.
     #
@@ -109,6 +110,32 @@ if [ "${1:-}" = "--poweroff-condition" ]; then
     fi
     record unsafe
     exit 0       # unsafe: cloud-init powers the guest off
+fi
+
+if [ "${1:-}" = "--heal" ]; then
+    # Run periodically, well after boot - unlike the one-shot check above,
+    # which only ever runs once. wg0 itself can stay up and keep handshaking
+    # for the life of the session while the `ip rule` entries wg-quick
+    # installed to route traffic into it quietly disappear underneath it
+    # (observed after systemd-networkd got restarted by an unattended package
+    # upgrade hours into a session) - nothing about the interface itself
+    # changes, so nothing else notices. Recovery is the same idempotent
+    # sequence bootstrap.sh already trusts for a reused disk: tear the
+    # interface down and bring it back up from the same config file.
+    if check; then
+        record safe
+        exit 0
+    fi
+    broken="$FINDINGS"
+    echo "[asbx-netcheck] unsafe ($broken); attempting self-heal (wg-quick down/up wg0)" >&2
+    wg-quick down wg0 >/dev/null 2>&1 || true
+    if wg-quick up wg0 >/dev/null 2>&1 && check; then
+        FINDINGS="healed after: $broken"
+        record healed
+        exit 0
+    fi
+    record unsafe
+    exit 1
 fi
 
 if check; then

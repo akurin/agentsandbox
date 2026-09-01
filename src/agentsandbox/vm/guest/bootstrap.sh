@@ -279,6 +279,13 @@ if ! /usr/local/bin/asbx-netcheck; then
     systemctl poweroff
 fi
 
+# Only start the recurring self-heal timer once the check above has actually
+# passed - no point rechecking a guest already known to be broken, and it
+# keeps this ordered strictly after the boot-time verification rather than
+# racing it.
+timeout 15 systemctl enable --now asbx-netcheck-heal.timer >/dev/null 2>&1 || true
+log "netcheck-heal timer enabled"
+
 # A marker the host can see. sshd is started before this script runs, so that
 # a failed bootstrap still leaves a way in - which means a shell can be opened
 # while the guest is only half configured: tunnel not up, capability
