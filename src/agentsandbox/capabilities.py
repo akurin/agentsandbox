@@ -70,6 +70,52 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def rebuild_guest_env(
+    env_text: str,
+    caps: list[Capability],
+    guest_envs: dict[str, str],
+    fresh: dict[str, str],
+) -> tuple[str, list[str]]:
+    """Rewrite a guest's capabilities.env so its placeholders match the
+    profile as it is now. Returns ``(new_text, labels_not_found)``.
+
+    ``guest_envs`` maps each profile label to the env var it should be
+    exported as; ``fresh`` maps a label to a placeholder minted just now.
+    Every other placeholder has to come from ``env_text`` itself - the
+    store keeps only hashes - so an ``export`` line is treated as a
+    capability's only if its value hashes to one in ``caps``. That line is
+    dropped and re-emitted under whatever name the profile now gives it
+    (or not at all, if the label lost its ``guest_env`` or the capability
+    was revoked). Anything else in the file - the profile's plain ``box``
+    values, the dummy AWS keys - is kept verbatim, in place.
+    """
+    by_hash = {cap.token_hash: cap for cap in caps}
+    kept: list[str] = []
+    live = dict(fresh)
+    for line in env_text.splitlines():
+        _, sep, value = line.removeprefix("export ").partition("=")
+        cap = by_hash.get(token_hash(value)) if sep and value else None
+        if cap is None:
+            kept.append(line)
+        elif not cap.revoked:
+            live.setdefault(cap.label, value)
+    missing = sorted(label for label in guest_envs if label not in live)
+    exports = [
+        f"export {name}={live[label]}"
+        for label, name in sorted(guest_envs.items(), key=lambda item: item[1])
+        if label in live
+    ]
+    return "".join(f"{line}\n" for line in kept + exports), missing
+
+
+def exported_names(env_text: str) -> set[str]:
+    return {
+        line.removeprefix("export ").partition("=")[0]
+        for line in env_text.splitlines()
+        if line.startswith("export ") and "=" in line
+    }
+
+
 def short_id(token_hash_hex: str) -> str:
     """Stable public id used in logs and CLI output."""
     return "cap-" + token_hash_hex[:12]

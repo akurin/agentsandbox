@@ -393,3 +393,55 @@ def test_the_rehandshake_stops_before_touching_anything_it_cannot_read(tmp_path)
     )
     assert done.returncode == 4
     assert not any("remove" in line for line in log.read_text().splitlines())
+
+
+STAT_STUB = """#!/bin/sh
+# GNU `stat -c '%i %Y' FILE`, on whatever host runs the tests.
+exec python3 -c 'import os, sys; s = os.stat(sys.argv[1]); print(s.st_ino, int(s.st_mtime))' "$3"
+"""
+
+
+def test_an_open_shell_reloads_a_rewritten_capabilities_env(tmp_path):
+    """`asbx cap sync` replaces the env file under an open shell. The next
+    prompt has to notice, drop the names the old file exported (a renamed
+    variable must not linger with its old name), pick up the new ones, and
+    say so - once, not on every prompt after."""
+    import os
+
+    env_file = tmp_path / "capabilities.env"
+    env_file.write_text("export BOX=1\nexport A=cap_v1_a\n")
+    snippet = (REPO / "src/agentsandbox/vm/guest/capabilities-profile.sh").read_text()
+    snippet = snippet.replace("/run/asbx/capabilities.env", str(env_file))
+    (tmp_path / "snippet.sh").write_text(snippet)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "stat").write_text(STAT_STUB)
+    (bin_dir / "stat").chmod(0o755)
+
+    script = f"""
+PS1='$ '
+. {tmp_path}/snippet.sh
+echo "before A=$A"
+case "$PROMPT_COMMAND" in _asbx_env_reload*) echo hooked ;; esac
+_asbx_env_reload
+printf 'export BOX=1\\nexport A2=cap_v1_a\\n' > {tmp_path}/new.env
+mv {tmp_path}/new.env {env_file}
+_asbx_env_reload
+echo "after A=${{A-unset}} A2=$A2 BOX=$BOX"
+_asbx_env_reload
+"""
+    done = subprocess.run(
+        ["bash", "--norc", "--noprofile", "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == [
+        "before A=cap_v1_a",
+        "hooked",
+        "after A=unset A2=cap_v1_a BOX=1",
+    ]
+    assert done.stderr.count("asbx: capabilities changed on the host") == 1

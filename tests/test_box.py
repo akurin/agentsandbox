@@ -13,6 +13,7 @@ import pytest
 
 from agentsandbox import cli
 from agentsandbox.box import Box, default_box_name, list_boxes, validate_name
+from agentsandbox.capabilities import token_hash
 from agentsandbox.errors import SessionError
 from agentsandbox.session import Mount
 
@@ -564,87 +565,94 @@ def _running_box_with_profile(project, tmp_path, monkeypatch, capsys, *profile_e
     return manager
 
 
-def test_cap_sync_pushes_only_the_new_guest_env_over_ssh(project, tmp_path, capsys, monkeypatch):
-    """The whole point: a secret added to the profile after the box already
-    started reaches the running guest without a restart, and nothing about
-    an already-live label gets touched or re-sent."""
+def _profile(tmp_path, *entries):
     import json
+
+    (tmp_path / "p.json").write_text(json.dumps({"version": 1, "capabilities": list(entries)}))
+
+
+def _entry(label, guest_env):
+    return {"label": label, "secret": f"keychain:{label}", "guest_env": guest_env, "injection": [{"when": {"hosts": [f"{label}.com"]}}]}
+
+
+def _fake_guest(monkeypatch, env_text):
+    """Stand in for ssh: `cat` returns `env_text`, and whatever the rewrite
+    command is fed lands in the returned dict, so a test can see exactly
+    what the guest's file became."""
     import subprocess
 
-    manager = _running_box_with_profile(
-        project,
-        tmp_path,
-        monkeypatch,
-        capsys,
-        {"label": "a", "secret": "keychain:a", "guest_env": "A", "injection": [{"when": {"hosts": ["a.com"]}}]},
-    )
-    # "a" already live, as if this box had already started once with it.
-    manager.sync_from_profile("p")
-    capsys.readouterr()
-
-    (tmp_path / "p.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "capabilities": [
-                    {
-                        "label": "a",
-                        "secret": "keychain:a",
-                        "guest_env": "A",
-                        "injection": [{"when": {"hosts": ["a.com"]}}],
-                    },
-                    {
-                        "label": "b",
-                        "secret": "keychain:b",
-                        "guest_env": "B",
-                        "injection": [{"when": {"hosts": ["b.com"]}}],
-                    },
-                ],
-            }
-        )
-    )
-
-    captured = {}
+    guest = {"file": env_text, "writes": 0}
 
     def fake_run(argv, *, input=None, **kwargs):
-        captured["argv"] = argv
-        captured["input"] = input
-        return subprocess.CompletedProcess(argv, 0)
+        assert argv[0] == "ssh" and argv[-2] == "--"
+        command = argv[-1]
+        if command.startswith("cat "):
+            return subprocess.CompletedProcess(argv, 0, stdout=guest["file"].encode())
+        assert "mktemp /run/asbx/capabilities.env." in command and 'mv -f "$t" /run/asbx/capabilities.env' in command
+        guest["file"] = input.decode()
+        guest["writes"] += 1
+        return subprocess.CompletedProcess(argv, 0, stdout=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    return guest
+
+
+def test_cap_sync_delivers_a_secret_added_after_boot(project, tmp_path, capsys, monkeypatch):
+    """The whole point: a secret added to the profile after the box already
+    started reaches the running guest without a restart, and an already-live
+    label keeps its placeholder rather than being re-minted."""
+    manager = _running_box_with_profile(project, tmp_path, monkeypatch, capsys, _entry("a", "A"))
+    [(_, token_a, _)] = manager.sync_from_profile("p")  # "a" live, as if the box booted with it
+    capsys.readouterr()
+    _profile(tmp_path, _entry("a", "A"), _entry("b", "B"))
+    guest = _fake_guest(monkeypatch, f"export BOX=1\nexport A={token_a}\n")
 
     assert cli.main(["cap", "sync", "--box", "neo"]) == 0
     out = capsys.readouterr().out
-    assert "guest env: $B" in out
-    assert "$A" not in out  # "a" was already live - sync must not touch it
+    assert ": +$B" in out
+    assert "next prompt" in out  # tells the operator how open shells pick it up
 
-    assert captured["argv"][0] == "ssh"
-    assert captured["argv"][-2:] == ["--", "tee -a /run/asbx/capabilities.env >/dev/null"]
-    assert captured["input"].startswith(b"export B=")
-    assert captured["input"].count(b"\n") == 1  # only the one new var, appended once
-    assert b"export A=" not in captured["input"]
+    [b] = [cap for cap in manager.store.list() if cap.label == "b"]
+    lines = guest["file"].splitlines()
+    assert lines[:2] == ["export BOX=1", f"export A={token_a}"]
+    assert lines[2].startswith("export B=cap_v1_")
+    assert len(manager.store.list()) == 2  # "a" was not re-minted
+    assert b.token_hash == token_hash(lines[2].partition("=")[2])
 
 
-def test_cap_sync_is_a_noop_when_nothing_is_new(project, tmp_path, capsys, monkeypatch):
-    manager = _running_box_with_profile(
-        project,
-        tmp_path,
-        monkeypatch,
-        capsys,
-        {"label": "a", "secret": "keychain:a", "guest_env": "A", "injection": [{"when": {"hosts": ["a.com"]}}]},
-    )
-    manager.sync_from_profile("p")
+def test_cap_sync_moves_a_renamed_guest_env_to_its_new_name(project, tmp_path, capsys, monkeypatch):
+    manager = _running_box_with_profile(project, tmp_path, monkeypatch, capsys, _entry("a", "A"))
+    [(_, token_a, _)] = manager.sync_from_profile("p")
     capsys.readouterr()
-
-    import subprocess
-
-    def fail_if_called(*a, **k):
-        raise AssertionError("ssh should never be invoked when there is nothing new")
-
-    monkeypatch.setattr(subprocess, "run", fail_if_called)
+    _profile(tmp_path, _entry("a", "A2"))
+    guest = _fake_guest(monkeypatch, f"export A={token_a}\n")
 
     assert cli.main(["cap", "sync", "--box", "neo"]) == 0
-    assert "nothing new" in capsys.readouterr().out
+    assert ": +$A2 -$A" in capsys.readouterr().out
+    assert guest["file"] == f"export A2={token_a}\n"
+    assert len(manager.store.list()) == 1  # renamed, not re-minted
+
+
+def test_cap_sync_writes_nothing_when_the_guest_already_matches(project, tmp_path, capsys, monkeypatch):
+    manager = _running_box_with_profile(project, tmp_path, monkeypatch, capsys, _entry("a", "A"))
+    [(_, token_a, _)] = manager.sync_from_profile("p")
+    capsys.readouterr()
+    guest = _fake_guest(monkeypatch, f"export A={token_a}\n")
+
+    assert cli.main(["cap", "sync", "--box", "neo"]) == 0
+    assert "nothing to sync" in capsys.readouterr().out
+    assert guest["writes"] == 0
+
+
+def test_cap_sync_flags_a_placeholder_the_guest_no_longer_has(project, tmp_path, capsys, monkeypatch):
+    manager = _running_box_with_profile(project, tmp_path, monkeypatch, capsys, _entry("a", "A"))
+    manager.sync_from_profile("p")
+    capsys.readouterr()
+    guest = _fake_guest(monkeypatch, "")
+
+    assert cli.main(["cap", "sync", "--box", "neo"]) == 1
+    assert "box restart neo" in capsys.readouterr().err
+    assert guest["writes"] == 0
 
 
 def test_a_crashed_supervisor_does_not_block_the_box(project, capsys):

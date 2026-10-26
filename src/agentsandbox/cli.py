@@ -868,20 +868,23 @@ def cmd_cap_revoke(args: argparse.Namespace) -> int:
 
 
 def cmd_cap_sync(args: argparse.Namespace) -> int:
-    """Mint whatever a profile has gained since this box last started, and
-    push the new placeholders into the already-running guest - no restart.
+    """Bring a running guest's capabilities.env in line with its profile -
+    no restart.
 
-    Additive on both sides: `SessionManager.sync_from_profile` only mints
-    labels that are not already live, and this only *appends* to the
-    guest's env file rather than rewriting it, so nothing an already-open
-    shell already sourced is disturbed. A capability whose scope changed
-    under an existing label, or one removed from the profile, needs
+    Minting is additive: `SessionManager.sync_from_profile` only mints
+    labels that are not already live. The env file, though, is rebuilt in
+    full from the profile (see `rebuild_guest_env`), so a renamed, added or
+    dropped `guest_env` takes effect too, and replaced in one `mv` so a
+    shell mid-`source` never sees half of it. A capability whose scope
+    changed under an existing label, or one removed from the profile, needs
     `asbx box stop`/`start` instead - this never revokes or re-mints.
     """
     import subprocess
 
     from .box import Box, SshIdentity
+    from .capabilities import exported_names, rebuild_guest_env
     from .manager import SessionManager
+    from .profiles import load_profile, resolve_profile
 
     session = _resolve_session(args.box)
     box = Box.load(session.box_name) if session.box_name else None
@@ -889,22 +892,12 @@ def cmd_cap_sync(args: argparse.Namespace) -> int:
         print("!! this box has no profile to sync from", file=sys.stderr)
         return EXIT_USAGE
 
-    issued = SessionManager(session).sync_from_profile(box.profile)
-    if not issued:
-        print("nothing new - every capability in the profile is already issued")
-        return 0
-
-    new_env: dict[str, str] = {}
+    manager = SessionManager(session)
+    issued = manager.sync_from_profile(box.profile)
     for spec, token, cap in issued:
         print(f"  cap {cap.cap_id:<18} {spec.label} ({', '.join(spec.methods)} {', '.join(spec.hosts)})")
-        if spec.guest_env:
-            new_env[spec.guest_env] = token
-            print(f"    guest env: ${spec.guest_env}")
-        else:
+        if not spec.guest_env:
             print(f'    placeholder: {token}  (add "guest_env" to the profile to inject it)')
-
-    if not new_env:
-        return 0
 
     identity = SshIdentity(box.ssh_dir)
     if not identity.exists:
@@ -918,34 +911,63 @@ def cmd_cap_sync(args: argparse.Namespace) -> int:
     proxy = f"{shlex.quote(sys.executable)} -m agentsandbox.cli vsock-proxy {shlex.quote(str(socket_path))}"
     identity.write_client_config(box.name, proxy)
 
-    # Appended, never rewritten: a concurrent reader of the file (a shell
-    # mid-`source`) sees either the old content or the old content plus
-    # this addition, never a half-written file.
-    addition = "".join(f"export {name}={value}\n" for name, value in sorted(new_env.items()))
-    try:
-        subprocess.run(
-            [
-                "ssh",
-                "-F",
-                str(identity.config),
-                f"asbx-{box.name}",
-                "--",
-                "tee -a /run/asbx/capabilities.env >/dev/null",
-            ],
-            input=addition.encode(),
+    def guest(command: str, stdin: bytes = b"") -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["ssh", "-F", str(identity.config), f"asbx-{box.name}", "--", command],
+            input=stdin,
             check=True,
             timeout=20,
             capture_output=True,
         )
+
+    env_path = "/run/asbx/capabilities.env"
+    try:
+        before = guest(f"cat {env_path}").stdout.decode(errors="replace")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        print(f"!! could not reach {box.name} over ssh to deliver the new vars: {exc}", file=sys.stderr)
-        print("   the capabilities were still issued, and are usable by their placeholder", file=sys.stderr)
+        print(f"!! could not reach {box.name} over ssh to read its env file: {exc}", file=sys.stderr)
+        if issued:
+            print("   the capabilities were still issued, and are usable by their placeholder", file=sys.stderr)
         return 1
 
-    print(f"\npushed {len(new_env)} new var(s) to {box.name}'s /run/asbx/capabilities.env")
-    print("  a new `asbx box ssh` picks them up automatically")
-    print("  an already-open shell needs: source /run/asbx/capabilities.env")
-    return 0
+    guest_envs = {
+        spec.label: spec.guest_env for spec in load_profile(resolve_profile(box.profile)) if spec.guest_env
+    }
+    after, missing = rebuild_guest_env(
+        before,
+        manager.store.list(),
+        guest_envs,
+        {spec.label: token for spec, token, _ in issued},
+    )
+    for label in missing:
+        print(
+            f"!! {label}'s placeholder is not in {box.name}'s env file and cannot be recovered"
+            f" - `asbx box restart {box.name}` to re-deliver it",
+            file=sys.stderr,
+        )
+
+    if after == before:
+        print(f"nothing to sync - {box.name}'s env file already matches the profile")
+        return 1 if missing else 0
+
+    # Written next to the target and moved over it: a shell mid-`source`
+    # sees the whole old file or the whole new one, never a mix.
+    try:
+        guest(
+            f"t=$(mktemp {env_path}.XXXXXX) && cat >\"$t\" && chmod 0600 \"$t\" && mv -f \"$t\" {env_path}",
+            after.encode(),
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(f"!! could not reach {box.name} over ssh to update its env file: {exc}", file=sys.stderr)
+        if issued:
+            print("   the capabilities were still issued, and are usable by their placeholder", file=sys.stderr)
+        return 1
+
+    old_names, new_names = exported_names(before), exported_names(after)
+    changes = [f"+${n}" for n in sorted(new_names - old_names)] + [f"-${n}" for n in sorted(old_names - new_names)]
+    print(f"\nupdated {box.name}'s {env_path}" + (f": {' '.join(changes)}" if changes else ""))
+    print("  open bash shells in the guest reload it at their next prompt; new `asbx box ssh` sessions get it too")
+    print("  anything already running there (an agent, a long-lived process) keeps its old environment until restarted")
+    return 1 if missing else 0
 
 
 # ---------------------------------------------------------------------------

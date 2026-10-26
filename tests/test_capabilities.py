@@ -15,7 +15,9 @@ from agentsandbox.capabilities import (
     InjectionSpec,
     SecretRef,
     find_placeholders,
+    exported_names,
     new_dummy_aws_credentials,
+    rebuild_guest_env,
     res_matches,
 )
 from agentsandbox.errors import CapabilityError, PolicyDenied
@@ -463,3 +465,58 @@ def test_renewal_is_measured_from_now_not_from_the_old_expiry(store):
     )
     renewed = store.renew(cap.cap_id, ttl_seconds=600)
     assert renewed.expires_at > time.time() + 550
+
+
+# -- rebuilding a guest's capabilities.env -----------------------------------
+
+
+def _issued(store, label):
+    return store.issue(CapabilitySpec(label=label, hosts=[f"{label}.com"], secret=SecretRef(service=label)))
+
+
+def test_rebuild_guest_env_renames_adds_and_keeps_everything_else(tmp_path):
+    store = CapabilityStore(tmp_path / "caps.json", "s")
+    token_a, _ = _issued(store, "a")
+    token_gone, cap_gone = _issued(store, "gone")
+    store.revoke(cap_gone.cap_id)
+    token_b, _ = _issued(store, "b")
+    before = (
+        "export AWS_ACCESS_KEY_ID=AKIADUMMY\n"
+        f"export A={token_a}\n"
+        f"export GONE={token_gone}\n"
+        "export FORGED=cap_v1_not_a_real_one\n"
+    )
+
+    after, missing = rebuild_guest_env(
+        before, store.list(), {"a": "A_RENAMED", "b": "B"}, {"b": token_b}
+    )
+
+    assert missing == []
+    assert after.splitlines() == [
+        "export AWS_ACCESS_KEY_ID=AKIADUMMY",  # not a capability: kept as is
+        "export FORGED=cap_v1_not_a_real_one",  # hashes to nothing: not ours to drop
+        f"export A_RENAMED={token_a}",  # same placeholder, new name
+        f"export B={token_b}",  # minted just now
+    ]  # GONE was revoked: dropped
+    assert exported_names(after) == {"AWS_ACCESS_KEY_ID", "FORGED", "A_RENAMED", "B"}
+
+
+def test_rebuild_guest_env_is_stable_and_reports_what_it_cannot_recover(tmp_path):
+    store = CapabilityStore(tmp_path / "caps.json", "s")
+    token_a, _ = _issued(store, "a")
+    _issued(store, "lost")
+    current = f"export A={token_a}\n"
+
+    after, missing = rebuild_guest_env(current, store.list(), {"a": "A", "lost": "LOST"}, {})
+
+    assert after == current  # nothing changed, so nothing to write
+    assert missing == ["lost"]
+
+
+def test_rebuild_guest_env_drops_a_label_that_lost_its_guest_env(tmp_path):
+    store = CapabilityStore(tmp_path / "caps.json", "s")
+    token_a, _ = _issued(store, "a")
+
+    after, _ = rebuild_guest_env(f"export BOX=1\nexport A={token_a}\n", store.list(), {}, {})
+
+    assert after == "export BOX=1\n"

@@ -211,10 +211,11 @@ def render_user_data(
             "".join(f"export {name}={value}\n" for name, value in sorted((capability_env or {}).items())),
             "0600",
         ),
-        # Sourced by interactive shells so `echo $GITHUB_TOKEN` just works.
+        # Sourced by login shells so `echo $GITHUB_TOKEN` just works, and
+        # reloaded at the next bash prompt after `asbx cap sync` rewrites it.
         _write_file(
             "/etc/profile.d/asbx-capabilities.sh",
-            '[ -r /run/asbx/capabilities.env ] && . /run/asbx/capabilities.env\n',
+            _guest_file("capabilities-profile.sh"),
             "0644",
         ),
         _write_file(
