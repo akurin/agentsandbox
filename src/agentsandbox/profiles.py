@@ -105,6 +105,7 @@ from .capabilities import (
 )
 from .config import DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TTL_SECONDS
 from .errors import CapabilityError, PolicyDenied
+from .netpolicy import BrowserImpersonation
 
 
 def profile_dirs() -> list[Path]:
@@ -172,7 +173,21 @@ def load_profile_aws_autosign(path: Path) -> AwsAutosignSpec | None:
     return _parse(path)[2]
 
 
-def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str], AwsAutosignSpec | None]:
+def load_profile_browser_impersonation(path: Path) -> BrowserImpersonation | None:
+    """The profile's ``browser_impersonation`` block, if it declared one::
+
+        "browser_impersonation": {"target": "chrome", "hosts": ["*.example.com"]}
+
+    Requests to those hosts leave the gateway with a real browser's TLS and
+    HTTP/2 fingerprint instead of mitmproxy's own, for sites whose bot
+    protection refuses anything else.
+    """
+    return _parse(path)[3]
+
+
+def _parse(
+    path: Path,
+) -> tuple[list[CapabilitySpec], dict[str, str], AwsAutosignSpec | None, BrowserImpersonation | None]:
     data = json.loads(path.read_text())
 
     if not isinstance(data, dict):
@@ -221,8 +236,9 @@ def _parse(path: Path) -> tuple[list[CapabilitySpec], dict[str, str], AwsAutosig
                 plain_env[rule.injection.username_guest_env] = rule.injection.username or ""
 
     aws_autosign = _resolve_aws_autosign(data.get("aws_autosign"), path)
+    impersonation = _resolve_browser_impersonation(data.get("browser_impersonation"), path)
 
-    return specs, plain_env, aws_autosign
+    return specs, plain_env, aws_autosign, impersonation
 
 
 def _resolve_aws_autosign(data: Any, path: Path) -> AwsAutosignSpec | None:
@@ -234,6 +250,29 @@ def _resolve_aws_autosign(data: Any, path: Path) -> AwsAutosignSpec | None:
         return AwsAutosignSpec(signing_secret=_resolve_secret_ref(data.get("signing_secret")))
     except (KeyError, TypeError, ValueError, PolicyDenied, CapabilityError) as exc:
         raise CapabilityError(f"profile {path}, 'aws_autosign': {exc}") from exc
+
+
+def _resolve_browser_impersonation(data: Any, path: Path) -> BrowserImpersonation | None:
+    if data is None:
+        return None
+    where = f"profile {path}, 'browser_impersonation'"
+    if not isinstance(data, dict):
+        raise CapabilityError(f"{where} must be a mapping")
+    target = str(data.get("target", "chrome"))
+    if not _is_impersonation_target(target):
+        raise CapabilityError(f"{where}: unknown target {target!r}")
+    hosts = _as_list(data.get("hosts", []))
+    if not hosts:
+        raise CapabilityError(f"{where} needs at least one entry in 'hosts'")
+    return BrowserImpersonation(target=target, hosts=[str(h) for h in hosts])
+
+
+def _is_impersonation_target(target: str) -> bool:
+    from curl_cffi import BrowserType
+    from curl_cffi.requests.impersonate import resolve_latest_browser_type
+
+    # "chrome" and friends are aliases for the newest version curl_cffi ships.
+    return resolve_latest_browser_type(target) in {b.value for b in BrowserType}
 
 
 def _guest_env_collision(raw_env: dict, specs: list[CapabilitySpec]) -> str | None:

@@ -41,6 +41,8 @@ from agentsandbox.netpolicy import (
     filter_dns_answers,
     resolve_and_validate,
 )
+from agentsandbox.proxy.impersonate import METADATA_KEY as IMPERSONATE_METADATA_KEY
+from agentsandbox.proxy.impersonate import ImpersonatingForwarder
 from agentsandbox.session import Session
 
 #: Request headers a capability may legitimately arrive in. Anywhere else and
@@ -452,6 +454,18 @@ class SandboxAddon:
         except PolicyDenied as denied:
             self._deny(flow, denied.reason, denied.message, dest=dest)
             return
+        impersonation = self.session.browser_impersonation
+        if (
+            impersonation is not None
+            and impersonation.applies_to(dest.host)
+            and not _is_websocket_upgrade(flow.request)
+        ):
+            # Sent by `ImpersonatingForwarder`, the next addon in line, with
+            # a real browser's fingerprint; it audits the flow itself. A
+            # WebSocket upgrade stays with mitmproxy: curl cannot hand back
+            # a duplex connection.
+            flow.metadata[IMPERSONATE_METADATA_KEY] = impersonation.target
+            return
         # Read by `responseheaders` above: only a flow that took this exact
         # path - mitmproxy fetching the real upstream response itself, never
         # a synthetic one this addon built - is safe to stream.
@@ -745,7 +759,7 @@ def _record_address(record: dns.ResourceRecord) -> str | None:
         return None
 
 
-def _load_from_environment() -> SandboxAddon:
+def _load_from_environment() -> list:
     """Entry point used when mitmdump loads this file as a script.
 
     Everything comes from the session directory, which mitmproxy is pointed at
@@ -766,10 +780,12 @@ def _load_from_environment() -> SandboxAddon:
         f"agentsandbox: session {session_id}, "
         f"{len(session.policy.allow_hosts)} allowed host pattern(s)"
     )
-    return addon
+    # Order matters: the forwarder only acts on flows SandboxAddon has
+    # already checked and marked.
+    return [addon, ImpersonatingForwarder(addon.audit)]
 
 
 if os.environ.get("ASBX_SESSION"):  # pragma: no cover - exercised by mitmdump
-    addons = [_load_from_environment()]
+    addons = _load_from_environment()
 else:
     addons = []

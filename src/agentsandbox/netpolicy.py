@@ -213,6 +213,38 @@ class Destination:
 
 
 @dataclass
+class BrowserImpersonation:
+    """Hosts whose upstream connection should look like a real browser's.
+
+    mitmproxy re-originates every request with its own TLS stack (OpenSSL)
+    and HTTP/2 implementation, so whatever client the guest runs, the
+    destination only ever sees mitmproxy's fingerprint - and bot protection
+    such as Cloudflare's refuses it outright on some sites. For hosts listed
+    here the addon performs the request itself with curl-impersonate instead,
+    which reproduces ``target``'s ClientHello and HTTP/2 framing exactly.
+
+    This only changes *how* an already-allowed request is sent; it is never
+    a grant. A host listed here still has to clear the session policy like
+    any other.
+    """
+
+    #: A curl_cffi impersonation target: ``chrome``, ``safari``, ``firefox``,
+    #: or a pinned version such as ``chrome136``.
+    target: str = "chrome"
+    hosts: list[str] = field(default_factory=list)
+
+    def applies_to(self, host: str) -> bool:
+        return any_host_matches(host, self.hosts)
+
+    def to_dict(self) -> dict:
+        return {"target": self.target, "hosts": list(self.hosts)}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> BrowserImpersonation:
+        return cls(target=data.get("target", "chrome"), hosts=list(data.get("hosts", [])))
+
+
+@dataclass
 class DestinationPolicy:
     """Session-wide egress rules, evaluated before any capability is consulted.
 

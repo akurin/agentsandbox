@@ -308,6 +308,39 @@ bundle is self-reported, an `Expiration` field (if present) is honoured the
 same way: an already-expired credential is refused with a clear reason
 rather than surfacing as an opaque AWS 403.
 
+## Sites behind bot protection
+
+mitmproxy opens its own upstream connection for every request, so a site only
+ever sees mitmproxy's TLS ClientHello and HTTP/2 framing — never the guest's.
+Cloudflare's bot protection fingerprints exactly those, and some sites answer
+anything that isn't a browser with a 403, whatever the guest itself runs. A
+profile can list such hosts under **`browser_impersonation`**:
+
+```json
+{
+  "version": 1,
+  "browser_impersonation": {
+    "target": "chrome",
+    "hosts": ["portal.example.com", "*.example.com"]
+  }
+}
+```
+
+Requests to those hosts are sent by the addon itself through
+[curl_cffi](https://github.com/lexiforest/curl_cffi), which reproduces
+`target`'s fingerprint exactly (`chrome`, `safari`, `firefox`, or a pinned
+version such as `chrome136`). The browser's own `User-Agent` and `sec-ch-ua*`
+headers replace the guest's, since a fingerprint that disagrees with its
+User-Agent is refused just the same; every other header is passed through.
+
+It changes how an allowed request is sent, never what is allowed: the
+host still has to pass the session's policy, the address is resolved and
+validated on the host and the connection pinned to it, the certificate is
+verified, and redirects go back to the guest to follow through the proxy
+like any other request. Responses are buffered rather than streamed, and
+WebSocket upgrades stay on mitmproxy's own stack. Brokered requests (those
+carrying a capability) are sent by the broker as before, unimpersonated.
+
 ## Mounts
 
 `--mount HOST:GUEST[:ro|rw]` follows Docker/Podman's own `-v`: both sides are

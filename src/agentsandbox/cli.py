@@ -433,6 +433,7 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         from .profiles import (
             load_profile,
             load_profile_aws_autosign,
+            load_profile_browser_impersonation,
             load_profile_env,
             resolve_profile,
         )
@@ -461,6 +462,11 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
             session.save()
             print("  aws_autosign  every AWS request the guest signs gets re-signed by the broker")
             print("    guest env: $AWS_ACCESS_KEY_ID, $AWS_SECRET_ACCESS_KEY (dummy - never a working credential)")
+
+        if impersonation := load_profile_browser_impersonation(profile_path):
+            session.browser_impersonation = impersonation
+            session.save()
+            print(f"  browser_impersonation  {impersonation.target} fingerprint for {', '.join(impersonation.hosts)}")
 
     vm_config = VmConfig(
         cpus=args.cpus,
@@ -1094,6 +1100,7 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
     from .profiles import (
         load_profile,
         load_profile_aws_autosign,
+        load_profile_browser_impersonation,
         load_profile_env,
         resolve_profile,
     )
@@ -1113,6 +1120,10 @@ def cmd_profile_show(args: argparse.Namespace) -> int:
         print("    guest env:    $AWS_ACCESS_KEY_ID, $AWS_SECRET_ACCESS_KEY (dummy - minted per session)")
         print(f"    secret:       {secret.backend}:{secret.service}"
               f"{':' + secret.account if secret.account else ''}")
+
+    if impersonation := load_profile_browser_impersonation(path):
+        print(f"\n  browser_impersonation: requests leave with a {impersonation.target} TLS/HTTP2 fingerprint")
+        print(f"    hosts:        {', '.join(impersonation.hosts)}")
 
     for spec in specs:
         print(f"\n  - label: {spec.label}")

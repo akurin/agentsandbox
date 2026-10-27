@@ -15,6 +15,9 @@ dependencies = [
     # with "Missing Dependency: ... requires botocore[crt]" instead of a
     # working credential.
     "botocore[crt]>=1.34",
+    # browser_impersonation: curl-impersonate's BoringSSL build, for sites
+    # whose bot protection refuses mitmproxy's own TLS/HTTP2 fingerprint.
+    "curl_cffi>=0.13",
 ]
 
 [project.optional-dependencies]

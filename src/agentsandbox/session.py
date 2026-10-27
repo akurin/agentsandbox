@@ -19,7 +19,7 @@ from typing import Any
 from .capabilities import AwsAutosignSpec
 from .config import SessionPaths, sessions_root, write_private_file
 from .errors import SessionError
-from .netpolicy import DestinationPolicy
+from .netpolicy import BrowserImpersonation, DestinationPolicy
 
 STATE_CREATED = "created"
 STATE_RUNNING = "running"
@@ -105,6 +105,10 @@ class Session:
     #: actually signs with) - neither hardcodes anything session-specific.
     aws_autosign: AwsAutosignSpec | None = None
 
+    #: Present only when the profile declared `browser_impersonation`; read
+    #: by the addon, which sends matching hosts' requests itself.
+    browser_impersonation: BrowserImpersonation | None = None
+
     @property
     def paths(self) -> SessionPaths:
         return SessionPaths(self.session_id)
@@ -116,6 +120,9 @@ class Session:
         data["policy"] = self.policy.to_dict()
         data["mounts"] = [m.to_dict() for m in self.mounts]
         data["aws_autosign"] = self.aws_autosign.to_dict() if self.aws_autosign else None
+        data["browser_impersonation"] = (
+            self.browser_impersonation.to_dict() if self.browser_impersonation else None
+        )
         return data
 
     @classmethod
@@ -125,6 +132,10 @@ class Session:
         data["mounts"] = [Mount(**m) for m in data.get("mounts", [])]
         raw_autosign = data.get("aws_autosign")
         data["aws_autosign"] = AwsAutosignSpec.from_dict(raw_autosign) if raw_autosign else None
+        raw_impersonation = data.get("browser_impersonation")
+        data["browser_impersonation"] = (
+            BrowserImpersonation.from_dict(raw_impersonation) if raw_impersonation else None
+        )
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})
 

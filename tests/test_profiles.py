@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 from agentsandbox.errors import CapabilityError
 from agentsandbox import profiles
-from agentsandbox.profiles import load_profile, load_profile_aws_autosign, resolve_profile, list_profiles
+from agentsandbox.profiles import (
+    list_profiles,
+    load_profile,
+    load_profile_aws_autosign,
+    load_profile_browser_impersonation,
+    resolve_profile,
+)
 
 @pytest.fixture
 def profile_dir(tmp_path, monkeypatch):
@@ -360,6 +366,41 @@ def test_aws_autosign_parses_the_signing_secret(profile_dir):
     assert autosign.signing_secret.account == "deploy"
     # Minted per session, never written into the profile.
     assert autosign.access_key_id == ""
+
+
+def test_browser_impersonation_parses_target_and_hosts(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1,
+        "browser_impersonation": {"target": "chrome", "hosts": ["portal.ryd.one", "*.ryd.one"]},
+    }))
+    impersonation = load_profile_browser_impersonation(resolve_profile("p"))
+    assert impersonation.target == "chrome"
+    assert impersonation.applies_to("portal.ryd.one")
+    assert impersonation.applies_to("api.ryd.one")
+    assert not impersonation.applies_to("ryd.one.evil.test")
+
+
+def test_browser_impersonation_is_absent_unless_declared(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({"version": 1}))
+    assert load_profile_browser_impersonation(resolve_profile("p")) is None
+
+
+@pytest.mark.parametrize("block", [
+    {"target": "netscape4", "hosts": ["x.com"]},
+    {"target": "chrome", "hosts": []},
+    ["x.com"],
+])
+def test_browser_impersonation_rejects_what_curl_cffi_could_not_do(profile_dir, block):
+    (profile_dir / "p.json").write_text(json.dumps({"version": 1, "browser_impersonation": block}))
+    with pytest.raises(CapabilityError):
+        load_profile_browser_impersonation(resolve_profile("p"))
+
+
+def test_browser_impersonation_accepts_a_pinned_version(profile_dir):
+    (profile_dir / "p.json").write_text(json.dumps({
+        "version": 1, "browser_impersonation": {"target": "chrome136", "hosts": ["x.com"]},
+    }))
+    assert load_profile_browser_impersonation(resolve_profile("p")).target == "chrome136"
 
 
 def test_aws_autosign_signing_secret_can_be_an_aws_cli_profile(profile_dir):

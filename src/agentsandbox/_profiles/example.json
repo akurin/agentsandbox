@@ -13,6 +13,12 @@
     "signing_secret": "aws_profile:work"
   },
 
+  "_comment_browser_impersonation": "Requests to these hosts leave the gateway with a real browser's TLS and HTTP/2 fingerprint (and its User-Agent, so the two agree) instead of mitmproxy's own - for sites behind bot protection, such as Cloudflare's, that refuse anything that doesn't look like a browser. Not a grant: the hosts still have to pass the session's policy. target is a curl_cffi name - chrome, safari, firefox, or a pinned version like chrome136.",
+  "browser_impersonation": {
+    "target": "chrome",
+    "hosts": ["*.cloudflare-protected.example"]
+  },
+
   "_comment_injection": "injection is always a list of rules. One entry, as in these three capabilities, is the ordinary case: one mechanism, unconditionally, and that rule's own 'when' is the capability's grant - there is no separate top-level 'when'. More than one rule dispatches by which one's 'when' a request actually matches, for a secret that needs different mechanisms at different destinations (see 'deploy tooling' below for a rule's other fields, and the README for a worked multi-rule example).",
 
   "capabilities": [
