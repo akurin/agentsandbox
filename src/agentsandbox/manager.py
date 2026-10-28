@@ -731,6 +731,12 @@ def _is_alive(pid: int) -> bool:
     return True
 
 
+#: How long a loopback probe waits. A sandbox refuses at once, so this only
+#: matters when an interactive firewall (LuLu, Little Snitch) holds the
+#: connection while it asks - long enough to click Allow.
+_IPC_PROBE_TIMEOUT = 15.0
+
+
 def check_ipc() -> list[str]:
     """Can this shell actually do the three things a session depends on?
 
@@ -753,7 +759,7 @@ def check_ipc() -> list[str]:
         try:
             server.bind(str(path))
             server.listen(1)
-            client.settimeout(2)
+            client.settimeout(_IPC_PROBE_TIMEOUT)
             client.connect(str(path))
         except OSError as exc:
             problems.append(
@@ -771,7 +777,7 @@ def check_ipc() -> list[str]:
     try:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
-        dialer.settimeout(2)
+        dialer.settimeout(_IPC_PROBE_TIMEOUT)
         dialer.connect(listener.getsockname())
     except OSError as exc:
         problems.append(
@@ -788,7 +794,7 @@ def check_ipc() -> list[str]:
     try:
         receiver.bind(("127.0.0.1", 0))
         sender.sendto(b"asbx-probe", receiver.getsockname())
-        receiver.settimeout(2)
+        receiver.settimeout(_IPC_PROBE_TIMEOUT)
         receiver.recvfrom(64)
     except OSError as exc:
         problems.append(
