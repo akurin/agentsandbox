@@ -14,6 +14,7 @@ exception string, it is scrubbed before it can reach a log line.
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import subprocess
 import time
@@ -30,6 +31,7 @@ import botocore.session
 from .audit import redactor
 from .capabilities import SecretRef
 from .errors import BrokerError
+from .socks import SocksEndpoint
 
 SECURITY_BIN = "/usr/bin/security"
 
@@ -270,6 +272,7 @@ class SecretResolver:
         keychain: KeychainProvider | None = None,
         providers: dict[str, SecretProvider] | None = None,
         cache_ttl: float = DEFAULT_CACHE_TTL,
+        socks_egress: SocksEndpoint | None = None,
     ) -> None:
         self.keychain = keychain or KeychainProvider()
         self.providers: dict[str, SecretProvider] = providers or {
@@ -280,6 +283,7 @@ class SecretResolver:
             "aws_profile": AwsProfileProvider(),
         }
         self.cache_ttl = cache_ttl
+        self.socks_egress = socks_egress
         self._cache: dict[tuple[str, str, str, str], tuple[str, float]] = {}
 
     def clear_cache(self) -> None:
@@ -314,7 +318,7 @@ class SecretResolver:
             raw, expires_at = cached
             if time.time() < expires_at:
                 redactor.register_secret(raw)
-                token, _ = _resolve_token(raw, provider, ref)
+                token, _ = _resolve_token(raw, provider, ref, self.socks_egress)
                 return token
             del self._cache[cache_key]
 
@@ -322,7 +326,7 @@ class SecretResolver:
         if self.cache_ttl > 0:
             self._cache[cache_key] = (raw, time.time() + self.cache_ttl)
 
-        token, _ = _resolve_token(raw, provider, ref)
+        token, _ = _resolve_token(raw, provider, ref, self.socks_egress)
         return token
 
     def fetch_fresh(self, ref: SecretRef) -> str:
@@ -341,17 +345,18 @@ class SecretResolver:
         if provider is None:
             raise BrokerError(f"unknown secret backend {ref.backend!r}")
         raw = provider.fetch(ref)
-        token, _ = _resolve_token(raw, provider, ref)
+        token, _ = _resolve_token(raw, provider, ref, self.socks_egress)
         return token
 
 
-def _resolve_token(raw: str, provider: SecretProvider, ref: SecretRef) -> tuple[str, bool]:
+def _resolve_token(raw: str, provider: SecretProvider, ref: SecretRef,
+                   socks_egress: SocksEndpoint | None = None) -> tuple[str, bool]:
     """Parse an OAuth bundle or return the raw value if it is a plain token."""
     bundle = _parse_oauth_bundle(raw)
     if bundle is None:
         redactor.register_secret(raw)
         return raw, False
-    token, refreshed = refresh_oauth_if_needed(bundle)
+    token, refreshed = refresh_oauth_if_needed(bundle, socks_egress=socks_egress)
     if refreshed and isinstance(provider, KeychainProvider):
         provider.store(ref, json.dumps(bundle))
     redactor.register_secret(token)
@@ -372,7 +377,8 @@ def _parse_oauth_bundle(raw: str) -> dict | None:
     return None
 
 
-def refresh_oauth_if_needed(bundle: dict, *, skew: float = 60.0) -> tuple[str, bool]:
+def refresh_oauth_if_needed(bundle: dict, *, skew: float = 60.0,
+                            socks_egress: SocksEndpoint | None = None) -> tuple[str, bool]:
     """Return ``(access_token, was_refreshed)``, refreshing in place if expired.
 
     Only the refresh grant is implemented, and only against the token endpoint
@@ -409,8 +415,32 @@ def refresh_oauth_if_needed(bundle: dict, *, skew: float = 60.0) -> tuple[str, b
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as resp:
-            payload = json.loads(resp.read(1_000_000).decode())
+        if socks_egress:
+            from .netpolicy import classify_host, validate_resolved
+
+            host = parsed.hostname or ""
+            if classify_host(host):
+                raise BrokerError("OAuth token host is blocked")
+            ips = socks_egress.resolve(host)
+            validate_resolved(host, ips)
+            conn = http.client.HTTPSConnection(host, parsed.port or 443, timeout=20)
+            conn._create_connection = lambda address, timeout=None, source_address=None: (
+                socks_egress.connect(str(ips[0]), parsed.port or 443, 20)
+            )
+            try:
+                target = parsed.path or "/"
+                if parsed.query:
+                    target += "?" + parsed.query
+                conn.request("POST", target, body=request.data, headers=dict(request.headers))
+                response = conn.getresponse()
+                if response.status != 200:
+                    raise BrokerError(f"OAuth refresh returned HTTP {response.status}")
+                payload = json.loads(response.read(1_000_000).decode())
+            finally:
+                conn.close()
+        else:
+            with urllib.request.urlopen(request, timeout=20) as resp:
+                payload = json.loads(resp.read(1_000_000).decode())
     except Exception as exc:  # noqa: BLE001 - surface as a broker error, no detail leak
         raise BrokerError(f"oauth refresh failed: {type(exc).__name__}") from exc
 

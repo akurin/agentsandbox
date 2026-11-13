@@ -164,6 +164,8 @@ class Session:
             "box_name": self.box_name,
             "age_s": int(time.time() - self.created_at),
             "allow_hosts": self.policy.allow_hosts,
+            "socks_egress": (self.policy.socks_egress.redacted()
+                              if self.policy.socks_egress else None),
             "mounts": [f"{m.host}:{m.guest}:{'ro' if m.read_only else 'rw'}" for m in self.mounts],
             "forwards": {port: p.get("url", "") for port, p in self.forwards.items()},
             "wireguard": f"{self.wg_listen_host}:{self.wg_listen_port}",

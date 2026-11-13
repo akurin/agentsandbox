@@ -375,6 +375,42 @@ forward` against an already-open, multiplexed connection, which needs a
 plain `ssh` invocation rather than one that execs and hands over the
 terminal.
 
+## Optional SOCKS egress
+
+Set a TCP-only SOCKS5 proxy when creating a box, or change it for the next
+start:
+
+```bash
+asbx box create neo --socks-egress socks5://203.0.113.10:1080
+asbx box set neo --socks-egress socks5://203.0.113.10:1080
+asbx box set neo --no-socks-egress
+```
+
+The endpoint may be an IP address or hostname. The host resolves a proxy
+hostname with its normal DNS before connecting to SOCKS, so that DNS resolver
+can see the host IP and proxy name. Sandbox destination names use DNS through
+SOCKS. Username and password in the URL are supported; the box and session
+records are private files, and inspection output hides the password.
+
+With SOCKS egress enabled, mitmproxy's outbound TCP connections, brokered
+requests, browser-impersonated requests, and OAuth refresh requests use the
+proxy. DNS uses DNS-over-HTTPS to `cloudflare-dns.com` at `1.1.1.1`, reached
+*through* SOCKS. Positive A/AAAA answers are cached for at most 60 seconds,
+subject to their DNS TTL, to avoid repeating proxy and TLS setup. Answers are
+still checked against the box's address policy.
+If the proxy or resolver fails, the request fails instead of using a direct
+connection. Outbound UDP and HTTP/3 are disabled in this mode; the guest's
+WireGuard UDP to the host remains local. `aws_profile` also works in this
+mode: botocore reads credentials from the host's AWS profile, including a
+session created with `aws login --profile NAME`. Host-side credential refresh
+(and any configured `credential_process`) may connect directly from the host;
+the SOCKS setting applies to sandbox traffic, not AWS login or credential
+resolution on the host.
+
+This routes the project's known outbound paths. A host-level network rule that
+prevents the sandbox processes from reaching anything except the SOCKS proxy
+is needed for a strict IP-leak guarantee against unexpected future code paths.
+
 ## Two ways to see what the proxy is doing
 
 `box audit [--follow]` is always-on and cheap: one JSON line per decision —
@@ -479,7 +515,7 @@ installs Podman fresh on every run, since it isn't part of the golden image)
   `box restart` (or `box stop && box start`). Apple's Virtualization
   framework has no device hot-plug, so this isn't a missing feature so much
   as a hard platform floor.
-- HTTP/1.1, HTTP/2 and HTTP/3-over-QUIC are intercepted through mitmproxy's
+- HTTP/1.1, HTTP/2 and (without SOCKS egress) HTTP/3-over-QUIC are intercepted through mitmproxy's
   WireGuard mode; anything else reaching the proxy layer (raw TCP, raw UDP,
   unsupported or pinned TLS) is either passed through under policy or killed
   — never silently allowed through unexamined.

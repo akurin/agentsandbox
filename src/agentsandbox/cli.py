@@ -28,6 +28,7 @@ from .errors import SandboxError
 from .keychain import KeychainProvider
 from .manager import SessionManager, check_host, stop_session_by_id
 from .session import STATE_STOPPED, Mount, Session, list_sessions, resolve_session_id
+from .socks import SocksEndpoint
 from .vm.vfkit import (
     DEFAULT_IMAGE,
     VmConfig,
@@ -90,6 +91,13 @@ def _parse_size(value: str) -> int:
         raise argparse.ArgumentTypeError(f"not a size: {value!r} (expected e.g. 40G, 20480M)")
     number, unit = match.groups()
     return int(float(number) * _SIZE_MULTIPLIERS[unit.upper()])
+
+
+def _parse_socks_egress(value: str) -> SocksEndpoint:
+    try:
+        return SocksEndpoint.parse(value)
+    except SandboxError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _format_size(num_bytes: int) -> str:
@@ -247,6 +255,7 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     # things that must be new every time: keys, CA, capabilities.
     args.allow = box.allow_hosts
     args.allow_raw_tcp_ips = box.allow_raw_tcp_ips
+    args.socks_egress = box.socks_egress
     args.mount = list(box.mounts)
     args.profile = box.profile or None
     args.cpus = box.cpus
@@ -267,7 +276,7 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     # terminal, so a pinentry fired from there has nowhere to draw itself.
     resolver = None
     if box.profile:
-        resolver, problem = _warm_secrets(box.profile)
+        resolver, problem = _warm_secrets(box.profile, box.socks_egress)
         if problem:
             print(f"!! {problem}", file=sys.stderr)
             return EXIT_DENIED
@@ -291,7 +300,7 @@ def cmd_box_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def _warm_secrets(profile_name: str):
+def _warm_secrets(profile_name: str, socks_egress: SocksEndpoint | None = None):
     """Unlock every secret a profile needs, here, where a prompt can be seen.
 
     Returns ``(resolver, error)``. The resolver comes back holding the
@@ -307,7 +316,7 @@ def _warm_secrets(profile_name: str):
     from .keychain import SecretResolver
     from .profiles import load_profile, resolve_profile
 
-    resolver = SecretResolver()
+    resolver = SecretResolver(socks_egress=socks_egress)
     seen: set[tuple[str, str, str, str]] = set()
     for spec in load_profile(resolve_profile(profile_name)):
         ref = spec.secret
@@ -407,6 +416,7 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
     manager = SessionManager.create(
         allow_hosts=args.allow,
         allow_raw_tcp_ips=getattr(args, "allow_raw_tcp_ips", None),
+        socks_egress=getattr(args, "socks_egress", None),
         mounts=args.mount or [],
         box_name=box.name if box else "",
     )
@@ -422,6 +432,8 @@ def _start_session(args: argparse.Namespace, box=None, resolver=None) -> int:
         print(f"  allowed hosts: {', '.join(session.policy.allow_hosts)}")
     if session.policy.allow_raw_tcp_ips:
         print(f"  raw TCP allowed to: {', '.join(session.policy.allow_raw_tcp_ips)} (uninspected)")
+    if session.policy.socks_egress:
+        print(f"  SOCKS egress: {session.policy.socks_egress.redacted()} (TCP only)")
     for mount in session.mounts:
         mode = "read-only" if mount.read_only else "read-write"
         print(f"  mount      {mount.host} -> guest:{mount.guest} ({mode})")
@@ -1007,7 +1019,7 @@ def cmd_secret_refresh(args: argparse.Namespace) -> int:
     if session.box_name and Box.exists(session.box_name):
         box = Box.load(session.box_name)
         if box.profile:
-            _, problem = _warm_secrets(box.profile)
+            _, problem = _warm_secrets(box.profile, session.policy.socks_egress)
             if problem:
                 print(f"!! {problem}", file=sys.stderr)
                 return EXIT_DENIED
@@ -1287,6 +1299,7 @@ def cmd_box_create(args: argparse.Namespace) -> int:
         profile=args.profile or "",
         allow_hosts=list(args.allow or ["*"]),
         allow_raw_tcp_ips=list(args.allow_raw_tcp_ips or []),
+        socks_egress=args.socks_egress,
         mounts=mounts,
         cpus=args.cpus,
         memory_mib=args.memory,
@@ -1302,6 +1315,8 @@ def cmd_box_create(args: argparse.Namespace) -> int:
         print(f"  mount    {mount.host} -> guest:{mount.guest} ({mode})")
     if box.profile:
         print(f"  profile  {box.profile}")
+    if box.socks_egress:
+        print(f"  egress   {box.socks_egress.redacted()} (TCP only)")
     print(f"  image    {box.image}")
     print(f"  disk     {box.disk_path} (built on first start)")
     print(f"\nStart it with:  asbx box start {name}")
@@ -1364,6 +1379,12 @@ def cmd_box_set(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         changes.append(f"image   {box.image} -> {args.image}")
         box.image = args.image
+    if args.socks_egress is not None:
+        box.socks_egress = args.socks_egress
+        changes.append(f"egress  {args.socks_egress.redacted()} (TCP only)")
+    elif args.no_socks_egress:
+        box.socks_egress = None
+        changes.append("egress  direct")
     if args.mount_rm or args.mount_add:
         # Incremental, not replace: a replace flag risks silently dropping
         # whatever mount the caller forgot to retype. Removals apply first,
@@ -1413,7 +1434,8 @@ def cmd_box_set(args: argparse.Namespace) -> int:
     ):
         print(
             "nothing to change: pass --memory, --cpus, --image, --disk-size, "
-            "--mount-add, --mount-rm, --allow-raw-tcp-ip-add or --allow-raw-tcp-ip-rm",
+            "--mount-add, --mount-rm, --allow-raw-tcp-ip-add, --allow-raw-tcp-ip-rm, "
+            "--socks-egress or --no-socks-egress",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -2038,6 +2060,8 @@ def build_parser() -> argparse.ArgumentParser:
         "everything else this proxy handles is HTTP-inspected, this is not)",
     )
     create.add_argument("--cpus", type=int, default=2)
+    create.add_argument("--socks-egress", type=_parse_socks_egress, metavar="socks5://HOST:PORT",
+                        help="route outbound sandbox TCP and DNS through this SOCKS5 proxy")
     create.add_argument("--memory", type=int, default=2048, help="guest RAM in MiB")
     create.add_argument(
         "--image",
@@ -2139,6 +2163,11 @@ def build_parser() -> argparse.ArgumentParser:
     set_cmd.add_argument("--memory", type=int, metavar="MIB", help="guest RAM in MiB")
     set_cmd.add_argument("--cpus", type=int)
     set_cmd.add_argument("--image", help="base image; takes effect on the next `asbx box reset`")
+    egress = set_cmd.add_mutually_exclusive_group()
+    egress.add_argument("--socks-egress", type=_parse_socks_egress,
+                        metavar="socks5://HOST:PORT", help="use TCP-only SOCKS5 egress on next start")
+    egress.add_argument("--no-socks-egress", action="store_true",
+                        help="use direct egress on next start")
     set_cmd.add_argument(
         "--disk-size",
         type=_parse_size,

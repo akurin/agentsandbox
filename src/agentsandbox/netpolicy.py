@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
 from .errors import PolicyDenied
+from .socks import SocksEndpoint
 
 #: Hostnames that must never resolve for the guest regardless of allowlists.
 #: These are the classic pivots: the host itself, container/VM host aliases,
@@ -278,6 +279,23 @@ class DestinationPolicy:
     #: over it — the broker independently requires HTTPS for any
     #: capability-bearing request regardless of this setting.
     allow_plaintext_http: bool = True
+    socks_egress: SocksEndpoint | None = None
+
+    def resolve_host(self, host: str) -> list[ipaddress._BaseAddress]:
+        if self.socks_egress is None:
+            return resolve_host(host)
+        try:
+            return self.socks_egress.resolve(host)
+        except (OSError, ValueError) as exc:
+            raise PolicyDenied("dns_resolution_failed", f"cannot resolve {host} through SOCKS") from exc
+
+    def resolve_and_validate(self, host: str) -> list[ipaddress._BaseAddress]:
+        reason = classify_host(host)
+        if reason:
+            raise PolicyDenied(reason, f"{host} is not an allowed destination")
+        ips = self.resolve_host(host)
+        validate_resolved(host, ips)
+        return ips
 
     @classmethod
     def from_dict(cls, data: dict) -> DestinationPolicy:
@@ -288,6 +306,8 @@ class DestinationPolicy:
             allow_raw_tcp_ips=list(data.get("allow_raw_tcp_ips", [])),
             allow_raw_udp=bool(data.get("allow_raw_udp", False)),
             allow_plaintext_http=bool(data.get("allow_plaintext_http", False)),
+            socks_egress=(SocksEndpoint(**data["socks_egress"])
+                          if data.get("socks_egress") else None),
         )
 
     def to_dict(self) -> dict:
@@ -298,6 +318,7 @@ class DestinationPolicy:
             "allow_raw_tcp_ips": self.allow_raw_tcp_ips,
             "allow_raw_udp": self.allow_raw_udp,
             "allow_plaintext_http": self.allow_plaintext_http,
+            "socks_egress": self.socks_egress.to_dict() if self.socks_egress else None,
         }
 
     def check(self, dest: Destination, *, resolve: bool = True) -> None:
@@ -315,7 +336,7 @@ class DestinationPolicy:
         if dest.scheme.lower() == "http" and not self.allow_plaintext_http:
             raise PolicyDenied("plaintext_http_denied", "plaintext HTTP is disabled")
         if resolve:
-            validate_resolved(host, resolve_host(host))
+            validate_resolved(host, self.resolve_host(host))
 
     def allows(self, dest: Destination, *, resolve: bool = True) -> bool:
         try:

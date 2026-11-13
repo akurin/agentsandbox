@@ -23,7 +23,7 @@ from typing import Iterable
 
 from ..config import DEFAULT_MAX_REDIRECTS, DEFAULT_UPSTREAM_TIMEOUT
 from ..errors import PolicyDenied, UpstreamError
-from ..netpolicy import Destination, DestinationPolicy, check_redirect, resolve_and_validate
+from ..netpolicy import Destination, DestinationPolicy, check_redirect
 
 #: Never forwarded in either direction - they describe *this* hop only.
 HOP_BY_HOP = frozenset(
@@ -108,7 +108,7 @@ class UpstreamExecutor:
     # -- connection ---------------------------------------------------------
 
     def _connect(self, dest: Destination) -> http.client.HTTPConnection:
-        ips = resolve_and_validate(dest.host)
+        ips = self.policy.resolve_and_validate(dest.host)
         pinned = str(ips[0])
 
         if dest.scheme == "https":
@@ -121,6 +121,8 @@ class UpstreamExecutor:
         # Pin the socket to the address we just validated. The hostname is
         # still what TLS verifies and what goes in the Host header.
         def _create_connection(address, timeout=None, source_address=None):  # noqa: ANN001
+            if self.policy.socks_egress:
+                return self.policy.socks_egress.connect(pinned, dest.port, self.timeout)
             return socket.create_connection((pinned, dest.port), timeout=self.timeout)
 
         conn._create_connection = _create_connection  # type: ignore[attr-defined]

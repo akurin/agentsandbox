@@ -6,6 +6,8 @@ through the same objects it will see in production.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from mitmproxy.net.dns import response_codes
 from mitmproxy.test import tflow, tutils
@@ -487,14 +489,14 @@ def test_brokered_denials_reach_the_client_as_the_brokers_answer(session):
 def test_dns_for_a_blocked_name_is_refused(addon):
     flow = tflow.tdnsflow()
     flow.request.questions[0].name = "printer.local"
-    addon.dns_request(flow)
+    asyncio.run(addon.dns_request(flow))
     assert flow.response.response_code == response_codes.REFUSED
 
 
 def test_dns_for_an_allowed_name_is_left_to_resolve(addon):
     flow = tflow.tdnsflow()
     flow.request.questions[0].name = "api.github.com"
-    addon.dns_request(flow)
+    asyncio.run(addon.dns_request(flow))
     assert flow.response is None
 
 
@@ -640,7 +642,7 @@ def test_names_are_still_filtered_on_the_resolver_we_exempted(addon):
     """The exemption is about reachability, not about which names resolve."""
     flow = tflow.tdnsflow()
     flow.request.questions[0].name = "evil.test"
-    addon.dns_request(flow)
+    asyncio.run(addon.dns_request(flow))
     assert flow.response.response_code == response_codes.REFUSED
 
 

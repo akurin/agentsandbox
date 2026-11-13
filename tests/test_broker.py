@@ -1469,6 +1469,30 @@ def test_aws_profile_provider_passes_the_profile_name_through():
     assert seen == ["work"]
 
 
+def test_aws_profile_can_refresh_with_socks_egress_enabled():
+    from agentsandbox.keychain import AwsProfileProvider
+    from agentsandbox.socks import SocksEndpoint
+
+    seen = []
+
+    def factory(profile):
+        seen.append(profile)
+        frozen = _FakeFrozenCredentials(f"AKID{len(seen)}", "secret", "token")
+        return _FakeAwsSession(_FakeAwsCredentials(frozen))
+
+    resolver = SecretResolver(
+        providers={"aws_profile": AwsProfileProvider(session_factory=factory)},
+        socks_egress=SocksEndpoint("127.0.0.1", 1080),
+    )
+    ref = SecretRef(backend="aws_profile", service="sandbox")
+    first = json.loads(resolver.fetch(ref))
+    second = json.loads(resolver.fetch_fresh(ref))
+
+    assert first["access_key_id"] == "AKID1"
+    assert second["access_key_id"] == "AKID2"
+    assert seen == ["sandbox", "sandbox"]
+
+
 def test_aws_profile_provider_requires_a_profile_name():
     from agentsandbox.keychain import AwsProfileProvider
 

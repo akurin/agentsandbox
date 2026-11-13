@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import asyncio
 import ipaddress
 import logging
 import os
@@ -39,11 +40,11 @@ from agentsandbox.netpolicy import (
     DestinationPolicy,
     classify_ip,
     filter_dns_answers,
-    resolve_and_validate,
 )
 from agentsandbox.proxy.impersonate import METADATA_KEY as IMPERSONATE_METADATA_KEY
 from agentsandbox.proxy.impersonate import ImpersonatingForwarder
 from agentsandbox.session import Session
+from agentsandbox.socks import install_mitm_transport
 
 #: Request headers a capability may legitimately arrive in. Anywhere else and
 #: the placeholder is treated as a leak (URLs and bodies get logged upstream).
@@ -120,6 +121,14 @@ class SandboxAddon:
                 logging.error(f"agentsandbox: refusing to run - {problem}")
             self.audit.emit("proxy.refused_to_start", problems=problems)
             ctx.master.shutdown()
+            return
+        if self.policy.socks_egress:
+            try:
+                install_mitm_transport(self.policy.socks_egress, self.policy)
+            except RuntimeError as exc:
+                logging.error(f"agentsandbox: refusing SOCKS egress: {exc}")
+                self.audit.emit("proxy.refused_to_start", problems=[str(exc)])
+                ctx.master.shutdown()
 
     # -- HTTP ---------------------------------------------------------------
 
@@ -308,7 +317,7 @@ class SandboxAddon:
             # for it is applied in `dns_request` below. Killing it here would
             # break every name lookup in the guest.
             return
-        if not self.policy.allow_raw_udp:
+        if self.policy.socks_egress or not self.policy.allow_raw_udp:
             self.audit.emit(
                 "net.raw_udp_blocked",
                 dst=_address(flow.server_conn.address),
@@ -318,7 +327,7 @@ class SandboxAddon:
 
     # -- DNS ----------------------------------------------------------------
 
-    def dns_request(self, flow: dns.DNSFlow) -> None:
+    async def dns_request(self, flow: dns.DNSFlow) -> None:
         """Refuse names the guest is not allowed to reach.
 
         Resolution itself happens on the host (mitmproxy's DNS mode), which is
@@ -327,6 +336,8 @@ class SandboxAddon:
         """
         question = flow.request.question
         if question is None:
+            if self.policy.socks_egress:
+                flow.response = flow.request.fail(response_codes.REFUSED)
             return
         name = question.name.rstrip(".").lower()
         try:
@@ -334,6 +345,15 @@ class SandboxAddon:
         except PolicyDenied as denied:
             self.audit.emit("dns.refused", name=name, reason=denied.reason)
             flow.response = flow.request.fail(response_codes.REFUSED)
+            return
+        if self.policy.socks_egress:
+            try:
+                flow.response = await asyncio.to_thread(
+                    self.policy.socks_egress.dns_query, flow.request.packed
+                )
+            except (OSError, ValueError) as exc:
+                self.audit.emit("dns.upstream_failed", name=name, error=type(exc).__name__)
+                flow.response = flow.request.fail(response_codes.SERVFAIL)
 
     def dns_response(self, flow: dns.DNSFlow) -> None:
         """Strip answers pointing into blocked address space.
@@ -376,12 +396,16 @@ class SandboxAddon:
             # network we otherwise refuse, but it *is* the proxy's own DNS
             # responder rather than somewhere the guest can reach.
             return
+        if self.policy.socks_egress and data.server.transport_protocol == "udp":
+            data.server.error = "outbound UDP is disabled with TCP-only SOCKS egress"
+            self.audit.emit("net.connect_blocked", dst=_address(address), reason="udp_egress_disabled")
+            return
         host, port = address[0], address[1]
         try:
             ip = ipaddress.ip_address(host)
         except ValueError:
             try:
-                resolve_and_validate(host)
+                self.policy.resolve_and_validate(host)
             except PolicyDenied as denied:
                 data.server.error = f"blocked by sandbox policy: {denied.reason}"
                 self.audit.emit("net.connect_blocked", dst=f"{host}:{port}", reason=denied.reason)
@@ -782,7 +806,9 @@ def _load_from_environment() -> list:
     )
     # Order matters: the forwarder only acts on flows SandboxAddon has
     # already checked and marked.
-    return [addon, ImpersonatingForwarder(addon.audit)]
+    if session.policy.socks_egress and session.policy.socks_egress.password:
+        redactor.register_secret(session.policy.socks_egress.password)
+    return [addon, ImpersonatingForwarder(addon.audit, policy=session.policy)]
 
 
 if os.environ.get("ASBX_SESSION"):  # pragma: no cover - exercised by mitmdump

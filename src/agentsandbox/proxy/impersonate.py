@@ -34,7 +34,7 @@ from agentsandbox.audit import AuditLog, redactor
 from agentsandbox.broker.upstream import HOP_BY_HOP
 from agentsandbox.config import DEFAULT_UPSTREAM_TIMEOUT
 from agentsandbox.errors import PolicyDenied
-from agentsandbox.netpolicy import Destination, resolve_and_validate
+from agentsandbox.netpolicy import Destination, DestinationPolicy
 
 #: Set by the addon on a flow that passed policy and should go out this way;
 #: the value is the curl_cffi impersonation target.
@@ -88,9 +88,11 @@ class ImpersonatingForwarder:
     flow, not every other connection mitmproxy is serving.
     """
 
-    def __init__(self, audit: AuditLog, timeout: float = DEFAULT_UPSTREAM_TIMEOUT) -> None:
+    def __init__(self, audit: AuditLog, timeout: float = DEFAULT_UPSTREAM_TIMEOUT,
+                 policy: DestinationPolicy | None = None) -> None:
         self.audit = audit
         self.timeout = timeout
+        self.policy = policy or DestinationPolicy()
 
     async def request(self, flow: http.HTTPFlow) -> None:
         target = flow.metadata.get(METADATA_KEY)
@@ -99,7 +101,7 @@ class ImpersonatingForwarder:
         req = flow.request
         dest = Destination(req.scheme.lower(), req.pretty_host.lower(), req.port)
         try:
-            ips = await asyncio.to_thread(resolve_and_validate, dest.host)
+            ips = await asyncio.to_thread(self.policy.resolve_and_validate, dest.host)
         except PolicyDenied as denied:
             self._fail(flow, dest, 403, denied.reason, denied.message)
             return
@@ -133,6 +135,7 @@ class ImpersonatingForwarder:
                 allow_redirects=False,
                 timeout=self.timeout,
                 discard_cookies=True,
+                proxy=self.policy.socks_egress.url() if self.policy.socks_egress else None,
             )
         body = redactor.scrub_body(upstream.content)
         made = http.Response.make(upstream.status_code, body, response_headers(upstream.headers.multi_items()))

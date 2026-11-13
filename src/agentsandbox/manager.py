@@ -42,6 +42,7 @@ from .session import (
     new_session_id,
     purge_session_dir,
 )
+from .socks import SocksEndpoint
 from .forward import PortForwarder, TcpDialer, UnixDialer
 from .vm import vsock_port_for
 from .vm.gateway import GatewayConfig
@@ -113,6 +114,7 @@ class SessionManager:
         *,
         allow_hosts: list[str] | None = None,
         allow_raw_tcp_ips: list[str] | None = None,
+        socks_egress: SocksEndpoint | None = None,
         mounts: list[Mount] | None = None,
         wg_listen_host: str = "127.0.0.1",
         wg_listen_port: int | None = None,
@@ -136,6 +138,7 @@ class SessionManager:
             policy=DestinationPolicy(
                 allow_hosts=list(allow_hosts or ["*"]),
                 allow_raw_tcp_ips=list(allow_raw_tcp_ips or []),
+                socks_egress=socks_egress,
             ),
             mounts=list(mounts or []),
             wg_listen_host=wg_listen_host,
@@ -168,6 +171,7 @@ class SessionManager:
             box_name=box_name,
             allow_hosts=session.policy.allow_hosts,
             allow_raw_tcp_ips=session.policy.allow_raw_tcp_ips,
+            socks_egress=socks_egress.redacted() if socks_egress else None,
             mounts=[m.guest for m in session.mounts],
             wg_port=session.wg_listen_port,
         )
@@ -184,7 +188,7 @@ class SessionManager:
             self.session.session_id,
             self.store,
             self.session.policy,
-            resolver or SecretResolver(),
+            resolver or SecretResolver(socks_egress=self.session.policy.socks_egress),
             audit=self.audit,
             executor=UpstreamExecutor(self.session.policy),
             aws_autosign=self.session.aws_autosign,
@@ -272,7 +276,7 @@ class SessionManager:
     def start_broker(self, resolver: SecretResolver | None = None) -> BrokerServer:
         from .broker.server import read_token
 
-        self.broker_resolver = resolver or SecretResolver()
+        self.broker_resolver = resolver or SecretResolver(socks_egress=self.session.policy.socks_egress)
         core = self.build_broker(self.broker_resolver)
         server = BrokerServer(
             core,

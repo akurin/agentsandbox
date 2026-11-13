@@ -25,6 +25,7 @@ from pathlib import Path
 from .config import ensure_private_dir, home, write_private_file
 from .errors import SessionError
 from .session import Mount
+from .socks import SocksEndpoint
 from .vm.vfkit import DEFAULT_IMAGE
 
 #: Names are used as filenames and ssh Host aliases, so keep them boring.
@@ -63,6 +64,7 @@ class Box:
     #: `DestinationPolicy.allow_raw_tcp_ips`'s own docstring for why this is
     #: address-pinned rather than a host pattern like `allow_hosts`.
     allow_raw_tcp_ips: list[str] = field(default_factory=list)
+    socks_egress: SocksEndpoint | None = None
     #: Host directories exposed to the guest. No mount is privileged over
     #: another - see `agentsandbox.session.Mount`.
     mounts: list[Mount] = field(default_factory=list)
@@ -100,12 +102,15 @@ class Box:
     def to_dict(self) -> dict:
         data = asdict(self)
         data["mounts"] = [m.to_dict() for m in self.mounts]
+        data["socks_egress"] = self.socks_egress.to_dict() if self.socks_egress else None
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> Box:
         data = dict(data)
         data["mounts"] = [Mount(**m) for m in data.get("mounts", [])]
+        data["socks_egress"] = (SocksEndpoint(**data["socks_egress"])
+                                if data.get("socks_egress") else None)
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})
 
@@ -158,6 +163,7 @@ class Box:
             "profile": self.profile,
             "allow_hosts": self.allow_hosts,
             "allow_raw_tcp_ips": self.allow_raw_tcp_ips,
+            "socks_egress": self.socks_egress.redacted() if self.socks_egress else None,
             "mounts": [f"{m.host}:{m.guest}:{'ro' if m.read_only else 'rw'}" for m in self.mounts],
             "cpus": self.cpus,
             "memory_mib": self.memory_mib,

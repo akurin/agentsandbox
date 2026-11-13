@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Ephemeral agent sandbox with WireGuard interception and secrets brokering"
 requires-python = ">=3.11"
 dependencies = [
-    "mitmproxy>=12.0",
+    "mitmproxy>=12.0,<13.0",
     # [crt] pulls in awscrt: aws_profile's SSO/IAM-Identity-Center login flow
     # needs it for the OIDC device-code exchange, and botocore's base install
     # doesn't bundle it - without it, resolving a modern SSO profile fails

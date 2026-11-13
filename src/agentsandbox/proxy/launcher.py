@@ -98,7 +98,7 @@ def build_argv(session: Session, addon_path: Path = ADDON_PATH, *, web: bool = F
         "--set",
         "http2=true",
         "--set",
-        "http3=true",
+        f"http3={'false' if session.policy.socks_egress else 'true'}",
         "--set",
         "websocket=true",
         # -- upstream TLS is verified properly ------------------------------
